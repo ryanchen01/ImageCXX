@@ -1,0 +1,3 @@
+- Create helper functions only when it is used multiple times.
+- Use existing types and function when possible before creating new ones.
+- Keep the UI simple, no need to add unnecessary subtitles.

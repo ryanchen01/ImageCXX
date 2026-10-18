@@ -1,0 +1,14 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "imagecxx",
+  "version-string": "0.2.0",
+  "description": "Qt scientific image viewing and analysis application",
+  "builtin-baseline": "bf19794383e8fb95eba5aa553235bc8ec2271688",
+  "dependencies": [
+    { "name": "itk", "default-features": false },
+    { "name": "dcmtk", "default-features": false, "features": ["zlib"] },
+    "tiff",
+    "gtest",
+    "benchmark"
+  ]
+}

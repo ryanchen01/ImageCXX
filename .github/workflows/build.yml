@@ -1,0 +1,101 @@
+name: Build and test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            triplet: x64-linux
+            qt-arch: linux_gcc_64
+          - os: windows-2022
+            triplet: x64-windows
+            qt-arch: win64_msvc2022_64
+          - os: macos-14
+            triplet: arm64-osx
+            qt-arch: clang_64
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}/build/vcpkg
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/build/vcpkg-cache
+      VCPKG_MAX_CONCURRENCY: 2
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        with:
+          arch: x64
+
+      - name: Install official Qt binaries
+        uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125 # v4.4.1
+        with:
+          version: '6.12.0'
+          arch: ${{ matrix.qt-arch }}
+          modules: 'qtshadertools qtgraphs qtimageformats qtsvg qtquick3d'
+          cache: true
+
+      - name: Check out pinned vcpkg
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: microsoft/vcpkg
+          ref: bf19794383e8fb95eba5aa553235bc8ec2271688
+          path: build/vcpkg
+
+      - name: Prepare binary cache
+        shell: bash
+        run: mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
+
+      - name: Restore scientific dependency cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: build/vcpkg-cache
+          key: vcpkg-${{ runner.os }}-${{ matrix.triplet }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-${{ runner.os }}-${{ matrix.triplet }}-
+
+      - name: Bootstrap vcpkg on Unix
+        if: runner.os != 'Windows'
+        shell: bash
+        run: '"$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics'
+
+      - name: Bootstrap vcpkg on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '& "$env:VCPKG_ROOT/bootstrap-vcpkg.bat" -disableMetrics'
+
+      - name: Configure
+        run: cmake --preset release-vcpkg -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DIMAGECXX_BUILD_BENCHMARKS=ON
+
+      - name: Build
+        run: cmake --build --preset release-vcpkg
+
+      - name: Add dependency runtime libraries on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "$GITHUB_WORKSPACE/build/release-vcpkg/vcpkg_installed/${{ matrix.triplet }}/bin" >> "$GITHUB_PATH"
+
+      - name: Run tests
+        run: ctest --preset release-vcpkg --timeout 120
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-logs-${{ matrix.os }}
+          path: build/release-vcpkg/Testing/Temporary/
+          if-no-files-found: ignore

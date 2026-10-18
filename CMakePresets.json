@@ -1,0 +1,73 @@
+{
+  "version": 5,
+  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "$env{QT_ROOT_DIR};$env{QTDIR};$env{CMAKE_PREFIX_PATH}",
+        "BUILD_TESTING": "ON",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "dev",
+      "displayName": "Debug with installed dependencies",
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "release",
+      "displayName": "Release with installed dependencies",
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "sanitizers",
+      "displayName": "Debug with address and undefined behavior sanitizers",
+      "inherits": "dev",
+      "cacheVariables": { "IMAGECXX_SANITIZERS": "ON" }
+    },
+    {
+      "name": "vcpkg",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+      }
+    },
+    {
+      "name": "dev-vcpkg",
+      "displayName": "Debug with pinned vcpkg dependencies",
+      "inherits": ["dev", "vcpkg"]
+    },
+    {
+      "name": "release-vcpkg",
+      "displayName": "Release with pinned vcpkg dependencies",
+      "inherits": ["release", "vcpkg"]
+    },
+    {
+      "name": "sanitizers-vcpkg",
+      "displayName": "Sanitizers with pinned vcpkg dependencies",
+      "inherits": ["sanitizers", "vcpkg"]
+    }
+  ],
+  "buildPresets": [
+    { "name": "dev", "configurePreset": "dev" },
+    { "name": "release", "configurePreset": "release" },
+    { "name": "sanitizers", "configurePreset": "sanitizers" },
+    { "name": "dev-vcpkg", "configurePreset": "dev-vcpkg" },
+    { "name": "release-vcpkg", "configurePreset": "release-vcpkg" },
+    { "name": "sanitizers-vcpkg", "configurePreset": "sanitizers-vcpkg" }
+  ],
+  "testPresets": [
+    { "name": "dev", "configurePreset": "dev", "output": { "outputOnFailure": true } },
+    { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true } },
+    { "name": "sanitizers", "configurePreset": "sanitizers", "output": { "outputOnFailure": true } },
+    { "name": "dev-vcpkg", "configurePreset": "dev-vcpkg", "output": { "outputOnFailure": true } },
+    { "name": "release-vcpkg", "configurePreset": "release-vcpkg", "output": { "outputOnFailure": true } },
+    { "name": "sanitizers-vcpkg", "configurePreset": "sanitizers-vcpkg", "output": { "outputOnFailure": true } }
+  ]
+}
