@@ -273,6 +273,9 @@ void writeScientific(const Image &input, const QString &path, std::stop_token st
             QTemporaryFile payload(QDir(parent).filePath(QFileInfo(path).completeBaseName() + ".imagecxx-XXXXXX." + QFileInfo(payloadName).completeSuffix()));
             if (!payload.open())
                 throw std::runtime_error(QString("Cannot create scientific image payload '%1': %2").arg(payload.fileTemplate(), payload.errorString()).toStdString());
+            const auto payloadPath = payload.fileName();
+            if (payloadPath.isEmpty())
+                throw std::runtime_error(QString("Cannot name scientific image payload '%1': %2").arg(payload.fileTemplate(), payload.errorString()).toStdString());
             // QTemporaryFile keeps its native handle even after close(). Replacing
             // that file with QSaveFile fails on Windows, so fill the unique payload
             // directly and publish only its header once all bytes are flushed.
@@ -286,13 +289,13 @@ void writeScientific(const Image &input, const QString &path, std::stop_token st
                 if (count < 0)
                     throw std::runtime_error(QString("Cannot read scientific image payload '%1': %2").arg(source.fileName(), source.errorString()).toStdString());
                 if (payload.write(buffer.constData(), count) != count)
-                    throw std::runtime_error(QString("Cannot write scientific image payload '%1': %2").arg(payload.fileName(), payload.errorString()).toStdString());
+                    throw std::runtime_error(QString("Cannot write scientific image payload '%1': %2").arg(payloadPath, payload.errorString()).toStdString());
             }
             detail::checkIo(stop, {}, 0);
             if (!payload.flush())
-                throw std::runtime_error(QString("Cannot flush scientific image payload '%1': %2").arg(payload.fileName(), payload.errorString()).toStdString());
+                throw std::runtime_error(QString("Cannot flush scientific image payload '%1': %2").arg(payloadPath, payload.errorString()).toStdString());
             payload.close();
-            text.replace(match.capturedStart(1), match.capturedLength(1), QFileInfo(payload.fileName()).fileName());
+            text.replace(match.capturedStart(1), match.capturedLength(1), QFileInfo(payloadPath).fileName());
             QSaveFile destination(path);
             const auto bytes = text.toUtf8();
             if (!destination.open(QIODevice::WriteOnly) || destination.write(bytes) != bytes.size())
