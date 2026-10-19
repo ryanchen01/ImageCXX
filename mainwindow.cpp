@@ -65,6 +65,16 @@
 using namespace imagecxx;
 
 namespace {
+Image cropToBounds(const Image &image, const QRectF &bounds)
+{
+    const auto clipped = bounds.normalized().toAlignedRect().intersected(QRect(0, 0, int(image.width()), int(image.height())));
+    if (clipped.isEmpty()) return {};
+    std::vector<std::size_t> start(image.shape().size(), 0), extent = image.shape();
+    start[0] = std::size_t(clipped.x()); start[1] = std::size_t(clipped.y());
+    extent[0] = std::size_t(clipped.width()); extent[1] = std::size_t(clipped.height());
+    return image.region(start, extent);
+}
+
 QImage displayRaster(const Image &image, double minimum, double maximum)
 {
     QImage raster(int(image.width()), int(image.height()), QImage::Format_RGBA8888);
@@ -255,7 +265,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         if (paths.isEmpty()) return;
         auto output = std::make_shared<Image>();
         jobs_.submit(tr("Reading DICOM series"), [paths, output](auto stop, auto progress) { *output = readDicomSeries(paths, stop, progress); },
-            [this, output](auto error) { if (error) { try { std::rethrow_exception(error); } catch (const std::exception &e) { showError(e.what()); } } else addDocument(*output); });
+            [this, output](auto error) { if (!showJobError(error)) addDocument(*output); });
     }});
     commands_.add({"file.save", tr("Save image as..."), "File", QKeySequence::Save, true, {}, [this](const QVariantMap &) {
         auto *document = activeDocument(); if (!document) return;
@@ -265,7 +275,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         const auto revision = document->revision;
         jobs_.submit(tr("Saving image"), [image, path](auto stop, auto progress) { writeImage(image, path, stop, progress); },
             [this, target, revision, path](auto error) {
-                if (error) { try { std::rethrow_exception(error); } catch (const std::exception &e) { showError(e.what()); } return; }
+                if (showJobError(error)) return;
                 if (target && target->revision == revision) {
                     target->modified = false; target->image.metadata().sourcePath = QFileInfo(path).absoluteFilePath();
                     target->image.metadata().name = QFileInfo(path).fileName(); updatePanels();
@@ -309,11 +319,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         if (scope == "ROI bounds") {
             const auto roi = selectedRoi();
             if (!roi || roi->type == RoiType::Line) { showError(tr("Select an area ROI first.")); return; }
-            const auto bounds = roi->bounds().normalized().toAlignedRect().intersected(QRect(0, 0, int(input.width()), int(input.height())));
-            if (bounds.isEmpty()) { showError(tr("The ROI is outside this image.")); return; }
-            const std::array<std::size_t, 2> start{std::size_t(bounds.x()), std::size_t(bounds.y())};
-            const std::array<std::size_t, 2> extent{std::size_t(bounds.width()), std::size_t(bounds.height())};
-            input = input.region(start, extent);
+            input = cropToBounds(input, roi->bounds());
+            if (input.empty()) { showError(tr("The ROI is outside this image.")); return; }
         }
         auto options = processingOptions(id, parameters);
         if (options.outputSpacing.size() > 2 && input.depth() == 1) options.outputSpacing.resize(2);
@@ -325,7 +332,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         auto output = std::make_shared<Image>();
         jobs_.submit(label, [input, options, output](auto stop, auto progress) { *output = process(input, options, stop, progress); },
             [this, target, revision, scope, newDocument, label, output](auto error) {
-                if (error) { try { std::rethrow_exception(error); } catch (const std::exception &e) { showError(e.what()); } return; }
+                if (showJobError(error)) return;
                 if (!target || target->revision != revision || scope != "Full image" || newDocument) {
                     output->metadata().name += " · " + label; output->metadata().sourcePath.clear();
                     auto *doc = addDocument(*output); doc->modified = true;
@@ -344,7 +351,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         auto output = std::make_shared<Measurement>();
         jobs_.submit(tr("Measuring"), [slice, roi, output](auto, auto) { *output = measure(slice, roi); },
             [this, output, location](auto error) {
-                if (error) { try { std::rethrow_exception(error); } catch (const std::exception &e) { showError(e.what()); } return; }
+                if (showJobError(error)) return;
                 const auto &m = *output;
                 QList<QStandardItem *> row;
                 const QList<QVariant> values{m.imageName, location, QVariant::fromValue<qulonglong>(m.count), m.area, m.mean,
@@ -364,7 +371,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         const auto z = doc->viewer->slice(), c = doc->viewer->channel(), t = doc->viewer->time();
         jobs_.submit(tr("Creating mask"), [slice, roi, output](auto, auto) { *output = createMask(slice, *roi); },
             [this, target, revision, z, c, t, output](auto error) {
-                if (error) { try { std::rethrow_exception(error); } catch (const std::exception &e) { showError(e.what()); } return; }
+                if (showJobError(error)) return;
                 if (target && target->revision == revision && target->viewer->slice() == z
                     && target->viewer->channel() == c && target->viewer->time() == t) target->viewer->setMask(output->pixels);
                 output->pixels.metadata().name = output->name; output->pixels.metadata().sourcePath.clear();
@@ -391,7 +398,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     }});
     commands_.add({"process.batch", tr("Batch process files..."), "Process", {}, false, {}, [this](const QVariantMap &) {
         QStringList labels, ids;
-        for (const auto &command : commands_.commands()) if (command.id.startsWith("process.") && command.id != "process.batch") { labels << command.label; ids << command.id; }
+        CommandRegistry processing;
+        registerProcessingCommands(processing, [](const QString &, const QVariantMap &) {});
+        for (const auto &command : processing.commands()) { labels << command.label; ids << command.id; }
         bool ok; const auto label = QInputDialog::getItem(this, tr("Batch processing"), tr("Operation"), labels, 0, false, &ok);
         if (!ok) return;
         const auto id = ids[labels.indexOf(label)]; const auto &command = commands_.command(id);
@@ -401,7 +410,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         auto output = std::make_shared<BatchResult>();
         jobs_.submit(tr("Batch processing"), [inputs, directory, id, parameters, output](auto stop, auto progress) { *output = runBatch(inputs, directory, id, *parameters, stop, progress); },
             [this, output](auto error) {
-                if (error) { try { std::rethrow_exception(error); } catch (const std::exception &e) { showError(e.what()); } return; }
+                if (showJobError(error)) return;
                 if (!output->errors.isEmpty()) showError(tr("Saved %1 outputs.\n\n%2").arg(output->outputs.size()).arg(output->errors.join('\n')));
                 else statusBar()->showMessage(tr("Batch complete: %1 files saved.").arg(output->outputs.size()), 10000);
             });
@@ -413,11 +422,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             const auto *doc = activeDocument(); if (!doc) return;
             auto image = doc->image.slice(doc->viewer->slice(), doc->viewer->channel(), doc->viewer->time());
             if (const auto roi = selectedRoi()) {
-                const auto bounds = roi->bounds().toAlignedRect().intersected(QRect(0, 0, int(image.width()), int(image.height())));
-                if (bounds.isEmpty()) return;
-                const std::array<std::size_t, 2> start{std::size_t(bounds.x()), std::size_t(bounds.y())};
-                const std::array<std::size_t, 2> extent{std::size_t(bounds.width()), std::size_t(bounds.height())};
-                image = image.region(start, extent);
+                image = cropToBounds(image, roi->bounds());
+                if (image.empty()) return;
             }
             clipboard_ = image.clone();
             if (QApplication::keyboardModifiers().testFlag(Qt::AltModifier)) {
@@ -492,7 +498,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         const QPointer<DocumentWidget> target = doc; auto output = std::make_shared<Image>();
         jobs_.submit(tr("Reverting"), [path, output](auto stop, auto progress) { *output = readImage(path, {}, stop, progress); },
             [this, target, revision, output](auto error) {
-                if (error) { try { std::rethrow_exception(error); } catch (const std::exception &e) { showError(e.what()); } return; }
+                if (showJobError(error)) return;
                 if (target && target->revision == revision) {
                     target->replaceImage(*output, tr("Revert")); target->modified = false; updatePanels();
                 }
@@ -555,7 +561,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                     progress(double(y + 1) / input.height());
                 }
             }, [this, target, revision, output, operation](auto error) {
-                if (error) { try { std::rethrow_exception(error); } catch (const std::exception &e) { showError(e.what()); } return; }
+                if (showJobError(error)) return;
                 if (target && target->revision == revision) target->replaceImage(*output, operation);
                 else { output->metadata().sourcePath.clear(); addDocument(*output)->modified = true; }
                 updatePanels();
@@ -577,11 +583,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             auto *doc = activeDocument(); if (!doc) return;
             Image output = doc->image;
             if (const auto roi = selectedRoi()) {
-                const auto bounds = roi->bounds().toAlignedRect().intersected(QRect(0, 0, int(output.width()), int(output.height())));
-                if (roi->type == RoiType::Line || bounds.isEmpty()) { showError(tr("Select an area ROI first.")); return; }
-                const std::array<std::size_t, 2> start{std::size_t(bounds.x()), std::size_t(bounds.y())};
-                const std::array<std::size_t, 2> extent{std::size_t(bounds.width()), std::size_t(bounds.height())};
-                output = output.region(start, extent);
+                if (roi->type == RoiType::Line) { showError(tr("Select an area ROI first.")); return; }
+                output = cropToBounds(output, roi->bounds());
+                if (output.empty()) { showError(tr("Select an area ROI first.")); return; }
             } else if (crop) { showError(tr("Select an area ROI first.")); return; }
             output = output.clone(); output.metadata().sourcePath.clear();
             if (crop) { doc->setSelection({}); doc->rois.clear(); doc->replaceImage(std::move(output), tr("Crop")); }
@@ -686,7 +690,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     auto *quit = menus["File"]->addAction(tr("Quit")); quit->setShortcut(QKeySequence::Quit); quit->setShortcutContext(Qt::ApplicationShortcut);
     connect(quit, &QAction::triggered, this, &QWidget::close);
     auto *search = menus["Edit"]->addAction(QIcon(":/icons/search.svg"), tr("Find command...")); search->setObjectName("commands.find"); search->setShortcuts({QKeySequence("L"), QKeySequence("Ctrl+L")});
-    for (const auto &key : search->shortcuts()) shortcutActions_.insert(key, search); search->setShortcutContext(Qt::ApplicationShortcut);
+    for (const auto &key : search->shortcuts()) shortcutActions_.insert(key, search);
+    search->setShortcutContext(Qt::ApplicationShortcut);
     connect(search, &QAction::triggered, this, [this] {
         QDialog dialog(this); dialog.setWindowTitle(tr("Find command")); dialog.resize(520, 480);
         auto *layout = new QVBoxLayout(&dialog); auto *query = new QLineEdit(&dialog); query->setPlaceholderText(tr("Type a command name..."));
@@ -744,14 +749,15 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             doc->viewer->setInverted(inverted_->isChecked()); doc->viewer->setLinearInterpolation(linear_->isChecked());
             doc->viewer->setComposite(composite_->isChecked());
         }
-        updatePanels();
+        updateDisplayControls();
     };
     for (auto *spin : {minimum_, maximum_, gamma_}) connect(spin, &QDoubleSpinBox::valueChanged, this, applyDisplay);
     for (const auto &[slider, spin] : {std::pair{minimumSlider_, minimum_}, std::pair{maximumSlider_, maximum_}}) {
         connect(slider, &QSlider::valueChanged, this, [this, spin](int value) {
             if (loadingPanels_) return;
+            const double before = spin->value();
             spin->setValue(std::lerp(sliderMinimum_, sliderMaximum_, value / 1000.));
-            updatePanels();
+            if (spin->value() == before) updateDisplayControls();
         });
     }
     connect(gammaSlider_, &QSlider::valueChanged, this, [this](int value) {
@@ -776,8 +782,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         if (!ok || name.isEmpty() || !target) return;
         const auto roi = std::find_if(target->rois.begin(), target->rois.end(), [&](const Roi &value) { return value.id == id; });
         if (roi == target->rois.end()) return;
-        roi->name = name;
-        target->viewer->setRois(target->rois); updatePanels();
+        auto renamed = *roi;
+        renamed.name = name;
+        target->editRoi(std::move(renamed));
     });
     connect(rois_, &QListWidget::currentRowChanged, this, [this](int row) {
         auto *doc = activeDocument(); if (!doc || row < 0 || row >= int(doc->rois.size())) return;
@@ -908,10 +915,10 @@ DocumentWidget *MainWindow::addDocument(Image image)
         pixelStatus_->setToolTip(text);
     });
     connect(document->viewer, &ImageViewer::displayRangeChanged, this, [this, document](double, double) {
-        if (activeDocument() == document) updatePanels();
+        if (activeDocument() == document) updateDisplayControls();
     });
     connect(document->viewer, &ImageViewer::sliceReady, this, [this, document] {
-        if (activeDocument() == document) updatePanels();
+        if (activeDocument() == document) updateDisplayControls();
     });
     const auto showWhenReady = connect(document->viewer, &ImageViewer::sliceReady, document, [this, document] {
         auto *active = activeDocument();
@@ -1085,7 +1092,7 @@ void MainWindow::importRaw(const QString &path)
     jobs_.submit(tr("Importing raw data"),
         [path, options, output](auto stop, auto progress) { *output = readImage(path, options, stop, progress); },
         [this, path, output](auto error) {
-            if (error) { try { std::rethrow_exception(error); } catch (const std::exception &e) { showError(e.what()); } return; }
+            if (showJobError(error)) return;
             addDocument(*output); recentFiles_.removeAll(path); recentFiles_.prepend(path);
             while (recentFiles_.size() > 12) recentFiles_.removeLast();
             updateRecentFiles();
@@ -1105,7 +1112,7 @@ void MainWindow::openPaths(const QStringList &paths)
             jobs_.submit(tr("Opening %1").arg(QFileInfo(path).fileName()),
                 [path, output](auto stop, auto progress) { *output = readImage(path, {}, stop, progress); },
                 [this, path, output](auto error) {
-                    if (error) { try { std::rethrow_exception(error); } catch (const std::exception &e) { showError(e.what()); } return; }
+                    if (showJobError(error)) return;
                     addDocument(*output); recentFiles_.removeAll(path); recentFiles_.prepend(path);
                     while (recentFiles_.size() > 12) recentFiles_.removeLast();
                     updateRecentFiles();
@@ -1159,7 +1166,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
                 const auto end = roi->points[1] + delta;
                 if (end.x() > roi->points[0].x() && end.y() > roi->points[0].y()) roi->points[1] = end;
             } else for (auto &point : roi->points) point += delta;
-            activeDocument()->setSelection(*roi); return true;
+            activeDocument()->editRoi(*roi); return true;
         }
     }
     if (action) {
@@ -1267,7 +1274,7 @@ void MainWindow::showPlot(bool profile)
             output->xTitle = "Intensity"; output->yTitle = "Pixel count";
         }
     }, [this, output, profile](auto error) {
-        if (error) { try { std::rethrow_exception(error); } catch (const std::exception &e) { showError(e.what()); } return; }
+        if (showJobError(error)) return;
         auto *window = plotWindow(profile);
         auto *plot = profile ? profilePlot_ : histogramPlot_;
         plot->setData(output->points, output->xTitle, output->yTitle);
@@ -1275,18 +1282,13 @@ void MainWindow::showPlot(bool profile)
     });
 }
 
-void MainWindow::updatePanels()
+void MainWindow::updateDisplayControls()
 {
     if (loadingPanels_) return;
-    loadingPanels_ = true;
+    QScopedValueRollback loading(loadingPanels_, true);
     const auto *doc = activeDocument();
-    for (auto *action : imageActions_) action->setEnabled(doc != nullptr);
     for (auto *widget : std::initializer_list<QWidget *>{minimum_, maximum_, gamma_, minimumSlider_, maximumSlider_, gammaSlider_, lut_, inverted_, linear_, composite_}) widget->setEnabled(doc != nullptr);
-    metadata_->clear(); history_->clear();
-    const QString selectedId = rois_->currentItem() ? rois_->currentItem()->data(Qt::UserRole).toString() : QString{};
-    QSignalBlocker roiSignals(rois_); rois_->clear();
     if (doc) {
-        const_cast<DocumentWidget *>(doc)->setWindowTitle(doc->title());
         minimum_->setValue(doc->viewer->windowMinimum()); maximum_->setValue(doc->viewer->windowMaximum());
         gamma_->setValue(doc->viewer->gamma()); lut_->setCurrentText(doc->viewer->lut());
         const auto [sliceMinimum, sliceMaximum] = doc->viewer->sliceRange();
@@ -1301,6 +1303,21 @@ void MainWindow::updatePanels()
         const QSignalBlocker gammaBlocker(gammaSlider_);
         gammaSlider_->setValue(int(std::lround(500 + 500 * std::log(gamma_->value()) / std::log(20.))));
         inverted_->setChecked(doc->viewer->isInverted()); linear_->setChecked(doc->viewer->linearInterpolation()); composite_->setChecked(doc->viewer->composite());
+    }
+}
+
+void MainWindow::updatePanels()
+{
+    if (loadingPanels_) return;
+    updateDisplayControls();
+    QScopedValueRollback loading(loadingPanels_, true);
+    auto *doc = activeDocument();
+    for (auto *action : imageActions_) action->setEnabled(doc != nullptr);
+    metadata_->clear(); history_->clear();
+    const QString selectedId = rois_->currentItem() ? rois_->currentItem()->data(Qt::UserRole).toString() : QString{};
+    QSignalBlocker roiSignals(rois_); rois_->clear();
+    if (doc) {
+        doc->setWindowTitle(doc->title());
         QStringList shape; for (const auto size : doc->image.shape()) shape << QString::number(size);
         const auto &metadata = doc->image.metadata();
         const QList<QPair<QString, QString>> properties{{tr("Name"), metadata.name}, {tr("Pixel type"), pixelTypeName(doc->image.pixelType())},
@@ -1328,7 +1345,6 @@ void MainWindow::updatePanels()
         if (auto *undo = findChild<QAction *>("edit.undo")) undo->setEnabled(doc->history.canUndo());
         if (auto *redo = findChild<QAction *>("edit.redo")) redo->setEnabled(doc->history.canRedo());
     }
-    loadingPanels_ = false;
 }
 
 void MainWindow::updateRecentFiles()
@@ -1417,6 +1433,15 @@ void MainWindow::restorePanelLayout(const QByteArray &layout)
         if (!window) continue;
         if (!geometry.isEmpty()) window->restoreGeometry(geometry);
     }
+}
+
+bool MainWindow::showJobError(std::exception_ptr error)
+{
+    if (!error) return false;
+    try { std::rethrow_exception(error); }
+    catch (const std::exception &exception) { showError(QString::fromUtf8(exception.what())); }
+    catch (...) { showError(tr("The background job failed with an unknown error.")); }
+    return true;
 }
 
 void MainWindow::showError(const QString &message)

@@ -59,7 +59,7 @@ TEST(Plots, ReplacingDataResetsNavigationAndKeepsOnlyFiniteSamples)
     EXPECT_DOUBLE_EQ(x->max(), 20);
     auto *series = plot.findChild<QLineSeries *>();
     ASSERT_NE(series, nullptr);
-    EXPECT_EQ(series->count(), 2);
+    EXPECT_EQ(series->points(), (QList<QPointF>{{10, 4}, {20, 5}}));
     EXPECT_EQ(y->labelDecimals(), 0);
     plot.setData({}, "Distance", "Intensity");
     EXPECT_EQ(series->count(), 0);

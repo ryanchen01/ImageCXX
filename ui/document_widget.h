@@ -19,6 +19,7 @@ public:
     std::optional<Roi> previousSelection;
     bool selectionCleared = false;
     void setSelection(std::optional<Roi> roi);
+    void editRoi(Roi roi);
     void refreshRois();
     ImageHistory history;
     ImageViewer *viewer;

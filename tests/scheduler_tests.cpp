@@ -76,6 +76,29 @@ TEST(Scheduler, StaysBusyUntilOwnerThreadCompletionDelivery)
     EXPECT_TRUE(idleObserved);
 }
 
+TEST(Scheduler, PublishesOnlyBusyTransitionsAcrossSubmissionsAndCancellation)
+{
+    WorkGate gate;
+    JobScheduler scheduler(nullptr, 1);
+    std::vector<bool> states;
+    QObject::connect(&scheduler, &JobScheduler::busyChanged, [&](bool busy) {
+        EXPECT_EQ(QThread::currentThread(), scheduler.thread());
+        states.push_back(busy);
+    });
+    scheduler.cancelAll();
+    EXPECT_TRUE(states.empty());
+    for (int i = 0; i < 3; ++i)
+        scheduler.submit("blocked", [&](auto stop, auto) { gate.wait(stop); }, {});
+    EXPECT_EQ(states, std::vector<bool>{true});
+    scheduler.cancelAll();
+    scheduler.cancelAll();
+    EXPECT_EQ(states, std::vector<bool>{true});
+    ASSERT_TRUE(awaitEvents([&] { return !scheduler.busy(); }));
+    EXPECT_EQ(states, (std::vector<bool>{true, false}));
+    scheduler.cancelAll();
+    EXPECT_EQ(states, (std::vector<bool>{true, false}));
+}
+
 TEST(Scheduler, CancelsWorkWhoseCompletionIsStillQueued)
 {
     std::promise<void> workFinished;

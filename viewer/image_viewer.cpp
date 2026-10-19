@@ -504,7 +504,7 @@ ImageViewer::ImageViewer(QWidget *parent) : QWidget(parent), d(std::make_unique<
                             throw std::runtime_error("The decoded slice exceeds the viewer cache memory limit.");
                         result->size = QSize(int(image.width()), int(image.height()));
                         const auto byteCount = image.width() * image.height() * perPixel;
-                        result->pixels.resize(qsizetype(byteCount));
+                        result->pixels = QByteArray(qsizetype(byteCount), Qt::Uninitialized);
                         result->minimum = std::numeric_limits<double>::infinity();
                         result->maximum = -std::numeric_limits<double>::infinity();
                         std::vector<Image> planes;
@@ -561,12 +561,13 @@ ImageViewer::ImageViewer(QWidget *parent) : QWidget(parent), d(std::make_unique<
                             }
                             result->pixels.resize(qsizetype(values * sizeof(float)));
                         }
+                        result->pixels.squeeze();
                         decoded = result;
                         {
                             std::lock_guard lock(d->mutex);
-                            const auto retainedBytes = std::size_t(decoded->pixels.size());
+                            const auto retainedBytes = std::size_t(decoded->pixels.capacity());
                             while (!d->cache.empty() && d->cacheBytes + retainedBytes > d->decodedBudget) {
-                                d->cacheBytes -= std::size_t(d->cache.back()->pixels.size());
+                                d->cacheBytes -= std::size_t(d->cache.back()->pixels.capacity());
                                 d->cache.pop_back();
                             }
                             if (retainedBytes <= d->decodedBudget) {
@@ -699,6 +700,7 @@ void ImageViewer::setWindow(double minimum, double maximum)
     if (!std::isfinite(minimum) || !std::isfinite(maximum) || maximum <= minimum) return;
     d->autoRange = false;
     const double divisor = componentCount(d->image.pixelType()) > 1 ? 255.0 : 1.0;
+    if (d->canvas->minimum == minimum / divisor && d->canvas->maximum == maximum / divisor) return;
     d->canvas->minimum = minimum / divisor;
     d->canvas->maximum = maximum / divisor;
     updateCanvas();
@@ -732,23 +734,36 @@ void ImageViewer::autoWindow()
 void ImageViewer::setGamma(double gamma)
 {
     if (!std::isfinite(gamma) || gamma < 0.01 || gamma > 100) return;
+    if (d->canvas->gamma == gamma) return;
     d->canvas->gamma = gamma;
     updateCanvas();
 }
 double ImageViewer::gamma() const { return d->canvas->gamma; }
-void ImageViewer::setInverted(bool inverted) { d->canvas->inverted = inverted; updateCanvas(); }
+void ImageViewer::setInverted(bool inverted)
+{
+    if (d->canvas->inverted == inverted) return;
+    d->canvas->inverted = inverted;
+    updateCanvas();
+}
 bool ImageViewer::isInverted() const { return d->canvas->inverted; }
 void ImageViewer::setLut(const QString &name)
 {
-    d->canvas->lut = name.compare(QStringLiteral("hot"), Qt::CaseInsensitive) == 0 ? 1
+    const int lut = name.compare(QStringLiteral("hot"), Qt::CaseInsensitive) == 0 ? 1
         : name.compare(QStringLiteral("viridis"), Qt::CaseInsensitive) == 0 ? 2 : 0;
+    if (d->canvas->lut == lut) return;
+    d->canvas->lut = lut;
     updateCanvas();
 }
 QString ImageViewer::lut() const
 {
     return d->canvas->lut == 1 ? QStringLiteral("hot") : d->canvas->lut == 2 ? QStringLiteral("viridis") : QStringLiteral("grayscale");
 }
-void ImageViewer::setLinearInterpolation(bool enabled) { d->canvas->linear = enabled; updateCanvas(); }
+void ImageViewer::setLinearInterpolation(bool enabled)
+{
+    if (d->canvas->linear == enabled) return;
+    d->canvas->linear = enabled;
+    updateCanvas();
+}
 bool ImageViewer::linearInterpolation() const { return d->canvas->linear; }
 void ImageViewer::setComposite(bool enabled)
 {
@@ -828,7 +843,7 @@ void ImageViewer::setCacheBudgets(std::size_t decodedBytes, std::size_t gpuBytes
         std::lock_guard lock(d->mutex);
         d->decodedBudget = decodedBytes;
         while (!d->cache.empty() && d->cacheBytes > decodedBytes) {
-            d->cacheBytes -= std::size_t(d->cache.back()->pixels.size());
+            d->cacheBytes -= std::size_t(d->cache.back()->pixels.capacity());
             d->cache.pop_back();
         }
     }

@@ -46,10 +46,12 @@ std::size_t ImageHistory::retainedBytes() const {
 void ImageHistory::setByteBudget(std::size_t bytes) { byteBudget_ = bytes; trim(); }
 
 void ImageHistory::trim() {
-    while (retainedBytes() > byteBudget_) {
-        if (!undo_.empty()) undo_.pop_front();
-        else if (!redo_.empty()) redo_.pop_front();
-        else break;
+    auto bytes = retainedBytes();
+    while (bytes > byteBudget_) {
+        auto &entries = !undo_.empty() ? undo_ : redo_;
+        if (entries.empty()) break;
+        bytes -= entries.front().image.byteCount();
+        entries.pop_front();
     }
 }
 

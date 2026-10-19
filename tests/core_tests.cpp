@@ -146,3 +146,35 @@ TEST(RoiGeometry, EllipsesAndPolygonsUsePixelCenters) {
     EXPECT_TRUE(roi.contains({0.5, 0.5}));
     EXPECT_FALSE(roi.contains({2.5, 2.5}));
 }
+
+TEST(ImageHistory, BudgetReductionTrimsBothUndoAndRedoEntries) {
+    auto image = Image::allocate(PixelType::UInt8, {2, 2});
+    ImageHistory history(64);
+    for (int i = 1; i <= 8; ++i) {
+        history.push(image, QString::number(i));
+        image.mutableData()[0] = std::byte(i);
+    }
+    for (int i = 0; i < 3; ++i) {
+        auto restored = history.undo(image);
+        ASSERT_TRUE(restored);
+        image = std::move(*restored);
+    }
+    history.setByteBudget(16);
+    EXPECT_EQ(history.retainedBytes(), 16u);
+    auto restored = history.undo(image);
+    ASSERT_TRUE(restored);
+    EXPECT_EQ(restored->sample(0, 0), 4);
+    EXPECT_FALSE(history.undo(*restored));
+    image = std::move(*restored);
+    for (int expected = 5; expected <= 8; ++expected) {
+        auto redone = history.redo(image);
+        ASSERT_TRUE(redone);
+        EXPECT_EQ(redone->sample(0, 0), expected);
+        image = std::move(*redone);
+    }
+    EXPECT_FALSE(history.redo(image));
+    history.setByteBudget(0);
+    EXPECT_EQ(history.retainedBytes(), 0u);
+    EXPECT_FALSE(history.canUndo());
+    EXPECT_FALSE(history.canRedo());
+}

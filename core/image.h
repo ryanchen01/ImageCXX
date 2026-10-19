@@ -93,6 +93,7 @@ public:
     Image slice(std::size_t z = 0, std::size_t channel = 0, std::size_t time = 0) const;
     Image region(std::span<const std::size_t> start, std::span<const std::size_t> extent) const;
     Image clone() const;
+    Image materialized() const;
 
 private:
     std::size_t byteOffset(std::span<const std::size_t> index) const;
