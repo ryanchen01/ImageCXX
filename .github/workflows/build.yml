@@ -23,7 +23,8 @@ jobs:
           - os: windows-2022
             triplet: x64-windows
             qt-arch: win64_msvc2022_64
-          - os: macos-14
+          # Xcode 26 provides std::jthread and std::stop_token without experimental flags.
+          - os: macos-26
             triplet: arm64-osx
             qt-arch: clang_64
     env:
