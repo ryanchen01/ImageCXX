@@ -47,11 +47,7 @@ DocumentWidget::DocumentWidget(Image source, QWidget *parent) : QWidget(parent),
     });
     connect(viewer, &ImageViewer::roiSelected, this, [this](const Roi &roi) { setSelection(roi); });
     connect(viewer, &ImageViewer::selectionCleared, this, [this] { setSelection({}); });
-    connect(viewer, &ImageViewer::roiEdited, this, [this](const Roi &roi) {
-        const auto saved = std::find_if(rois.begin(), rois.end(), [&roi](const Roi &entry) { return entry.id == roi.id; });
-        if (saved != rois.end()) *saved = roi;
-        setSelection(roi);
-    });
+    connect(viewer, &ImageViewer::roiEdited, this, &DocumentWidget::editRoi);
     connect(this, &DocumentWidget::changed, this, [this] { setWindowTitle(title()); });
     refresh();
 }
@@ -69,6 +65,26 @@ void DocumentWidget::refreshRois()
 {
     viewer->setRois(rois);
     viewer->setSelection(selection);
+}
+
+void DocumentWidget::editRoi(Roi roi)
+{
+    const auto saved = std::find_if(rois.begin(), rois.end(), [&roi](const Roi &entry) { return entry.id == roi.id; });
+    if (saved != rois.end()) {
+        // A selection may project saved geometry onto the currently viewed slice.
+        const auto z = saved->z, channel = saved->channel, time = saved->time;
+        *saved = roi;
+        saved->z = z; saved->channel = channel; saved->time = time;
+    }
+    if (saved == rois.end() || (selection && selection->id == roi.id)) {
+        if (selection && selection->id == roi.id) {
+            roi.z = selection->z; roi.channel = selection->channel; roi.time = selection->time;
+        }
+        setSelection(std::move(roi));
+    } else {
+        refreshRois();
+        emit changed();
+    }
 }
 
 QString DocumentWidget::title() const

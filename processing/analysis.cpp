@@ -1,4 +1,5 @@
 #include "processing/processing.h"
+#include "processing_detail.h"
 
 #include <algorithm>
 #include <cmath>
@@ -155,8 +156,7 @@ Mask createMask(const Image &slice, const Roi &roi) {
     result.sourceRoiId = roi.id;
     auto metadata = slice.metadata();
     metadata.name = result.name;
-    metadata.intensityScale = 1; metadata.intensityOffset = 0; metadata.intensityUnit.clear();
-    metadata.attributes.remove(QStringLiteral("DICOM.0028,0004"));
+    detail::resetMaskMetadata(metadata);
     result.pixels = Image::allocate(PixelType::UInt8, {slice.width(), slice.height()}, std::move(metadata));
     auto *bytes = reinterpret_cast<std::uint8_t *>(result.pixels.mutableData());
     for (std::size_t y = 0; y < slice.height(); ++y)

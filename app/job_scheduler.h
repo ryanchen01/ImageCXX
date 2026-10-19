@@ -67,6 +67,7 @@ private:
     std::vector<std::jthread> workers_;
     std::shared_ptr<Dispatch> dispatch_;
     quint64 nextId_ = 1;
+    bool publishedBusy_ = false;
     std::atomic<bool> shuttingDown_{false};
 };
 

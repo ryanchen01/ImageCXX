@@ -363,7 +363,7 @@ void writeImage(const Image &input, const QString &path, std::stop_token stop, I
     if (input.empty()) throw std::runtime_error("Cannot save an empty image");
     detail::checkIo(stop, progress, 0);
     const QString suffix = QFileInfo(path).suffix().toLower();
-    const Image image = input.contiguous() ? input : input.clone();
+    const Image image = input.materialized();
     if (suffix == "mhd" || suffix == "mha" || suffix == "nii" || suffix == "gz" || suffix == "nrrd" || suffix == "nhdr") {
         writeScientific(image, path, stop, progress);
     } else if (suffix == "dcm" || suffix == "dicom") {

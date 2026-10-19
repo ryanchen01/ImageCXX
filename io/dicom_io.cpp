@@ -241,7 +241,7 @@ void writeDicom(const Image &input, const QString &path, std::stop_token stop, I
         throw std::runtime_error("DICOM export supports one 2D image; save volumes as TIFF or a scientific format");
     if (input.pixelType() != PixelType::UInt8 && input.pixelType() != PixelType::UInt16 && input.pixelType() != PixelType::Int16 && input.pixelType() != PixelType::RGB8)
         throw std::runtime_error("DICOM export requires UInt8, UInt16, Int16 or RGB8 pixels");
-    const Image image = input.contiguous() ? input : input.clone();
+    const Image image = input.materialized();
     const auto &metadata = image.metadata();
     DcmFileFormat file;
     auto *dataset = file.getDataset();

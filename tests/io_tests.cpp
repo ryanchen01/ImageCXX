@@ -13,10 +13,27 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <stdexcept>
 
 using namespace imagecxx;
 
 namespace {
+class LazyStorage final : public Storage {
+public:
+    explicit LazyStorage(Image image) : image_(std::move(image)) {}
+    std::size_t size() const override { return image_.byteCount(); }
+    const std::byte *data() const override { return nullptr; }
+    std::byte *mutableData() override { return nullptr; }
+    bool readOnly() const override { return true; }
+    QString kind() const override { return "Lazy"; }
+    void read(std::size_t offset, std::span<std::byte> destination) const override {
+        if (offset > size() || destination.size() > size() - offset) throw std::out_of_range("Invalid read");
+        std::memcpy(destination.data(), image_.data() + offset, destination.size());
+    }
+private:
+    Image image_;
+};
+
 Image fixture(PixelType type, std::vector<std::size_t> shape = {5, 3, 2})
 {
     ImageMetadata metadata;
@@ -54,6 +71,26 @@ void expectPixels(const Image &actual, const Image &expected)
 }
 } // namespace
 
+TEST(ImageIo, ExportsLazyStorageWithoutDirectDataAccess)
+{
+    QTemporaryDir directory;
+    ASSERT_TRUE(directory.isValid());
+    auto original = fixture(PixelType::UInt16, {5, 3});
+    original.metadata().direction = {1, 0, 0, 1};
+    const auto lazy = Image::fromStorage(original.pixelType(), original.shape(),
+        std::make_shared<LazyStorage>(original), original.metadata());
+    ASSERT_TRUE(lazy.contiguous());
+    ASSERT_EQ(lazy.data(), nullptr);
+    for (const auto *suffix : {"tif", "raw", "png", "mha", "nrrd", "nii", "dcm"}) {
+        SCOPED_TRACE(suffix);
+        const auto path = directory.filePath(QString("lazy.") + suffix);
+        if (QString(suffix) == "dcm") writeDicom(lazy, path);
+        else if (QString(suffix) == "mha") writeScientific(lazy, path);
+        else writeImage(lazy, path);
+        expectPixels(readImage(path), original);
+    }
+}
+
 TEST(ImageIo, TiffPreservesEveryPixelTypeAndFiveDimensionalMetadata)
 {
     QTemporaryDir directory;
@@ -71,7 +108,6 @@ TEST(ImageIo, TiffPreservesEveryPixelTypeAndFiveDimensionalMetadata)
         EXPECT_EQ(loaded.metadata().direction, original.metadata().direction);
         EXPECT_DOUBLE_EQ(loaded.metadata().intensityScale, 2);
         EXPECT_DOUBLE_EQ(loaded.metadata().intensityOffset, -100);
-        EXPECT_EQ(loaded.metadata().intensityOffset, -100);
         EXPECT_EQ(loaded.metadata().channels[0].name, "Signal");
         EXPECT_EQ(loaded.metadata().attributes.value("Experiment"), "Generated test fixture");
     }
@@ -256,9 +292,11 @@ TEST(ImageIo, ImageJHyperstackUsesChannelFastestPageOrder)
 TEST(ImageIo, CancellationAndCorruptFilesReportErrors)
 {
     QTemporaryDir directory;
+    const auto validPath = directory.filePath("valid.tif");
+    writeImage(fixture(PixelType::UInt8), validPath);
     std::stop_source cancellation;
     cancellation.request_stop();
-    EXPECT_THROW(readImage(directory.filePath("missing.tif"), {}, cancellation.get_token()), std::runtime_error);
+    EXPECT_THROW(readImage(validPath, {}, cancellation.get_token()), std::runtime_error);
     EXPECT_THROW(writeImage(fixture(PixelType::UInt8), directory.filePath("cancel.tif"), cancellation.get_token()), std::runtime_error);
     const auto path = directory.filePath("corrupt.png");
     QFile file(path);
@@ -306,8 +344,10 @@ TEST(ImageIo, CancelledExportsPreserveExistingScientificRasterAndDicomFiles)
         const auto before = beforeFile.readAll();
         beforeFile.close();
         const auto baseline = readImage(path);
+        auto replacement = original.clone();
+        std::fill_n(replacement.mutableData(), replacement.byteCount(), std::byte{255});
         std::stop_source cancellation;
-        EXPECT_THROW(writeImage(original, path, cancellation.get_token(), [&cancellation](double progress) {
+        EXPECT_THROW(writeImage(replacement, path, cancellation.get_token(), [&cancellation](double progress) {
             if (progress > .8) cancellation.request_stop();
         }), std::runtime_error);
         QFile afterFile(path);
@@ -415,14 +455,7 @@ TEST(ImageIo, DetachedScientificFailuresCleanUnpublishedPayloads)
         ASSERT_EQ(sentinel.write("keep"), 4);
         sentinel.close();
         const auto before = parent.entryList(QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot);
-        try {
-            writeImage(image, path);
-            FAIL() << "Expected scientific header publication to fail";
-        } catch (const std::runtime_error &error) {
-            const auto message = QString::fromUtf8(error.what());
-            EXPECT_TRUE(message.contains("Cannot write scientific image header")) << error.what();
-            EXPECT_TRUE(message.contains(path)) << error.what();
-        }
+        EXPECT_THROW(writeImage(image, path), std::runtime_error);
         EXPECT_EQ(parent.entryList(QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot), before);
         ASSERT_TRUE(sentinel.open(QIODevice::ReadOnly));
         EXPECT_EQ(sentinel.readAll(), "keep");

@@ -130,6 +130,31 @@ TEST(Viewer, MapsCoordinatesAndRejectsInvalidDisplayValues)
     EXPECT_TRUE(viewer.linearInterpolation());
 }
 
+TEST(Viewer, UnchangedManualWindowDisablesAutoRangeWithoutNotifying)
+{
+    ImageViewer viewer;
+    auto image = Image::allocate(PixelType::UInt16, {2, 2, 2});
+    auto *pixels = reinterpret_cast<std::uint16_t *>(image.mutableData());
+    const std::array<std::uint16_t, 8> values{0, 10, 20, 30, 100, 110, 120, 130};
+    std::copy(values.begin(), values.end(), pixels);
+    int ready = 0, changes = 0;
+    QObject::connect(&viewer, &ImageViewer::sliceReady, [&] { ++ready; });
+    viewer.setImage(image);
+    ASSERT_TRUE(waitFor([&] { return ready == 1; }));
+    QObject::connect(&viewer, &ImageViewer::displayRangeChanged, [&](double, double) { ++changes; });
+    viewer.setWindow(0, 30);
+    viewer.setWindow(0, 30);
+    EXPECT_EQ(changes, 0);
+    viewer.setSlice(1);
+    ASSERT_TRUE(waitFor([&] { return ready == 2; }));
+    EXPECT_EQ(changes, 0);
+    EXPECT_DOUBLE_EQ(viewer.windowMinimum(), 0);
+    EXPECT_DOUBLE_EQ(viewer.windowMaximum(), 30);
+    viewer.setWindow(5, 25);
+    viewer.setWindow(5, 25);
+    EXPECT_EQ(changes, 1);
+}
+
 TEST(Viewer, InitializesDicomPhotometricInversionWithoutChangingSamples)
 {
     ImageMetadata metadata;

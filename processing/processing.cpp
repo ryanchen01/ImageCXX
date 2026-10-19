@@ -1,4 +1,5 @@
 #include "processing/processing.h"
+#include "processing_detail.h"
 
 #include <itkBinaryBallStructuringElement.h>
 #include <itkBinaryDilateImageFilter.h>
@@ -101,8 +102,7 @@ Image runVolume(const Image &source, std::size_t volume, const ProcessingOptions
         }
         if (type == PixelType::UInt8 && (options.operation == Operation::Threshold
             || options.operation == Operation::Dilate || options.operation == Operation::Erode)) {
-            metadata.intensityScale = 1; metadata.intensityOffset = 0; metadata.intensityUnit.clear();
-            metadata.attributes.remove(QStringLiteral("DICOM.0028,0004"));
+            detail::resetMaskMetadata(metadata);
         }
         auto result = Image::allocate(type, std::move(shape), metadata);
         std::memcpy(result.mutableData(), output->GetBufferPointer(), result.byteCount());
@@ -135,9 +135,7 @@ Image runVolume(const Image &source, std::size_t volume, const ProcessingOptions
             || upper < static_cast<double>(std::numeric_limits<T>::lowest()) || lower > upper) {
             auto result = Image::allocate(PixelType::UInt8,
                 std::vector<std::size_t>(source.shape().begin(), source.shape().begin() + Dimension), metadata);
-            result.metadata().intensityScale = 1; result.metadata().intensityOffset = 0;
-            result.metadata().intensityUnit.clear();
-            result.metadata().attributes.remove(QStringLiteral("DICOM.0028,0004"));
+            detail::resetMaskMetadata(result.metadata());
             if (progress) progress(1.0);
             return result;
         }
@@ -247,7 +245,7 @@ Image process(const Image &image, const ProcessingOptions &options, std::stop_to
     }
     if (stop.stop_requested()) throw std::runtime_error("Processing cancelled");
     if (progress) progress(0.0);
-    const Image source = image.contiguous() && image.data() ? image : image.clone();
+    const Image source = image.materialized();
     const auto volumePixels = image.width() * image.height() * (dimensions == 3 ? image.depth() : 1);
     const auto volumes = image.pixelCount() / volumePixels;
     Image result;
@@ -271,6 +269,11 @@ Image process(const Image &image, const ProcessingOptions &options, std::stop_to
             if (options.operation == Operation::Threshold || options.operation == Operation::Dilate || options.operation == Operation::Erode)
                 metadata.attributes.remove(QStringLiteral("DICOM.0028,0004"));
             metadata.attributes.insert(QStringLiteral("ImageCXX.LastOperation"), operationName(options.operation));
+            if (volumes == 1 && shape == block.shape()) {
+                block.metadata() = std::move(metadata);
+                if (progress) progress(1.0);
+                return block;
+            }
             result = Image::allocate(block.pixelType(), std::move(shape), std::move(metadata));
         }
         std::memcpy(result.mutableData() + volume * block.byteCount(), block.data(), block.byteCount());

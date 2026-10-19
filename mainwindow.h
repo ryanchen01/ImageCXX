@@ -85,11 +85,13 @@ private:
     void setActiveDocument(imagecxx::DocumentWidget *document);
     void clearDocuments();
     void updatePanels();
+    void updateDisplayControls();
     void updateRecentFiles();
     void updateWindowMenu();
     QByteArray panelLayout() const;
     void restorePanelLayout(const QByteArray &layout);
     void showError(const QString &message);
+    bool showJobError(std::exception_ptr error);
     bool confirmDiscardMeasurements();
     std::optional<QVariantMap> parameterForm(const imagecxx::Command &command, bool batch = false);
     std::optional<imagecxx::Roi> selectedRoi() const;

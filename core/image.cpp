@@ -342,4 +342,8 @@ Image Image::clone() const {
     return result;
 }
 
+Image Image::materialized() const {
+    return contiguous() && data() ? *this : clone();
+}
+
 } // namespace imagecxx

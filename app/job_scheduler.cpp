@@ -140,7 +140,11 @@ void JobScheduler::deliverFinished(const std::shared_ptr<Job> &job, std::excepti
 void JobScheduler::publishBusy()
 {
     QMetaObject::invokeMethod(this, [this] {
-        if (!shuttingDown_.load()) emit busyChanged(busy());
+        if (shuttingDown_.load()) return;
+        const bool current = busy();
+        if (current == publishedBusy_) return;
+        publishedBusy_ = current;
+        emit busyChanged(current);
     }, Qt::AutoConnection);
 }
 

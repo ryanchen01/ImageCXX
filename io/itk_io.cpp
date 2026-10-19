@@ -162,7 +162,7 @@ void writeScientific(const Image &input, const QString &path, std::stop_token st
         throw std::runtime_error("This 2D slice has a 3D spatial orientation; save the volume, or use TIFF or DICOM to preserve its plane");
     detail::checkIo(stop, progress, 0);
     try {
-        const Image image = input.contiguous() ? input : input.clone();
+        const Image image = input.materialized();
         auto io = scientificAdapter(path);
         const auto parent = QFileInfo(path).absolutePath();
         QTemporaryDir staging(QDir(parent).filePath(".imagecxx-XXXXXX"));
