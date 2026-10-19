@@ -1,6 +1,7 @@
 #include "io/image_io.h"
 
 #include <QFile>
+#include <QFileInfo>
 #include <QImage>
 #include <QColor>
 #include <QDir>
@@ -10,6 +11,7 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 
 using namespace imagecxx;
@@ -149,6 +151,7 @@ TEST(ImageIo, ScientificFormatsPreserveNumericVolumeAndGeometry)
 {
     QTemporaryDir directory;
     for (const auto extension : {"mha", "mhd", "nii", "nii.gz", "nrrd"}) {
+        SCOPED_TRACE(extension);
         const auto original = fixture(PixelType::Int16);
         const auto path = directory.filePath(QString("image.") + extension);
         writeImage(original, path);
@@ -362,6 +365,67 @@ TEST(ImageIo, DetachedScientificReplacementRetainsReferencedPayloads)
             if (progress > .8) cancellation.request_stop();
         }), std::runtime_error);
         EXPECT_EQ(QDir(directory.path()).entryList(QDir::Files), before);
+    }
+}
+
+TEST(ImageIo, DetachedScientificExportsCopyMultiplePayloadChunks)
+{
+    auto image = Image::allocate(PixelType::UInt8, {1024, 1024, 5});
+    auto *pixels = image.mutableData();
+    // Incompressible bytes keep the on-disk payload larger than a copy chunk.
+    std::uint32_t random = 123456789;
+    for (std::size_t i = 0; i < image.byteCount(); ++i) {
+        random ^= random << 13;
+        random ^= random >> 17;
+        random ^= random << 5;
+        pixels[i] = static_cast<std::byte>(random & 0xff);
+    }
+    for (const auto extension : {"mhd", "nhdr"}) {
+        SCOPED_TRACE(extension);
+        QTemporaryDir directory;
+        ASSERT_TRUE(directory.isValid());
+        const auto path = directory.filePath(QString("image.") + extension);
+        ASSERT_NO_THROW(writeImage(image, path));
+        const auto payloads = QDir(directory.path()).entryList({"*.imagecxx-*"}, QDir::Files);
+        ASSERT_EQ(payloads.size(), 1);
+        EXPECT_GT(QFileInfo(directory.filePath(payloads.front())).size(), 4 * 1024 * 1024);
+        expectPixels(readImage(path), image);
+    }
+}
+
+TEST(ImageIo, DetachedScientificFailuresCleanUnpublishedPayloads)
+{
+    const auto image = fixture(PixelType::UInt16);
+    for (const auto extension : {"mhd", "nhdr"}) {
+        SCOPED_TRACE(extension);
+        QTemporaryDir directory;
+        ASSERT_TRUE(directory.isValid());
+        QDir parent(directory.path());
+        const auto path = directory.filePath(QString("image.") + extension);
+        std::stop_source cancellation;
+        EXPECT_THROW(writeImage(image, path, cancellation.get_token(), [&cancellation](double progress) {
+            if (progress > .8) cancellation.request_stop();
+        }), std::runtime_error);
+        EXPECT_TRUE(parent.entryList(QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot).isEmpty());
+
+        // A directory at the header path rejects publication after payload copy.
+        ASSERT_TRUE(parent.mkdir(QFileInfo(path).fileName()));
+        QFile sentinel(QDir(path).filePath("keep.txt"));
+        ASSERT_TRUE(sentinel.open(QIODevice::WriteOnly));
+        ASSERT_EQ(sentinel.write("keep"), 4);
+        sentinel.close();
+        const auto before = parent.entryList(QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot);
+        try {
+            writeImage(image, path);
+            FAIL() << "Expected scientific header publication to fail";
+        } catch (const std::runtime_error &error) {
+            const auto message = QString::fromUtf8(error.what());
+            EXPECT_TRUE(message.contains("Cannot write scientific image header")) << error.what();
+            EXPECT_TRUE(message.contains(path)) << error.what();
+        }
+        EXPECT_EQ(parent.entryList(QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot), before);
+        ASSERT_TRUE(sentinel.open(QIODevice::ReadOnly));
+        EXPECT_EQ(sentinel.readAll(), "keep");
     }
 }
 

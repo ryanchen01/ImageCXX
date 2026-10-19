@@ -271,16 +271,35 @@ void writeScientific(const Image &input, const QString &path, std::stop_token st
             if (!match.hasMatch() || payloadName.isEmpty() || QFileInfo(payloadName).fileName() != payloadName)
                 throw std::runtime_error("Unsupported detached scientific image layout");
             QTemporaryFile payload(QDir(parent).filePath(QFileInfo(path).completeBaseName() + ".imagecxx-XXXXXX." + QFileInfo(payloadName).completeSuffix()));
-            if (!payload.open()) throw std::runtime_error("Cannot create scientific image payload");
+            if (!payload.open())
+                throw std::runtime_error(QString("Cannot create scientific image payload '%1': %2").arg(payload.fileTemplate(), payload.errorString()).toStdString());
+            // QTemporaryFile keeps its native handle even after close(). Replacing
+            // that file with QSaveFile fails on Windows, so fill the unique payload
+            // directly and publish only its header once all bytes are flushed.
+            QFile source(staging.filePath(payloadName));
+            if (!source.open(QIODevice::ReadOnly))
+                throw std::runtime_error(QString("Cannot read scientific image payload '%1': %2").arg(source.fileName(), source.errorString()).toStdString());
+            QByteArray buffer(4 * 1024 * 1024, Qt::Uninitialized);
+            while (!source.atEnd()) {
+                detail::checkIo(stop, {}, 0);
+                const auto count = source.read(buffer.data(), buffer.size());
+                if (count < 0)
+                    throw std::runtime_error(QString("Cannot read scientific image payload '%1': %2").arg(source.fileName(), source.errorString()).toStdString());
+                if (payload.write(buffer.constData(), count) != count)
+                    throw std::runtime_error(QString("Cannot write scientific image payload '%1': %2").arg(payload.fileName(), payload.errorString()).toStdString());
+            }
+            detail::checkIo(stop, {}, 0);
+            if (!payload.flush())
+                throw std::runtime_error(QString("Cannot flush scientific image payload '%1': %2").arg(payload.fileName(), payload.errorString()).toStdString());
             payload.close();
-            detail::atomicCopy(staging.filePath(payloadName), payload.fileName(), stop);
             text.replace(match.capturedStart(1), match.capturedLength(1), QFileInfo(payload.fileName()).fileName());
             QSaveFile destination(path);
             const auto bytes = text.toUtf8();
             if (!destination.open(QIODevice::WriteOnly) || destination.write(bytes) != bytes.size())
-                throw std::runtime_error("Cannot write scientific image header");
+                throw std::runtime_error(QString("Cannot write scientific image header '%1': %2").arg(path, destination.errorString()).toStdString());
             detail::checkIo(stop, {}, 0);
-            if (!destination.commit()) throw std::runtime_error("Cannot commit scientific image header");
+            if (!destination.commit())
+                throw std::runtime_error(QString("Cannot commit scientific image header '%1': %2").arg(path, destination.errorString()).toStdString());
             payload.setAutoRemove(false);
         } else detail::atomicCopy(stagedPath, path, stop);
         if (progress) progress(1);

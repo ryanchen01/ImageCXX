@@ -45,7 +45,8 @@ void atomicCopy(const QString &source, const QString &destination,
             throw std::runtime_error("Cannot write image output");
     }
     checkIo(stop, {}, 0);
-    if (!output.commit()) throw std::runtime_error("Cannot commit image output");
+    if (!output.commit())
+        throw std::runtime_error(QString("Cannot commit image output '%1': %2").arg(destination, output.errorString()).toStdString());
     if (progress) progress(1);
 }
 
