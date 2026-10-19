@@ -46,8 +46,11 @@ jobs:
         uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125 # v4.4.1
         with:
           version: '6.12.0'
+          # Pin upstream support for Qt 6.11+ Windows repository layouts.
+          aqtsource: 'git+https://github.com/miurahr/aqtinstall.git@7e5a5c3d95cf962cfc2f36c86ffa0d2c07f1a0d4'
           arch: ${{ matrix.qt-arch }}
-          modules: 'qtshadertools qtgraphs qtimageformats qtsvg qtquick3d'
+          # SVG and Declarative are included in the base desktop SDK.
+          modules: 'qtshadertools qtgraphs qtimageformats qtquick3d'
           cache: true
 
       - name: Check out pinned vcpkg
