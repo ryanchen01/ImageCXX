@@ -523,8 +523,10 @@ ImageViewer::ImageViewer(QWidget *parent) : QWidget(parent), d(std::make_unique<
                                         result->maximum = std::max(result->maximum, value);
                                     }
                                     if (!std::isfinite(value)) value = 0;
-                                    if (color) result->pixels[qsizetype(offset + c)] = char(std::clamp(value, 0.0, 255.0));
-                                    else if (doublePrecision) {
+                                    if (color) {
+                                        const auto displayValue = std::uint8_t(std::clamp(value, 0.0, 255.0));
+                                        std::memcpy(result->pixels.data() + offset + c, &displayValue, sizeof(displayValue));
+                                    } else if (doublePrecision) {
                                         std::memcpy(result->pixels.data() + (offset + c) * sizeof(double), &value, sizeof(double));
                                     } else {
                                         const float displayValue = float(std::clamp(value,

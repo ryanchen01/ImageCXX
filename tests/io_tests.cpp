@@ -365,6 +365,7 @@ TEST(ImageIo, DicomConvertsSpatialUnitsAndEmbedsTwoDimensionalRotation)
     image.metadata().axes[0].unit = "px";
     EXPECT_THROW(writeImage(image, path), std::runtime_error);
     ASSERT_TRUE(saved.open(QIODevice::ReadOnly)); EXPECT_EQ(saved.readAll(), before);
+    saved.close();
 
     auto volume = fixture(PixelType::UInt16);
     for (auto &axis : volume.metadata().axes) axis.unit = "um";
