@@ -18,6 +18,7 @@
 #include <QPainter>
 #include <QCloseEvent>
 #include <QComboBox>
+#include <QCompleter>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
@@ -692,22 +693,49 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     auto *search = menus["Edit"]->addAction(QIcon(":/icons/search.svg"), tr("Find command...")); search->setObjectName("commands.find"); search->setShortcuts({QKeySequence("L"), QKeySequence("Ctrl+L")});
     for (const auto &key : search->shortcuts()) shortcutActions_.insert(key, search);
     search->setShortcutContext(Qt::ApplicationShortcut);
-    connect(search, &QAction::triggered, this, [this] {
-        QDialog dialog(this); dialog.setWindowTitle(tr("Find command")); dialog.resize(520, 480);
-        auto *layout = new QVBoxLayout(&dialog); auto *query = new QLineEdit(&dialog); query->setPlaceholderText(tr("Type a command name..."));
-        auto *list = new QListWidget(&dialog); layout->addWidget(query); layout->addWidget(list);
-        for (const auto &command : commands_.commands()) {
-            auto *item = new QListWidgetItem(command.category + "  /  " + command.label, list);
-            item->setData(Qt::UserRole, command.id); if (command.needsImage && !activeDocument()) item->setFlags(Qt::NoItemFlags);
-        }
-        if (list->count()) list->setCurrentRow(0);
-        connect(query, &QLineEdit::textChanged, list, [list](const QString &text) {
-            for (int i = 0; i < list->count(); ++i) list->item(i)->setHidden(!list->item(i)->text().contains(text, Qt::CaseInsensitive));
-            for (int i = 0; i < list->count(); ++i) if (!list->item(i)->isHidden()) { list->setCurrentRow(i); break; }
-        });
-        connect(list, &QListWidget::itemActivated, &dialog, &QDialog::accept);
-        connect(query, &QLineEdit::returnPressed, &dialog, &QDialog::accept);
-        if (dialog.exec() == QDialog::Accepted && list->currentItem()) executeCommand(list->currentItem()->data(Qt::UserRole).toString());
+    auto *query = new QLineEdit(this);
+    query->setObjectName("commandSearch");
+    query->setPlaceholderText(tr("Find command..."));
+    query->setAccessibleName(tr("Find command"));
+    query->setToolTip(search->text() + " (" + QKeySequence("Ctrl+L").toString(QKeySequence::NativeText) + ")");
+    query->setClearButtonEnabled(true);
+    query->setFixedWidth(220);
+    statusBar()->addPermanentWidget(query);
+    auto *searchModel = new QStandardItemModel(query);
+    for (const auto &command : commands_.commands()) {
+        auto *item = new QStandardItem(command.category + "  /  " + command.label);
+        item->setData(command.id, Qt::UserRole);
+        item->setEditable(false);
+        item->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+        auto *action = findChild<QAction *>(command.id);
+        item->setEnabled(action->isEnabled());
+        connect(action, &QAction::changed, query, [action, item] { item->setEnabled(action->isEnabled()); });
+        searchModel->appendRow(item);
+    }
+    auto *completer = new QCompleter(searchModel, query);
+    completer->setCaseSensitivity(Qt::CaseInsensitive);
+    completer->setFilterMode(Qt::MatchContains);
+    completer->setCompletionMode(QCompleter::PopupCompletion);
+    completer->setMaxVisibleItems(10);
+    completer->popup()->setMinimumWidth(420);
+    completer->popup()->setStyleSheet("QListView::item { padding: 3px 8px 0px 8px; }");
+    query->setCompleter(completer);
+    const auto runSearch = [this, query](const QModelIndex &index) {
+        if (!(index.flags() & Qt::ItemIsEnabled)) return;
+        const auto id = index.data(Qt::UserRole).toString();
+        // Let QLineEdit finish inserting the completion before clearing it or opening a command dialog.
+        QTimer::singleShot(0, this, [this, query, id] { query->clear(); executeCommand(id); });
+    };
+    connect(completer, qOverload<const QModelIndex &>(&QCompleter::activated), this, runSearch);
+    connect(query, &QLineEdit::returnPressed, this, [query, completer, runSearch] {
+        if (query->text().isEmpty() || completer->popup()->currentIndex().isValid()) return;
+        completer->setCompletionPrefix(query->text());
+        runSearch(completer->currentIndex());
+    });
+    connect(search, &QAction::triggered, this, [this, query, completer] {
+        showNormal(); raise(); activateWindow();
+        query->setFocus(Qt::ShortcutFocusReason); query->selectAll();
+        completer->setCompletionPrefix(query->text()); completer->complete();
     });
     windowMenu_ = menuBar()->addMenu(tr("Window"));
     windowMenu_->setObjectName("windowMenu");
@@ -736,7 +764,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     toolbar->addSeparator(); toolbar->addAction(findChild<QAction *>("analyze.measure"));
     toolbar->addAction(findChild<QAction *>("analyze.histogram"));
     toolbar->addAction(findChild<QAction *>("edit.undo"));
-    toolbar->addSeparator(); toolbar->addAction(search);
     connect(measureButton, &QPushButton::clicked, this, [this] { executeCommand("analyze.measure"); });
     connect(autoRange, &QPushButton::clicked, this, [this] { if (auto *doc = activeDocument()) doc->viewer->autoWindow(); });
     connect(fitButton, &QPushButton::clicked, this, [this] { if (auto *doc = activeDocument()) doc->viewer->fitToWindow(); });
