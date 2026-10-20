@@ -2,6 +2,7 @@
 #include "io/image_io.h"
 #include <gtest/gtest.h>
 #include <limits>
+#include <atomic>
 #include <QApplication>
 #include <QAction>
 #include <QKeyEvent>
@@ -61,6 +62,27 @@ bool finishJobs(MainWindow &window)
     while (window.jobs().busy() && timer.elapsed() < 5000) { QCoreApplication::processEvents(); QThread::msleep(2); }
     QCoreApplication::processEvents();
     return !window.jobs().busy();
+}
+
+QString saveImage(MainWindow &window, const QString &path)
+{
+    QString error;
+    QTimer picker;
+    QObject::connect(&picker, &QTimer::timeout, &window, [&] {
+        auto *modal = QApplication::activeModalWidget();
+        if (auto *dialog = qobject_cast<QFileDialog *>(modal)) {
+            dialog->setDirectory(QFileInfo(path).absolutePath());
+            dialog->selectFile(QFileInfo(path).fileName());
+            if (auto *name = dialog->findChild<QLineEdit *>("fileNameEdit")) name->setText(QFileInfo(path).fileName());
+            QMetaObject::invokeMethod(dialog, "accept", Qt::QueuedConnection);
+        } else if (auto *message = qobject_cast<QMessageBox *>(modal)) {
+            if (message->standardButtons().testFlag(QMessageBox::Yes)) message->button(QMessageBox::Yes)->click();
+            else { error = message->text(); message->button(QMessageBox::Ok)->click(); }
+        }
+    });
+    picker.start(1);
+    window.commands().execute("file.save");
+    return error;
 }
 }
 
@@ -208,12 +230,144 @@ TEST(Shortcuts, FillCopyPasteInvertAndUndoPreserveScientificValues)
     sendKey(doc->viewer, Qt::Key_C);
     sendKey(doc->viewer, Qt::Key_F); ASSERT_TRUE(finishJobs(window));
     EXPECT_DOUBLE_EQ(doc->image.sample(1, 1), 65535); EXPECT_DOUBLE_EQ(doc->image.sample(0, 0), 1200);
-    sendKey(doc->viewer, Qt::Key_V);
+    sendKey(doc->viewer, Qt::Key_V); ASSERT_TRUE(finishJobs(window));
     EXPECT_DOUBLE_EQ(doc->image.sample(1, 1), 1200);
     sendKey(doc->viewer, Qt::Key_I, Qt::ShiftModifier); ASSERT_TRUE(finishJobs(window));
     EXPECT_DOUBLE_EQ(doc->image.sample(1, 1), 64335);
     sendKey(doc->viewer, Qt::Key_Z, Qt::ControlModifier);
     EXPECT_DOUBLE_EQ(doc->image.sample(1, 1), 1200);
+}
+
+TEST(Desktop, FloatInvertUsesRawLimitsAndKeepsCalibration)
+{
+    for (const auto type : {PixelType::Float32, PixelType::Float64}) {
+        MainWindow window;
+        auto image = Image::allocate(type, {2, 2});
+        image.setValue(std::array<std::size_t, 2>{0, 0}, 10);
+        image.setValue(std::array<std::size_t, 2>{1, 0}, 20);
+        image.setValue(std::array<std::size_t, 2>{0, 1}, 10);
+        image.setValue(std::array<std::size_t, 2>{1, 1}, 20);
+        image.metadata().intensityScale = 2; image.metadata().intensityOffset = 100;
+        auto *doc = window.addDocument(image);
+        window.commands().execute("edit.invert"); ASSERT_TRUE(finishJobs(window));
+        EXPECT_DOUBLE_EQ(doc->image.sample(0, 0), 20);
+        EXPECT_DOUBLE_EQ(doc->image.sample(1, 0), 10);
+        EXPECT_DOUBLE_EQ(doc->image.metadata().intensityScale, 2);
+        EXPECT_DOUBLE_EQ(doc->image.metadata().intensityOffset, 100);
+    }
+}
+
+TEST(Desktop, BackgroundPasteCapturesItsPlaneAndClipsWithoutChangingOtherPixels)
+{
+    for (const auto type : {PixelType::UInt16, PixelType::Float64, PixelType::RGB8, PixelType::RGBA8}) {
+        MainWindow window;
+        auto source = Image::allocate(type, {3, 2});
+        for (std::size_t y = 0; y < 2; ++y) for (std::size_t x = 0; x < 3; ++x)
+            for (std::size_t c = 0; c < componentCount(type); ++c)
+                source.setValue(std::array<std::size_t, 2>{x, y}, 1 + x + 10 * y + c, c);
+        window.addDocument(source);
+        window.commands().execute("edit.copy");
+        auto *doc = window.addDocument(Image::allocate(type, {4, 4, 2, 2, 2}));
+        doc->viewer->setSlice(1, 1, 1);
+        Roi selection; selection.points = {{-1, 1}, {2, 3}}; selection.z = selection.channel = selection.time = 1;
+        doc->setSelection(selection);
+        window.commands().execute("edit.paste");
+        EXPECT_EQ(doc->revision, 0u); // Completion must return through the UI event loop.
+        doc->viewer->setSlice(0, 0, 0); doc->setSelection({});
+        ASSERT_TRUE(finishJobs(window));
+        for (std::size_t c = 0; c < componentCount(type); ++c) {
+            EXPECT_DOUBLE_EQ(doc->image.sample(0, 1, 1, 1, 1, c), source.sample(1, 0, 0, 0, 0, c));
+            EXPECT_DOUBLE_EQ(doc->image.sample(1, 2, 1, 1, 1, c), source.sample(2, 1, 0, 0, 0, c));
+            EXPECT_DOUBLE_EQ(doc->image.sample(2, 1, 1, 1, 1, c), 0);
+            EXPECT_DOUBLE_EQ(doc->image.sample(0, 1, 0, 0, 0, c), 0);
+        }
+        QEvent activate(QEvent::WindowActivate); QCoreApplication::sendEvent(doc, &activate);
+        window.commands().execute("edit.undo");
+        EXPECT_DOUBLE_EQ(doc->image.sample(0, 1, 1, 1, 1), 0);
+    }
+}
+
+TEST(Desktop, BackgroundPasteKeepsNewerEditsAndClosedTargetsInSeparateDocuments)
+{
+    for (bool closeTarget : {false, true}) {
+        std::atomic<bool> release{false};
+        MainWindow window;
+        auto clipboard = Image::allocate(PixelType::UInt16, {2, 2});
+        clipboard.setValue(std::array<std::size_t, 2>{0, 0}, 111);
+        auto *source = window.addDocument(clipboard);
+        window.commands().execute("edit.copy");
+        auto original = Image::allocate(PixelType::UInt16, {4, 4});
+        original.metadata().sourcePath = "original.tif";
+        QPointer<DocumentWidget> target = window.addDocument(original);
+        for (int i = 0; i < 2; ++i) window.jobs().submit("Hold worker", [&](auto stop, auto) {
+            while (!release.load() && !stop.stop_requested()) QThread::msleep(1);
+        }, {});
+        window.commands().execute("edit.paste");
+        if (closeTarget) {
+            ASSERT_TRUE(target->close());
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+            ASSERT_TRUE(target.isNull());
+        } else {
+            auto newer = Image::allocate(PixelType::UInt16, {3, 3});
+            newer.setValue(std::array<std::size_t, 2>{0, 0}, 222);
+            target->replaceImage(newer, "Newer edit");
+        }
+        release.store(true);
+        ASSERT_TRUE(finishJobs(window));
+        ASSERT_EQ(window.documents().size(), closeTarget ? 2 : 3);
+        DocumentWidget *pasted = nullptr;
+        for (auto *document : window.documents())
+            if (document != source && document != target.data()) pasted = document;
+        ASSERT_NE(pasted, nullptr);
+        EXPECT_EQ(pasted->image.shape(), original.shape());
+        EXPECT_DOUBLE_EQ(pasted->image.sample(0, 0), 111);
+        EXPECT_TRUE(pasted->image.metadata().sourcePath.isEmpty());
+        EXPECT_TRUE(pasted->modified);
+        EXPECT_TRUE(pasted->title().endsWith(" *"));
+        if (target) {
+            EXPECT_EQ(target->image.shape(), (std::vector<std::size_t>{3, 3}));
+            EXPECT_DOUBLE_EQ(target->image.sample(0, 0), 222);
+            EXPECT_EQ(target->revision, 1u);
+            EXPECT_TRUE(target->modified);
+        }
+    }
+}
+
+TEST(Desktop, OverlappingSavesAreRejectedAndReservationsReleaseAfterCancellation)
+{
+    for (bool cancel : {false, true}) {
+        QTemporaryDir directory;
+#ifdef Q_OS_WIN
+        const QString fileName = "saved.tif";
+#else
+        const QString fileName = QString(230, 'x') + ".tif"; // Lock filenames must also fit the directory entry limit.
+#endif
+        const auto path = directory.filePath(fileName);
+        std::atomic<bool> release{false};
+        MainWindow window;
+        for (int i = 0; i < 2; ++i) window.jobs().submit("Hold worker", [&](auto stop, auto) {
+            while (!release.load() && !stop.stop_requested()) QThread::msleep(1);
+        }, {});
+        auto original = Image::allocate(PixelType::UInt16, {4, 4});
+        original.mutableData()[0] = std::byte{11};
+        auto *doc = window.addDocument(original);
+        EXPECT_TRUE(saveImage(window, path).isEmpty());
+        auto newer = Image::allocate(PixelType::UInt16, {2, 2});
+        newer.mutableData()[0] = std::byte{22};
+        doc->replaceImage(newer, "New revision");
+        EXPECT_TRUE(saveImage(window, directory.filePath("./" + fileName)).contains("still being saved"));
+        if (cancel) window.jobs().cancelAll(); else release.store(true);
+        ASSERT_TRUE(finishJobs(window));
+        EXPECT_TRUE(doc->modified);
+        if (cancel) EXPECT_FALSE(QFileInfo::exists(path));
+        else EXPECT_DOUBLE_EQ(readImage(path).sample(0, 0), 11);
+        EXPECT_TRUE(saveImage(window, path).isEmpty());
+        ASSERT_TRUE(finishJobs(window));
+        EXPECT_FALSE(doc->modified);
+        const auto saved = readImage(path);
+        EXPECT_EQ(saved.shape(), newer.shape());
+        EXPECT_DOUBLE_EQ(saved.sample(0, 0), 22);
+    }
 }
 
 TEST(Desktop, StartsCompactAndOpensIndependentImageAndToolWindows)

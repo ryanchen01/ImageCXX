@@ -273,11 +273,15 @@ Image Image::slice(std::size_t z, std::size_t channel, std::size_t time) const {
         else if (coordinates[axis - 2] != 0) throw std::out_of_range("Slice is outside the image");
     }
     Image result = region(start, extent);
+    if (result.metadata_.axes.size() >= 3 && result.metadata_.direction.empty())
+        result.metadata_.direction = {1, 0, 0, 0, 1, 0, 0, 0, 1};
     if (result.metadata_.direction.size() == 9 && result.metadata_.axes.size() >= 3) {
         const QJsonArray origin{result.metadata_.axes[0].origin, result.metadata_.axes[1].origin,
                                 result.metadata_.axes[2].origin};
         result.metadata_.attributes.insert(QStringLiteral("ImageCXX.EmbeddedPlaneOrigin"),
             QString::fromUtf8(QJsonDocument(origin).toJson(QJsonDocument::Compact)));
+        result.metadata_.attributes.insert(QStringLiteral("ImageCXX.EmbeddedPlaneZUnit"),
+            result.metadata_.axes[2].unit);
     }
     result.shape_.resize(2);
     result.strides_.resize(2);

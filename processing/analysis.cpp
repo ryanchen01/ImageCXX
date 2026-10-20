@@ -9,6 +9,10 @@
 namespace imagecxx {
 namespace {
 
+void checkCancelled(std::stop_token stop) {
+    if (stop.stop_requested()) throw std::runtime_error("Analysis cancelled");
+}
+
 void validateSlice(const Image &slice, bool scalar = true) {
     if (slice.empty() || slice.pixelCount() != slice.width() * slice.height())
         throw std::invalid_argument("Analysis requires a single 2D slice");
@@ -23,7 +27,8 @@ double intensity(const Image &slice, std::size_t x, std::size_t y, bool calibrat
 
 } // namespace
 
-Measurement measure(const Image &slice, const std::optional<Roi> &roi, bool calibrated) {
+Measurement measure(const Image &slice, const std::optional<Roi> &roi, bool calibrated, std::stop_token stop) {
+    checkCancelled(stop);
     validateSlice(slice);
     if (roi && roi->type == RoiType::Line) throw std::invalid_argument("Use a line profile for line ROIs");
     Measurement result;
@@ -34,6 +39,7 @@ Measurement measure(const Image &slice, const std::optional<Roi> &roi, bool cali
     long double mean = 0, m2 = 0, sum = 0, scale = 0;
     std::size_t selectedCount = 0;
     for (std::size_t y = 0; y < slice.height(); ++y) {
+        checkCancelled(stop);
         for (std::size_t x = 0; x < slice.width(); ++x) {
             if (roi && !roi->contains(QPointF(x + 0.5, y + 0.5))) continue;
             ++selectedCount;
@@ -55,6 +61,7 @@ Measurement measure(const Image &slice, const std::optional<Roi> &roi, bool cali
             m2 += delta * (normalized - mean);
         }
     }
+    checkCancelled(stop);
     result.sum = static_cast<double>(sum * scale);
     result.mean = static_cast<double>(mean * scale);
     if (result.count == 0) result.minimum = result.maximum = result.mean = std::numeric_limits<double>::quiet_NaN();
@@ -68,7 +75,8 @@ Measurement measure(const Image &slice, const std::optional<Roi> &roi, bool cali
     return result;
 }
 
-Histogram histogram(const Image &slice, std::size_t bins, const std::optional<Roi> &roi, bool calibrated) {
+Histogram histogram(const Image &slice, std::size_t bins, const std::optional<Roi> &roi, bool calibrated, std::stop_token stop) {
+    checkCancelled(stop);
     validateSlice(slice);
     if (bins == 0 || bins > 1048576) throw std::invalid_argument("Histogram bin count must be between 1 and 1048576");
     if (roi && roi->type == RoiType::Line) throw std::invalid_argument("Use a line profile for line ROIs");
@@ -78,6 +86,7 @@ Histogram histogram(const Image &slice, std::size_t bins, const std::optional<Ro
     result.minimum = std::numeric_limits<double>::infinity();
     result.maximum = -std::numeric_limits<double>::infinity();
     for (std::size_t y = 0; y < slice.height(); ++y) {
+        checkCancelled(stop);
         for (std::size_t x = 0; x < slice.width(); ++x) {
             if (roi && !roi->contains(QPointF(x + 0.5, y + 0.5))) continue;
             const auto value = intensity(slice, x, y, calibrated);
@@ -87,6 +96,7 @@ Histogram histogram(const Image &slice, std::size_t bins, const std::optional<Ro
             result.maximum = std::max(result.maximum, value);
         }
     }
+    checkCancelled(stop);
     if (result.finiteCount == 0) {
         result.minimum = result.maximum = std::numeric_limits<double>::quiet_NaN();
         std::fill(result.centers.begin(), result.centers.end(), std::numeric_limits<double>::quiet_NaN());
@@ -99,6 +109,7 @@ Histogram histogram(const Image &slice, std::size_t bins, const std::optional<Ro
         result.centers[bin] = range > 0 ? std::lerp(result.minimum, result.maximum,
             (static_cast<double>(bin) + 0.5) / static_cast<double>(bins)) : result.minimum;
     for (std::size_t y = 0; y < slice.height(); ++y) {
+        checkCancelled(stop);
         for (std::size_t x = 0; x < slice.width(); ++x) {
             if (roi && !roi->contains(QPointF(x + 0.5, y + 0.5))) continue;
             const auto value = intensity(slice, x, y, calibrated);
@@ -109,10 +120,12 @@ Histogram histogram(const Image &slice, std::size_t bins, const std::optional<Ro
             ++result.counts[bin];
         }
     }
+    checkCancelled(stop);
     return result;
 }
 
-LineProfile lineProfile(const Image &slice, QPointF start, QPointF end, std::size_t samples, bool calibrated) {
+LineProfile lineProfile(const Image &slice, QPointF start, QPointF end, std::size_t samples, bool calibrated, std::stop_token stop) {
+    checkCancelled(stop);
     validateSlice(slice);
     const auto inside = [&slice](QPointF point) {
         return std::isfinite(point.x()) && std::isfinite(point.y()) && point.x() >= 0 && point.y() >= 0
@@ -131,6 +144,7 @@ LineProfile lineProfile(const Image &slice, QPointF start, QPointF end, std::siz
     result.intensityUnit = calibrated ? slice.metadata().intensityUnit : QString();
     result.distance.reserve(samples); result.intensity.reserve(samples);
     for (std::size_t i = 0; i < samples; ++i) {
+        if ((i & 1023) == 0) checkCancelled(stop);
         const double t = samples > 1 ? static_cast<double>(i) / (samples - 1) : 0;
         const auto x = std::clamp(start.x() + t * dx, 0.0, static_cast<double>(slice.width() - 1));
         const auto y = std::clamp(start.y() + t * dy, 0.0, static_cast<double>(slice.height() - 1));
@@ -145,10 +159,12 @@ LineProfile lineProfile(const Image &slice, QPointF start, QPointF end, std::siz
         result.distance.push_back(t * length);
         result.intensity.push_back(value);
     }
+    checkCancelled(stop);
     return result;
 }
 
-Mask createMask(const Image &slice, const Roi &roi) {
+Mask createMask(const Image &slice, const Roi &roi, std::stop_token stop) {
+    checkCancelled(stop);
     validateSlice(slice, false);
     if (roi.type == RoiType::Line) throw std::invalid_argument("A line ROI cannot define an area mask");
     Mask result;
@@ -159,9 +175,12 @@ Mask createMask(const Image &slice, const Roi &roi) {
     detail::resetMaskMetadata(metadata);
     result.pixels = Image::allocate(PixelType::UInt8, {slice.width(), slice.height()}, std::move(metadata));
     auto *bytes = reinterpret_cast<std::uint8_t *>(result.pixels.mutableData());
-    for (std::size_t y = 0; y < slice.height(); ++y)
+    for (std::size_t y = 0; y < slice.height(); ++y) {
+        checkCancelled(stop);
         for (std::size_t x = 0; x < slice.width(); ++x)
             bytes[y * slice.width() + x] = roi.contains(QPointF(x + 0.5, y + 0.5)) ? 255 : 0;
+    }
+    checkCancelled(stop);
     return result;
 }
 

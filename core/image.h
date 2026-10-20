@@ -35,7 +35,8 @@ struct ImageMetadata {
     std::vector<Axis> axes;
     // Row-major spatial direction matrix. Empty means identity. A 2D view may
     // retain its 3D plane orientation, with its complete world origin stored as
-    // a JSON triple in attributes["ImageCXX.EmbeddedPlaneOrigin"].
+    // a JSON triple in attributes["ImageCXX.EmbeddedPlaneOrigin"]. Its Z unit is
+    // retained in attributes["ImageCXX.EmbeddedPlaneZUnit"].
     std::vector<double> direction;
     std::vector<Channel> channels;
     double intensityScale = 1.0;

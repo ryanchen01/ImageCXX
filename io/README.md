@@ -20,7 +20,9 @@ NIfTI exports convert spatial units m/cm/mm/um/nm to millimeters and time units 
 
 DICOM imports native, RLE, JPEG and JPEG-LS encodings supported by DCMTK. Enhanced per-frame functional groups and unsupported compression fail explicitly. Single-file multiframe grayscale is read as a Z stack with shared geometry. Series import requires matching study/series/frame-of-reference identifiers, scalar encoding, calibration, orientation and spacing. It orders slices by patient coordinates and rejects duplicate positions, nonuniform spacing and shifted grids. Export writes one 2D secondary-capture image. Original stored pixel values stay separate from intensity calibration. MONOCHROME1 is retained in its metadata.
 
-A 2D slice with an embedded 3D plane retains its full origin and direction through TIFF and DICOM. Scientific export rejects that slice instead of discarding its plane; save the original volume or choose TIFF/DICOM. Two-dimensional scientific images with intrinsic 2D geometry remain supported.
+DICOM export converts spatial units m/cm/mm/um/nm to millimeters and rejects uncalibrated units. It preserves intrinsic 2D rotations as a plane in 3D. Multi-file series results do not carry a single-file reload path, so Revert cannot replace a series with one slice.
+
+A 2D slice with an embedded 3D plane retains its full origin, depth unit and direction through PNG, TIFF and DICOM, including unrotated volumes with an implicit identity direction. Scientific export rejects that slice instead of discarding its plane; save the original volume or choose TIFF/DICOM. Two-dimensional scientific images with intrinsic 2D geometry remain supported.
 
 TIFF, PNG, JPEG, MHA, NIfTI, NRRD and DICOM publish with `QSaveFile` after encoding completes. TIFF, ITK and DCMTK encode in a temporary sibling directory before a bounded-buffer copy into the atomic destination. Errors and cancellation preserve an existing destination. Native codec calls may finish before cancellation is observed; publication checks cancellation again.
 

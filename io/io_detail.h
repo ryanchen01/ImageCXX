@@ -9,4 +9,5 @@ void atomicCopy(const QString &source, const QString &destination,
                 std::stop_token stop, const IoProgress &progress = {});
 QJsonObject imageDescription(const Image &image);
 ImageMetadata descriptionMetadata(const QJsonObject &object);
+double spatialUnitToMillimeters(const QString &unit);
 } // namespace imagecxx::detail

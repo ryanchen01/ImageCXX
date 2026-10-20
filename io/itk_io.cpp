@@ -180,7 +180,8 @@ void writeScientific(const Image &input, const QString &path, std::stop_token st
             std::swap(shape[3], shape[4]);
             std::swap(axes[3], axes[4]);
         }
-        while (shape.size() > 2 && shape.back() == 1) shape.pop_back();
+        const std::size_t spatialDimensions = std::min<std::size_t>(3, image.shape().size());
+        while (shape.size() > spatialDimensions && shape.back() == 1) shape.pop_back();
         const auto dimensions = static_cast<unsigned int>(shape.size());
         io->SetNumberOfDimensions(dimensions);
         itk::ImageIORegion region(dimensions);
@@ -191,12 +192,7 @@ void writeScientific(const Image &input, const QString &path, std::stop_token st
                 const auto unit = calibration.unit.trimmed().toLower();
                 double factor = 1;
                 if (axis < 3) {
-                    if (unit == "m") factor = 1000;
-                    else if (unit == "cm") factor = 10;
-                    else if (unit == "mm") factor = 1;
-                    else if (unit == "um" || unit == QString::fromUtf8("µm") || unit == QString::fromUtf8("μm")) factor = .001;
-                    else if (unit == "nm") factor = .000001;
-                    else throw std::runtime_error("NIfTI export requires calibrated spatial units: m, cm, mm, um or nm");
+                    factor = detail::spatialUnitToMillimeters(unit);
                 } else {
                     if (unit == "s" || (shape[axis] == 1 && unit.isEmpty())) factor = 1;
                     else if (unit == "ms") factor = .001;

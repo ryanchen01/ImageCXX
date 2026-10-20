@@ -2,7 +2,7 @@
 
 ImageCXX is a C++20 and Qt Widgets image viewer and analysis application with a compact launcher and separate image and tool windows. It keeps scientific pixel values separate from display settings and provides stack browsing, ROIs, measurements, plots and ITK processing.
 
-The architecture and scope are in [docs/stack.md](docs/stack.md). Current workflows, format support and limits are documented in [docs/phase-1-2.md](docs/phase-1-2.md).
+The image model and undo history are in `core/`, format adapters in `io/`, and ITK filters and measurements in `processing/`. The `app/` module owns commands, batch processing and background jobs; `ui/`, `viewer/` and `plots/` provide the desktop interface. See [format support and save limits](io/README.md), [keyboard shortcuts](docs/shortcuts.md) and [unfinished work](TODO.md).
 
 ## Build
 
@@ -48,6 +48,14 @@ Start `build/dev-vcpkg/ImageCXX` on Linux, `build/dev-vcpkg/ImageCXX.exe` on Win
 
 Use **File → Save image as…** to save image pixels and **Analyze → Export measurements as CSV…** to export measurement results as CSV. ROIs stay in memory and are never saved.
 
+Wait for a save to finish before saving to the same destination again. Multi-file DICOM series cannot use Revert because reopening one slice would discard the rest of the stack. DICOM and NIfTI exports require calibrated spatial units; DICOM converts them to millimeters.
+
+Batch mode runs without a desktop window and writes new TIFF files without replacing existing outputs:
+
+```sh
+build/dev-vcpkg/ImageCXX --batch --operation threshold --parameters '{"lower":100,"upper":255}' --output results input.tif
+```
+
 Built-in shortcut mappings and compatibility limits are listed in [docs/shortcuts.md](docs/shortcuts.md).
 
 ## Checks and benchmarks
@@ -62,7 +70,7 @@ The `sanitizers` and `sanitizers-vcpkg` presets enable AddressSanitizer and Unde
 
 Run `imagecxx_benchmarks` from the selected build directory with `--benchmark_out=benchmarks.json --benchmark_out_format=json`. It measures shared snapshots, slice views, buffer copies, histograms and ITK Gaussian filtering on deterministic generated inputs. These are CPU microbenchmarks. Record hardware, OS, compiler, build type and dependency versions alongside results before comparing runs. They do not measure launch time, GPU frame timing or real file decoding.
 
-The [GitHub Actions workflow](.github/workflows/build.yml) defines Windows, macOS and Linux build/test jobs with cached dependencies. Hosted runs and cross-platform release packaging have not yet been verified. CI requires the pinned Qt SDK and its add-on archives to be available from Qt's download service.
+The [GitHub Actions workflow](.github/workflows/build.yml) defines Windows, macOS and Linux build/test jobs with cached dependencies. Linux also runs graphics and interactive plot tests under Xvfb with software rendering. Hosted runs and cross-platform release packaging have not yet been verified. CI requires the pinned Qt SDK and its add-on archives to be available from Qt's download service.
 
 `clang-format` uses [.clang-format](.clang-format), and `clang-tidy` can use the generated `compile_commands.json` with [.clang-tidy](.clang-tidy).
 

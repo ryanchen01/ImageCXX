@@ -24,6 +24,17 @@
 namespace imagecxx {
 namespace detail {
 
+double spatialUnitToMillimeters(const QString &unit)
+{
+    const auto name = unit.trimmed().toLower();
+    if (name == "m") return 1000;
+    if (name == "cm") return 10;
+    if (name == "mm") return 1;
+    if (name == "um" || name == QString::fromUtf8("µm") || name == QString::fromUtf8("μm")) return .001;
+    if (name == "nm") return .000001;
+    throw std::runtime_error("Export requires calibrated spatial units: m, cm, mm, um or nm");
+}
+
 void checkIo(std::stop_token stop, const IoProgress &progress, double fraction)
 {
     if (stop.stop_requested()) throw std::runtime_error("Image I/O cancelled");
@@ -204,8 +215,9 @@ Image readImage(const QString &path, const std::optional<RawImportOptions> &raw,
         else if (bits == 8 && format == SAMPLEFORMAT_UINT && samples == 3 && photometric == PHOTOMETRIC_RGB) type = PixelType::RGB8;
         else if (bits == 8 && format == SAMPLEFORMAT_UINT && samples == 4 && photometric == PHOTOMETRIC_RGB) type = PixelType::RGBA8;
         else throw std::runtime_error("Unsupported TIFF pixel type");
-        if (planar != PLANARCONFIG_CONTIG || photometric == PHOTOMETRIC_PALETTE)
-            throw std::runtime_error("TIFF planar or palette encoding is unsupported");
+        if (planar != PLANARCONFIG_CONTIG || (samples == 1
+            && photometric != PHOTOMETRIC_MINISBLACK && photometric != PHOTOMETRIC_MINISWHITE))
+            throw std::runtime_error("TIFF planar or photometric encoding is unsupported");
         std::size_t pages = 0;
         do { ++pages; } while (TIFFReadDirectory(tiff.get()));
         TIFFSetDirectory(tiff.get(), 0);
@@ -274,13 +286,18 @@ Image readImage(const QString &path, const std::optional<RawImportOptions> &raw,
                 throw std::runtime_error("Cannot read TIFF directory");
             uint32_t pageWidth = 0, pageHeight = 0;
             uint16_t pageBits = 0, pageSamples = 1, pageFormat = SAMPLEFORMAT_UINT, pageOrientation = ORIENTATION_TOPLEFT;
+            uint16_t pagePlanar = PLANARCONFIG_CONTIG, pagePhotometric = PHOTOMETRIC_MINISBLACK;
             TIFFGetField(tiff.get(), TIFFTAG_IMAGEWIDTH, &pageWidth);
             TIFFGetField(tiff.get(), TIFFTAG_IMAGELENGTH, &pageHeight);
             TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_BITSPERSAMPLE, &pageBits);
             TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_SAMPLESPERPIXEL, &pageSamples);
             TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_SAMPLEFORMAT, &pageFormat);
             TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_ORIENTATION, &pageOrientation);
-            if (pageWidth != width || pageHeight != height || pageBits != bits || pageSamples != samples || pageFormat != format || pageOrientation != ORIENTATION_TOPLEFT)
+            TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_PLANARCONFIG, &pagePlanar);
+            TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_PHOTOMETRIC, &pagePhotometric);
+            if (pageWidth != width || pageHeight != height || pageBits != bits || pageSamples != samples
+                || pageFormat != format || pageOrientation != ORIENTATION_TOPLEFT
+                || pagePlanar != PLANARCONFIG_CONTIG || pagePhotometric != photometric)
                 throw std::runtime_error("TIFF pages have inconsistent dimensions, encoding, or unsupported orientation");
             std::size_t targetPage = page;
             if (imageJ) {
@@ -295,14 +312,18 @@ Image readImage(const QString &path, const std::optional<RawImportOptions> &raw,
                 TIFFGetField(tiff.get(), TIFFTAG_TILELENGTH, &tileHeight);
                 const auto tileSize = TIFFTileSize(tiff.get());
                 if (!tileWidth || !tileHeight || tileSize <= 0) throw std::runtime_error("Invalid TIFF tile layout");
+                if (tileWidth > static_cast<std::size_t>(tileSize) / bytesPerPixel(type) / tileHeight
+                    || static_cast<std::size_t>(tileWidth) * bytesPerPixel(type) * tileHeight != static_cast<std::size_t>(tileSize))
+                    throw std::runtime_error("Invalid TIFF tile buffer size");
                 std::vector<std::byte> tile(static_cast<std::size_t>(tileSize));
-                for (uint32_t y = 0; y < height; y += tileHeight) {
+                for (std::size_t y = 0; y < height; y += tileHeight) {
                     detail::checkIo(stop, {}, 0);
-                    for (uint32_t x = 0; x < width; x += tileWidth) {
-                        if (TIFFReadTile(tiff.get(), tile.data(), x, y, 0, 0) < 0) throw std::runtime_error("Cannot decode TIFF tile");
-                        for (uint32_t row = 0; row < std::min(tileHeight, height - y); ++row)
+                    for (std::size_t x = 0; x < width; x += tileWidth) {
+                        if (TIFFReadTile(tiff.get(), tile.data(), static_cast<uint32_t>(x), static_cast<uint32_t>(y), 0, 0) != tileSize)
+                            throw std::runtime_error("TIFF tile is truncated or corrupt");
+                        for (std::size_t row = 0; row < std::min<std::size_t>(tileHeight, height - y); ++row)
                             std::memcpy(destination + targetPage * pageBytes + (y + row) * rowBytes + x * bytesPerPixel(type),
-                                        tile.data() + row * tileWidth * bytesPerPixel(type), std::min(tileWidth, width - x) * bytesPerPixel(type));
+                                        tile.data() + row * tileWidth * bytesPerPixel(type), std::min<std::size_t>(tileWidth, width - x) * bytesPerPixel(type));
                     }
                 }
             } else {
@@ -459,7 +480,7 @@ void writeImage(const Image &input, const QString &path, std::stop_token stop, I
             detail::checkIo(stop, {}, 0);
             std::memcpy(raster.scanLine(y), image.data() + static_cast<std::size_t>(y) * rowBytes, rowBytes);
         }
-        raster.setText("ImageCXX", QString::fromUtf8(QJsonDocument(detail::imageDescription(image)).toJson(QJsonDocument::Compact)));
+        raster.setText("ImageCXX", QString::fromUtf8(QJsonDocument(detail::imageDescription(image.slice())).toJson(QJsonDocument::Compact)));
         QSaveFile output(path);
         if (!output.open(QIODevice::WriteOnly)) throw std::runtime_error("Cannot create raster image");
         QImageWriter writer(&output, suffix.toLatin1());

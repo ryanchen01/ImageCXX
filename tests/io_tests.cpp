@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
+#include <tuple>
 
 using namespace imagecxx;
 
@@ -113,6 +114,65 @@ TEST(ImageIo, TiffPreservesEveryPixelTypeAndFiveDimensionalMetadata)
     }
 }
 
+TEST(ImageIo, TiffChecksEveryPageLayoutAndReadsPartialEdgeTiles)
+{
+    QTemporaryDir directory;
+    for (const auto *mode : {"w", "w8"}) for (bool tiled : {false, true})
+        for (const auto &[samples, planar, photometric] : {
+            std::tuple{3, PLANARCONFIG_CONTIG, PHOTOMETRIC_RGB},
+            std::tuple{4, PLANARCONFIG_CONTIG, PHOTOMETRIC_RGB},
+            std::tuple{3, PLANARCONFIG_SEPARATE, PHOTOMETRIC_RGB},
+            std::tuple{4, PLANARCONFIG_SEPARATE, PHOTOMETRIC_RGB},
+            std::tuple{3, PLANARCONFIG_CONTIG, PHOTOMETRIC_YCBCR},
+            std::tuple{1, PLANARCONFIG_CONTIG, PHOTOMETRIC_MINISWHITE}}) {
+            SCOPED_TRACE(::testing::Message() << mode << " tiled=" << tiled << " samples=" << samples
+                                            << " planar=" << planar << " photo=" << photometric);
+            const auto path = directory.filePath("pages.tiff");
+            std::unique_ptr<TIFF, decltype(&TIFFClose)> tiff(TIFFOpen(qPrintable(path), mode), TIFFClose);
+            ASSERT_NE(tiff, nullptr);
+            for (int page = 0; page < 2; ++page) {
+                const auto layout = page ? planar : PLANARCONFIG_CONTIG;
+                TIFFSetField(tiff.get(), TIFFTAG_IMAGEWIDTH, 17);
+                TIFFSetField(tiff.get(), TIFFTAG_IMAGELENGTH, 19);
+                TIFFSetField(tiff.get(), TIFFTAG_BITSPERSAMPLE, 8);
+                TIFFSetField(tiff.get(), TIFFTAG_SAMPLESPERPIXEL, samples);
+                TIFFSetField(tiff.get(), TIFFTAG_PLANARCONFIG, layout);
+                TIFFSetField(tiff.get(), TIFFTAG_PHOTOMETRIC, page ? photometric : samples == 1 ? PHOTOMETRIC_MINISBLACK : PHOTOMETRIC_RGB);
+                if (samples == 4) {
+                    uint16_t extra = EXTRASAMPLE_UNASSALPHA;
+                    TIFFSetField(tiff.get(), TIFFTAG_EXTRASAMPLES, 1, &extra);
+                }
+                if (page && tiled) {
+                    TIFFSetField(tiff.get(), TIFFTAG_TILEWIDTH, 16);
+                    TIFFSetField(tiff.get(), TIFFTAG_TILELENGTH, 16);
+                    std::vector<unsigned char> tile(static_cast<std::size_t>(TIFFTileSize(tiff.get())), 81);
+                    for (int sample = 0; sample < (layout == PLANARCONFIG_SEPARATE ? samples : 1); ++sample)
+                        for (uint32_t y : {0u, 16u}) for (uint32_t x : {0u, 16u})
+                            ASSERT_GE(TIFFWriteTile(tiff.get(), tile.data(), x, y, 0, sample), 0);
+                } else {
+                    // Unsubsampled YCbCr also exercises the strip branch's page validation.
+                    if (photometric == PHOTOMETRIC_YCBCR && page)
+                        TIFFSetField(tiff.get(), TIFFTAG_YCBCRSUBSAMPLING, 1, 1);
+                    TIFFSetField(tiff.get(), TIFFTAG_ROWSPERSTRIP, 19);
+                    std::vector<unsigned char> row(static_cast<std::size_t>(TIFFScanlineSize(tiff.get())), page ? 81 : 37);
+                    for (int sample = 0; sample < (layout == PLANARCONFIG_SEPARATE ? samples : 1); ++sample)
+                        for (uint32_t y = 0; y < 19; ++y)
+                            ASSERT_GE(TIFFWriteScanline(tiff.get(), row.data(), y, sample), 0);
+                }
+                ASSERT_TRUE(TIFFWriteDirectory(tiff.get()));
+            }
+            tiff.reset();
+            if (planar != PLANARCONFIG_CONTIG || photometric != PHOTOMETRIC_RGB) {
+                EXPECT_THROW(readImage(path), std::runtime_error);
+            } else {
+                const auto image = readImage(path);
+                EXPECT_EQ(image.shape(), (std::vector<std::size_t>{17, 19, 2}));
+                for (std::size_t i = 0; i < image.byteCount(); ++i)
+                    EXPECT_EQ(image.data()[i], std::byte(i < 17 * 19 * samples ? 37 : 81));
+            }
+        }
+}
+
 TEST(ImageIo, RawRoundTripMapsAndPreservesSidecarMetadata)
 {
     QTemporaryDir directory;
@@ -163,6 +223,24 @@ TEST(ImageIo, PngPreservesGray16AndRgbaWithoutPaddingBytes)
         expectPixels(loaded, original);
         EXPECT_EQ(loaded.metadata().axes[0].spacing, 0.25);
         EXPECT_EQ(loaded.metadata().intensityOffset, -100);
+    }
+}
+
+TEST(ImageIo, PngReopensSingletonStackAxesAndRetainsItsPlane)
+{
+    QTemporaryDir directory;
+    for (const auto shape : {std::vector<std::size_t>{5, 3, 1}, {5, 3, 1, 1, 1}}) for (bool implicitDirection : {false, true}) {
+        auto image = fixture(PixelType::UInt16, shape);
+        if (implicitDirection) image.metadata().direction.clear();
+        const auto path = directory.filePath("plane.png");
+        writeImage(image, path);
+        const auto loaded = readImage(path);
+        expectPixels(loaded, image);
+        EXPECT_EQ(loaded.shape(), (std::vector<std::size_t>{5, 3}));
+        EXPECT_EQ(loaded.metadata().direction, implicitDirection
+            ? (std::vector<double>{1, 0, 0, 0, 1, 0, 0, 0, 1}) : image.metadata().direction);
+        EXPECT_EQ(loaded.metadata().attributes.value("ImageCXX.EmbeddedPlaneOrigin"), "[10,-2,7]");
+        EXPECT_EQ(loaded.metadata().attributes.value("ImageCXX.EmbeddedPlaneZUnit"), "mm");
     }
 }
 
@@ -248,6 +326,8 @@ TEST(ImageIo, DicomSeriesOrdersPhysicalPositionsAndRejectsMixedSeries)
         paths << path;
     }
     const auto image = readDicomSeries(paths);
+    EXPECT_TRUE(image.metadata().sourcePath.isEmpty());
+    EXPECT_EQ(readDicomSeries({paths.front()}).metadata().sourcePath, paths.front());
     EXPECT_EQ(image.depth(), 3);
     EXPECT_EQ(image.sample(0, 0, 0), 0);
     EXPECT_EQ(image.sample(0, 0, 1), 100);
@@ -259,6 +339,85 @@ TEST(ImageIo, DicomSeriesOrdersPhysicalPositionsAndRejectsMixedSeries)
     paths << path;
     EXPECT_THROW(readDicomSeries(paths), std::runtime_error);
     EXPECT_THROW(readDicomSeries({paths[0], paths[0]}), std::runtime_error);
+}
+
+TEST(ImageIo, DicomConvertsSpatialUnitsAndEmbedsTwoDimensionalRotation)
+{
+    QTemporaryDir directory;
+    const auto path = directory.filePath("plane.dcm");
+    auto image = fixture(PixelType::UInt16, {5, 3});
+    image.metadata().direction = {0, -1, 1, 0};
+    for (const auto &[unit, factor] : {std::pair{"m", 1000.}, {"cm", 10.}, {"mm", 1.},
+                                      {"um", .001}, {"µm", .001}, {"μm", .001}, {"nm", .000001}}) {
+        for (auto &axis : image.metadata().axes) axis.unit = QString::fromUtf8(unit);
+        writeImage(image, path);
+        const auto loaded = readImage(path);
+        expectPixels(loaded, image);
+        for (std::size_t axis = 0; axis < 2; ++axis) {
+            EXPECT_EQ(loaded.metadata().axes[axis].unit, "mm");
+            EXPECT_NEAR(loaded.metadata().axes[axis].spacing, image.metadata().axes[axis].spacing * factor, 1e-12);
+            EXPECT_NEAR(loaded.metadata().axes[axis].origin, image.metadata().axes[axis].origin * factor, 1e-12);
+        }
+        EXPECT_EQ(loaded.metadata().direction, (std::vector<double>{0, -1, 0, 1, 0, 0, 0, 0, 1}));
+    }
+    QFile saved(path); ASSERT_TRUE(saved.open(QIODevice::ReadOnly));
+    const auto before = saved.readAll(); saved.close();
+    image.metadata().axes[0].unit = "px";
+    EXPECT_THROW(writeImage(image, path), std::runtime_error);
+    ASSERT_TRUE(saved.open(QIODevice::ReadOnly)); EXPECT_EQ(saved.readAll(), before);
+
+    auto volume = fixture(PixelType::UInt16);
+    for (auto &axis : volume.metadata().axes) axis.unit = "um";
+    writeImage(volume.slice(1), path);
+    const auto loaded = readImage(path);
+    EXPECT_NEAR(loaded.metadata().axes[2].origin, .0085, 1e-12);
+}
+
+TEST(ImageIo, DicomRetainsMixedUnitPlanePositionThroughRasterAndTiff)
+{
+    QTemporaryDir directory;
+    for (bool implicitDirection : {false, true}) {
+        ImageMetadata metadata;
+        metadata.axes = {{"X", 1, 0, "um"}, {"Y", 1, 0, "um"}, {"Z", 1, 7, "mm"}};
+        if (!implicitDirection) metadata.direction = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+        const auto image = Image::allocate(PixelType::UInt16, {4, 4, 2}, metadata);
+        for (const auto *extension : {"dcm", "png", "tif"}) {
+            const auto path = directory.filePath(QString("plane.") + extension);
+            writeImage(image.slice(1), path);
+            auto loaded = readImage(path);
+            if (QString(extension) != "dcm") {
+                // Cropping and slicing an already embedded plane must keep its depth unit.
+                loaded = loaded.region(std::array<std::size_t, 2>{1, 1},
+                                       std::array<std::size_t, 2>{2, 2}).slice();
+                const auto dicom = directory.filePath("reexport.dcm");
+                writeImage(loaded, dicom);
+                loaded = readImage(dicom);
+                EXPECT_NEAR(loaded.metadata().axes[0].origin, .001, 1e-12);
+                EXPECT_NEAR(loaded.metadata().axes[1].origin, .001, 1e-12);
+            }
+            EXPECT_NEAR(loaded.metadata().axes[0].spacing, .001, 1e-12);
+            EXPECT_NEAR(loaded.metadata().axes[1].spacing, .001, 1e-12);
+            EXPECT_DOUBLE_EQ(loaded.metadata().axes[2].origin, 8);
+        }
+    }
+}
+
+TEST(ImageIo, NiftiPreservesSingletonSpatialAxisAndObliquePlane)
+{
+    QTemporaryDir directory;
+    auto image = fixture(PixelType::UInt16, {5, 3, 1});
+    image.metadata().direction = {1, 0, 0, 0, 0, -1, 0, 1, 0};
+    for (const auto *extension : {"nii", "nii.gz"}) {
+        const auto path = directory.filePath(QString("plane.") + extension);
+        writeImage(image, path);
+        const auto loaded = readImage(path);
+        expectPixels(loaded, image);
+        EXPECT_EQ(loaded.shape(), image.shape());
+        EXPECT_EQ(loaded.metadata().direction, image.metadata().direction);
+        ASSERT_EQ(loaded.metadata().axes.size(), 3u);
+        EXPECT_DOUBLE_EQ(loaded.metadata().axes[2].origin, 7);
+        EXPECT_DOUBLE_EQ(loaded.metadata().axes[2].spacing, 1.5);
+    }
 }
 
 TEST(ImageIo, ImageJHyperstackUsesChannelFastestPageOrder)

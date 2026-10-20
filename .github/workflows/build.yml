@@ -102,6 +102,20 @@ jobs:
       - name: Run tests
         run: ctest --preset release-vcpkg --timeout 120
 
+      - name: Install Linux graphics test runtime
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb xauth libegl1 libgl1-mesa-dri libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-xkb1 libxkbcommon-x11-0
+
+      - name: Run graphics and plot tests on Linux
+        if: runner.os == 'Linux'
+        env:
+          QT_QPA_PLATFORM: xcb
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          QSG_RHI_BACKEND: opengl
+        run: xvfb-run -a ./build/release-vcpkg/imagecxx_ui_tests --gtest_filter='Viewer.Gpu*:Plots.*'
+
       - name: Upload test logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

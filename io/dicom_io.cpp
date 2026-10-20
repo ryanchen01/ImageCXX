@@ -211,6 +211,8 @@ Image readDicomSeries(const QStringList &paths, std::stop_token stop, IoProgress
     std::iota(order.begin(), order.end(), 0);
     std::sort(order.begin(), order.end(), [&positions](auto a, auto b) { return positions[a] < positions[b]; });
     auto outputMetadata = slices[order.front()].metadata();
+    // A multi-file series cannot be reloaded from a single slice's path.
+    if (paths.size() > 1) outputMetadata.sourcePath.clear();
     if (slices.size() > 1) {
         const auto spacing = positions[order[1]] - positions[order[0]];
         if (spacing < 1e-6) throw std::runtime_error("DICOM series contains duplicate slice positions");
@@ -279,7 +281,14 @@ void writeDicom(const Image &input, const QString &path, std::stop_token stop, I
     dataset->findAndDeleteElement(DCM_NumberOfFrames);
     if (samples == 3) dicomCheck(dataset->putAndInsertUint16(DCM_PlanarConfiguration, 0));
     if (metadata.axes.size() >= 2) {
-        const auto spacing = QString::number(metadata.axes[1].spacing, 'g', 12) + "\\" + QString::number(metadata.axes[0].spacing, 'g', 12);
+        const std::array<double, 3> factors{detail::spatialUnitToMillimeters(metadata.axes[0].unit),
+            detail::spatialUnitToMillimeters(metadata.axes[1].unit),
+            detail::spatialUnitToMillimeters(metadata.attributes.value("ImageCXX.EmbeddedPlaneZUnit",
+                metadata.axes.size() > 2 ? metadata.axes[2].unit : metadata.axes[0].unit))};
+        const double spacingX = metadata.axes[0].spacing * factors[0], spacingY = metadata.axes[1].spacing * factors[1];
+        if (!std::isfinite(spacingX) || spacingX <= 0 || !std::isfinite(spacingY) || spacingY <= 0)
+            throw std::runtime_error("DICOM pixel spacing is invalid");
+        const auto spacing = QString::number(spacingY, 'g', 12) + "\\" + QString::number(spacingX, 'g', 12);
         dicomCheck(dataset->putAndInsertString(DCM_PixelSpacing, spacing.toLatin1().constData()));
         std::array<double, 3> origin{metadata.axes[0].origin, metadata.axes[1].origin, metadata.axes.size() > 2 ? metadata.axes[2].origin : 0};
         if (metadata.attributes.contains("ImageCXX.EmbeddedPlaneOrigin")) {
@@ -290,14 +299,20 @@ void writeDicom(const Image &input, const QString &path, std::stop_token stop, I
                 origin[axis] = embedded[axis].toDouble();
             }
         }
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            origin[axis] *= factors[axis];
+            if (!std::isfinite(origin[axis])) throw std::runtime_error("DICOM patient position is invalid");
+        }
         const auto position = QString::number(origin[0], 'g', 12) + "\\" + QString::number(origin[1], 'g', 12) + "\\" + QString::number(origin[2], 'g', 12);
         dicomCheck(dataset->putAndInsertString(DCM_ImagePositionPatient, position.toLatin1().constData()));
     }
     const auto &direction = metadata.direction;
     QStringList orientation;
-    if (direction.size() == 9) {
+    if (direction.size() == 4 || direction.size() == 9) {
+        const std::size_t dimensions = direction.size() == 4 ? 2 : 3;
         for (std::size_t column = 0; column < 2; ++column)
-            for (std::size_t row = 0; row < 3; ++row) orientation << QString::number(direction[row * 3 + column], 'g', 12);
+            for (std::size_t row = 0; row < 3; ++row)
+                orientation << QString::number(row < dimensions ? direction[row * dimensions + column] : 0, 'g', 12);
     } else orientation = {"1", "0", "0", "0", "1", "0"};
     dicomCheck(dataset->putAndInsertString(DCM_ImageOrientationPatient, orientation.join('\\').toLatin1().constData()));
     dicomCheck(dataset->putAndInsertString(DCM_RescaleSlope, QString::number(metadata.intensityScale, 'g', 12).toLatin1().constData()));

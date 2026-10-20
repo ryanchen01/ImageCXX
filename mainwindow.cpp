@@ -38,6 +38,7 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSaveFile>
+#include <QLockFile>
 #include <QScreen>
 #include <QScopedValueRollback>
 #include <QSettings>
@@ -269,13 +270,28 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             [this, output](auto error) { if (!showJobError(error)) addDocument(*output); });
     }});
     commands_.add({"file.save", tr("Save image as..."), "File", QKeySequence::Save, true, {}, [this](const QVariantMap &) {
-        auto *document = activeDocument(); if (!document) return;
+        const QPointer<DocumentWidget> document = activeDocument(); if (!document) return;
         const auto path = QFileDialog::getSaveFileName(this, tr("Save image"), (document->image.metadata().name.isEmpty() ? tr("Untitled") : QFileInfo(document->image.metadata().name).completeBaseName()) + ".tif", imageSaveFilter());
-        if (path.isEmpty()) return;
+        if (path.isEmpty() || !document) return;
+        const QFileInfo destination(path);
+        QString key = destination.canonicalFilePath();
+        if (key.isEmpty()) key = QDir(destination.dir().canonicalPath()).filePath(destination.fileName());
+        const QFileInfo reservedFile(key);
+        const auto name = reservedFile.fileName().normalized(QString::NormalizationForm_C);
+        const auto lockName = name.left(32) + "." + QString::number(qHash(name.toCaseFolded()), 16) + ".imagecxx-ui-save.lock";
+        const auto reservation = std::make_shared<QLockFile>(reservedFile.dir().filePath(lockName));
+        reservation->setStaleLockTime(0); // A large save can take longer than Qt's default 30 seconds.
+        if (!reservation->tryLock(0)) {
+            showError(reservation->error() == QLockFile::LockFailedError
+                ? tr("This file is still being saved. Wait for that save to finish before saving it again.")
+                : tr("Cannot save in this folder. Check its permissions and free space."));
+            return;
+        }
         const Image image = document->image; const QPointer<DocumentWidget> target = document;
         const auto revision = document->revision;
         jobs_.submit(tr("Saving image"), [image, path](auto stop, auto progress) { writeImage(image, path, stop, progress); },
-            [this, target, revision, path](auto error) {
+            [this, target, revision, path, reservation](auto error) {
+                reservation->unlock();
                 if (showJobError(error)) return;
                 if (target && target->revision == revision) {
                     target->modified = false; target->image.metadata().sourcePath = QFileInfo(path).absoluteFilePath();
@@ -350,7 +366,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         const auto roi = selectedRoi();
         const QString location = roi ? roi->name : tr("Slice Z%1 C%2 T%3").arg(doc->viewer->slice() + 1).arg(doc->viewer->channel() + 1).arg(doc->viewer->time() + 1);
         auto output = std::make_shared<Measurement>();
-        jobs_.submit(tr("Measuring"), [slice, roi, output](auto, auto) { *output = measure(slice, roi); },
+        jobs_.submit(tr("Measuring"), [slice, roi, output](auto stop, auto) { *output = measure(slice, roi, true, stop); },
             [this, output, location](auto error) {
                 if (showJobError(error)) return;
                 const auto &m = *output;
@@ -370,7 +386,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         auto output = std::make_shared<Mask>(); const QPointer<DocumentWidget> target = doc;
         const auto revision = doc->revision;
         const auto z = doc->viewer->slice(), c = doc->viewer->channel(), t = doc->viewer->time();
-        jobs_.submit(tr("Creating mask"), [slice, roi, output](auto, auto) { *output = createMask(slice, *roi); },
+        jobs_.submit(tr("Creating mask"), [slice, roi, output](auto stop, auto) { *output = createMask(slice, *roi, stop); },
             [this, target, revision, z, c, t, output](auto error) {
                 if (showJobError(error)) return;
                 if (target && target->revision == revision && target->viewer->slice() == z
@@ -437,17 +453,37 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         auto *doc = activeDocument(); if (!doc || clipboard_.empty()) return;
         if (doc->image.shape().size() > 5) { showError(tr("Pixel editing supports up to five dimensions.")); return; }
         if (clipboard_.pixelType() != doc->image.pixelType()) { showError(tr("Clipboard and image pixel types must match.")); return; }
-        auto output = doc->image.clone();
+        const Image input = doc->image, clipboard = clipboard_;
+        const QPointer<DocumentWidget> target = doc;
+        const auto revision = doc->revision;
+        const auto z = doc->viewer->slice(), c = doc->viewer->channel(), t = doc->viewer->time();
+        auto output = std::make_shared<Image>();
         const auto roi = selectedRoi();
         const auto origin = roi ? roi->bounds().topLeft().toPoint() : QPoint(0, 0);
-        for (std::size_t y = 0; y < clipboard_.height(); ++y) for (std::size_t x = 0; x < clipboard_.width(); ++x) {
-            const auto px = qint64(x) + origin.x(), py = qint64(y) + origin.y();
-            if (px < 0 || py < 0 || px >= qint64(output.width()) || py >= qint64(output.height())) continue;
-            const std::array<std::size_t, 5> index{std::size_t(px), std::size_t(py), doc->viewer->slice(), doc->viewer->channel(), doc->viewer->time()};
-            for (std::size_t c = 0; c < componentCount(output.pixelType()); ++c)
-                output.setValue(std::span(index).first(output.shape().size()), clipboard_.sample(x, y, 0, 0, 0, c), c);
-        }
-        doc->replaceImage(std::move(output), tr("Paste"));
+        jobs_.submit(tr("Paste"), [input, clipboard, output, origin, z, c, t](auto stop, auto progress) {
+            *output = input.clone();
+            const auto pixelBytes = bytesPerPixel(input.pixelType());
+            auto *destination = output->mutableData() + (z + input.depth() * (c + input.channels() * t))
+                * input.width() * input.height() * pixelBytes;
+            const auto left = std::max<qint64>(0, origin.x()), top = std::max<qint64>(0, origin.y());
+            const auto right = std::min<qint64>(input.width(), qint64(origin.x()) + qint64(clipboard.width()));
+            const auto bottom = std::min<qint64>(input.height(), qint64(origin.y()) + qint64(clipboard.height()));
+            for (auto y = top; y < bottom && right > left; ++y) {
+                if (stop.stop_requested()) throw std::runtime_error("Paste cancelled");
+                std::memcpy(destination + (y * input.width() + left) * pixelBytes,
+                    clipboard.data() + ((y - origin.y()) * clipboard.width() + left - origin.x()) * pixelBytes,
+                    (right - left) * pixelBytes);
+                progress(double(y - top + 1) / (bottom - top));
+            }
+        }, [this, target, revision, output](auto error) {
+            if (showJobError(error)) return;
+            if (target && target->revision == revision) target->replaceImage(*output, tr("Paste"));
+            else {
+                output->metadata().sourcePath.clear();
+                addDocument(*output)->modified = true;
+            }
+            updatePanels();
+        });
     }});
     for (const bool capture : {false, true}) {
         commands_.add({capture ? "file.capture" : "file.clipboard", capture ? tr("Capture screen") : tr("New image from clipboard"),
@@ -534,7 +570,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                 double maximum = type == PixelType::UInt16 ? 65535 : type == PixelType::Int16 ? 32767 : 255;
                 double minimum = type == PixelType::Int16 ? -32768 : 0;
                 if (operation == "invert" && (type == PixelType::Float32 || type == PixelType::Float64)) {
-                    const auto stats = measure(input.slice(z, c, t)); minimum = stats.minimum; maximum = stats.maximum;
+                    const auto stats = measure(input.slice(z, c, t), {}, false, stop); minimum = stats.minimum; maximum = stats.maximum;
                 }
                 for (std::size_t y = 0; y < input.height(); ++y) {
                     if (stop.stop_requested()) throw std::runtime_error("Operation cancelled");
@@ -1288,15 +1324,15 @@ void MainWindow::showPlot(bool profile)
     const auto slice = document->image.slice(document->viewer->slice(), document->viewer->channel(), document->viewer->time());
     struct PlotData { std::vector<QPointF> points; QString xTitle, yTitle; };
     auto output = std::make_shared<PlotData>();
-    jobs_.submit(profile ? tr("Line profile") : tr("Histogram"), [slice, roi, profile, output](auto, auto) {
+    jobs_.submit(profile ? tr("Line profile") : tr("Histogram"), [slice, roi, profile, output](auto stop, auto) {
         if (profile) {
             auto start = roi->points.front(), end = roi->points.back();
             for (auto *point : {&start, &end}) { point->setX(std::clamp(point->x(), 0.0, double(slice.width() - 1))); point->setY(std::clamp(point->y(), 0.0, double(slice.height() - 1))); }
-            const auto data = lineProfile(slice, start, end);
+            const auto data = lineProfile(slice, start, end, 0, true, stop);
             for (std::size_t i = 0; i < data.distance.size(); ++i) output->points.emplace_back(data.distance[i], data.intensity[i]);
             output->xTitle = "Distance [" + data.distanceUnit + "]"; output->yTitle = data.intensityUnit.isEmpty() ? "Intensity" : data.intensityUnit;
         } else {
-            const auto data = histogram(slice, 256, roi && roi->type != RoiType::Line ? roi : std::optional<Roi>{});
+            const auto data = histogram(slice, 256, roi && roi->type != RoiType::Line ? roi : std::optional<Roi>{}, true, stop);
             for (std::size_t i = 0; i < data.centers.size(); ++i) output->points.emplace_back(data.centers[i], data.counts[i]);
             output->xTitle = "Intensity"; output->yTitle = "Pixel count";
         }
@@ -1371,6 +1407,7 @@ void MainWindow::updatePanels()
         history_->addItem(tr("Undo storage: %1 / %2 MiB").arg(double(doc->history.retainedBytes()) / (1024 * 1024), 0, 'f', 1).arg(doc->history.byteBudget() / (1024 * 1024)));
         if (auto *undo = findChild<QAction *>("edit.undo")) undo->setEnabled(doc->history.canUndo());
         if (auto *redo = findChild<QAction *>("edit.redo")) redo->setEnabled(doc->history.canRedo());
+        if (auto *revert = findChild<QAction *>("file.revert")) revert->setEnabled(!doc->image.metadata().sourcePath.isEmpty());
     }
 }
 

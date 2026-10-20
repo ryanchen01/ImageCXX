@@ -22,19 +22,16 @@ qt_standard_project_setup(REQUIRES 6.12)
 add_library(imagecxx_core STATIC core/image.cpp core/roi.cpp core/history.cpp)
 target_include_directories(imagecxx_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(imagecxx_core PUBLIC Qt6::Core Qt6::Gui)
-add_library(core ALIAS imagecxx_core)
 
 add_library(imagecxx_processing STATIC processing/analysis.cpp processing/processing.cpp)
 target_link_libraries(imagecxx_processing PUBLIC imagecxx_core PRIVATE ${ITK_LIBRARIES})
 target_include_directories(imagecxx_processing SYSTEM PRIVATE ${ITK_INCLUDE_DIRS})
 target_link_directories(imagecxx_processing INTERFACE ${ITK_LIBRARY_DIRS})
-add_library(processing ALIAS imagecxx_processing)
 
 add_library(imagecxx_io STATIC io/image_io.cpp io/itk_io.cpp io/dicom_io.cpp)
 target_link_libraries(imagecxx_io PUBLIC imagecxx_core PRIVATE TIFF::TIFF ${ITK_LIBRARIES} DCMTK::dcmdata DCMTK::dcmjpeg DCMTK::dcmjpls)
 target_include_directories(imagecxx_io SYSTEM PRIVATE ${ITK_INCLUDE_DIRS} ${DCMTK_INCLUDE_DIRS})
 target_link_directories(imagecxx_io INTERFACE ${ITK_LIBRARY_DIRS})
-add_library(io ALIAS imagecxx_io)
 
 add_library(imagecxx_app STATIC app/command_registry.cpp app/processing_commands.cpp app/job_scheduler.cpp
     app/batch.cpp)
@@ -44,14 +41,12 @@ add_library(imagecxx_viewer STATIC viewer/image_viewer.cpp)
 target_link_libraries(imagecxx_viewer PUBLIC imagecxx_core Qt6::Widgets PRIVATE Qt6::GuiPrivate)
 qt_add_shaders(imagecxx_viewer imagecxx_viewer_shaders PREFIX "/imagecxx"
     BASE "viewer/shaders" FILES viewer/shaders/slice.vert viewer/shaders/slice.frag)
-add_library(viewer ALIAS imagecxx_viewer)
 
 add_library(imagecxx_plots STATIC plots/plot_widget.cpp)
 target_link_libraries(imagecxx_plots PUBLIC Qt6::Widgets PRIVATE Qt6::QuickWidgets Qt6::Graphs)
 set_source_files_properties(plots/Plot.qml PROPERTIES QT_RESOURCE_ALIAS Plot.qml)
 qt_add_qml_module(imagecxx_plots URI ImageCXX.Plots VERSION 1.0 NO_PLUGIN
     RESOURCE_PREFIX "/qt/qml" OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/qml/ImageCXX/Plots" QML_FILES plots/Plot.qml)
-add_library(plots ALIAS imagecxx_plots)
 
 add_library(imagecxx_ui STATIC mainwindow.cpp ui/document_widget.cpp)
 target_link_libraries(imagecxx_ui PUBLIC imagecxx_app imagecxx_viewer imagecxx_plots Qt6::Widgets Qt6::Svg Qt6::PrintSupport)
@@ -59,7 +54,6 @@ qt_add_resources(imagecxx_ui imagecxx_icons PREFIX "/" BASE "resources" FILES
     resources/icons/open.svg resources/icons/pan.svg resources/icons/rectangle.svg resources/icons/ellipse.svg
     resources/icons/polygon.svg resources/icons/line.svg resources/icons/measure.svg
     resources/icons/histogram.svg resources/icons/undo.svg resources/icons/search.svg)
-add_library(ui ALIAS imagecxx_ui)
 qt_add_executable(ImageCXX WIN32 MACOSX_BUNDLE main.cpp)
 target_link_libraries(ImageCXX PRIVATE imagecxx_ui)
 set_target_properties(ImageCXX PROPERTIES MACOSX_BUNDLE_GUI_IDENTIFIER org.imagecxx.ImageCXX

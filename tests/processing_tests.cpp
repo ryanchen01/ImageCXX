@@ -4,6 +4,7 @@
 #include <cmath>
 #include <limits>
 #include <numeric>
+#include <algorithm>
 
 using namespace imagecxx;
 
@@ -70,6 +71,41 @@ TEST(Analysis, ExtremeFiniteValuesDoNotOverflowHistogramOrDeviation) {
     EXPECT_NEAR(measurement.mean, 0, 1e292);
     EXPECT_NEAR(measurement.sum, 0, 1e292);
     EXPECT_NEAR(measurement.standardDeviation / 1e308, 1.0, 1e-14);
+}
+
+TEST(Analysis, CancellationStopsSamplingBeforeTheWholeImageIsRead) {
+    class CancellingStorage final : public Storage {
+    public:
+        std::stop_source cancellation;
+        mutable std::size_t reads = 0;
+        std::size_t cancelAt = 1;
+        std::size_t size() const override { return 16; }
+        const std::byte *data() const override { return nullptr; }
+        std::byte *mutableData() override { return nullptr; }
+        bool readOnly() const override { return true; }
+        QString kind() const override { return "Cancelling test storage"; }
+        void read(std::size_t, std::span<std::byte> destination) const override {
+            std::fill(destination.begin(), destination.end(), std::byte{0});
+            if (++reads == cancelAt) cancellation.request_stop();
+        }
+    };
+    for (int operation = 0; operation < 4; ++operation) {
+        auto storage = std::make_shared<CancellingStorage>();
+        if (operation == 2) storage->cancelAt = 17; // Histogram's second pass.
+        const auto image = Image::fromStorage(PixelType::UInt8, {4, 4}, storage);
+        const auto stop = storage->cancellation.get_token();
+        if (operation == 0) EXPECT_THROW(measure(image, {}, true, stop), std::runtime_error);
+        else if (operation < 3) EXPECT_THROW(histogram(image, 8, {}, true, stop), std::runtime_error);
+        else EXPECT_THROW(lineProfile(image, {0, 0}, {3, 3}, 4096, true, stop), std::runtime_error);
+        EXPECT_LT(storage->reads, operation == 0 ? 16u : operation < 3 ? 32u : 16384u);
+    }
+    const auto image = Image::allocate(PixelType::UInt8, {4, 4});
+    Roi roi; roi.points = {{0, 0}, {4, 4}};
+    std::stop_source cancelled; cancelled.request_stop();
+    EXPECT_THROW(measure(image, {}, true, cancelled.get_token()), std::runtime_error);
+    EXPECT_THROW(histogram(image, 8, {}, true, cancelled.get_token()), std::runtime_error);
+    EXPECT_THROW(lineProfile(image, {0, 0}, {3, 3}, 0, true, cancelled.get_token()), std::runtime_error);
+    EXPECT_THROW(createMask(image, roi, cancelled.get_token()), std::runtime_error);
 }
 
 TEST(ItkProcessing, ThresholdPreservesIntegerBoundSemanticsAndCreatesMask) {
