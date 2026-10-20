@@ -42,7 +42,7 @@ Start `build/dev-vcpkg/ImageCXX` on Linux, `build/dev-vcpkg/ImageCXX.exe` on Win
 
 1. Choose **File → Open sample stack** or open an image.
 2. Browse Z, channel and time with the image-window controls. Drag to pan, use the wheel to browse slices, Ctrl or Command plus wheel to zoom, and press **Ctrl+0** to fit. Use Command instead of Ctrl on macOS.
-3. Press **Ctrl+J** or open **Window → Display** to adjust range, gamma and LUT. These settings do not alter pixel values.
+3. Press **Ctrl+J** or open **Window → Display** to adjust range and gamma. Choose a color map from **LUT** on the main toolbar. These settings do not alter pixel values.
 4. Draw a rectangle, ellipse, polygon or line. Use **Analyze → Measure selection**, **Histogram** or **Line profile**.
 5. Run a filter from **Process**, then use **Edit → Undo processing** if needed. Save the resulting image separately.
 

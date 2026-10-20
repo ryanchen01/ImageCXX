@@ -147,8 +147,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     }
     maximumSlider_->setValue(1000);
     gammaSlider_->setValue(500);
-    lut_ = new QComboBox(displayPanel);
-    lut_->addItems({"grayscale", "hot", "viridis"});
     inverted_ = new QCheckBox(tr("Invert"), displayPanel);
     linear_ = new QCheckBox(tr("Linear interpolation"), displayPanel);
     composite_ = new QCheckBox(tr("Composite channels"), displayPanel);
@@ -166,7 +164,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         row->addWidget(spin);
         form->addRow(label, row);
     }
-    form->addRow(tr("Color map"), lut_);
     form->addRow(inverted_); form->addRow(linear_); form->addRow(composite_);
     form->addRow(autoRange); form->addRow(fitButton);
 
@@ -800,6 +797,30 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     toolbar->addSeparator(); toolbar->addAction(findChild<QAction *>("analyze.measure"));
     toolbar->addAction(findChild<QAction *>("analyze.histogram"));
     toolbar->addAction(findChild<QAction *>("edit.undo"));
+    toolbar->addSeparator();
+    lutMenu_ = new QMenu(tr("LUT"), toolbar);
+    lutMenu_->setObjectName("lutMenu");
+    auto *luts = new QActionGroup(lutMenu_);
+    for (const auto &name : QStringList{"grayscale", "hot", "viridis"}) {
+        auto *action = lutMenu_->addAction(name);
+        action->setCheckable(true); action->setData(name); luts->addAction(action);
+    }
+    toolbar->addAction(lutMenu_->menuAction());
+    auto *lutButton = qobject_cast<QToolButton *>(toolbar->widgetForAction(lutMenu_->menuAction()));
+    lutButton->setObjectName("lutButton");
+    lutButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    lutButton->setPopupMode(QToolButton::InstantPopup);
+    lutButton->setToolTip(tr("Color map"));
+    lutButton->setStyleSheet(R"(
+        QToolButton#lutButton { min-width: 24px; min-height: 24px; }
+        QToolButton#lutButton::menu-indicator { image: none; width: 0px; }
+    )");
+    connect(lutMenu_, &QMenu::aboutToShow, this, &MainWindow::updateDisplayControls);
+    connect(luts, &QActionGroup::triggered, this, [this](QAction *action) {
+        if (loadingPanels_) return;
+        if (auto *doc = activeDocument()) doc->viewer->setLut(action->data().toString());
+        updateDisplayControls();
+    });
     connect(measureButton, &QPushButton::clicked, this, [this] { executeCommand("analyze.measure"); });
     connect(autoRange, &QPushButton::clicked, this, [this] { if (auto *doc = activeDocument()) doc->viewer->autoWindow(); });
     connect(fitButton, &QPushButton::clicked, this, [this] { if (auto *doc = activeDocument()) doc->viewer->fitToWindow(); });
@@ -808,7 +829,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         if (auto *doc = activeDocument()) {
             QScopedValueRollback applyingDisplay(loadingPanels_, true);
             if (maximum_->value() > minimum_->value()) doc->viewer->setWindow(minimum_->value(), maximum_->value());
-            doc->viewer->setGamma(gamma_->value()); doc->viewer->setLut(lut_->currentText());
+            doc->viewer->setGamma(gamma_->value());
             doc->viewer->setInverted(inverted_->isChecked()); doc->viewer->setLinearInterpolation(linear_->isChecked());
             doc->viewer->setComposite(composite_->isChecked());
         }
@@ -827,7 +848,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         if (loadingPanels_) return;
         gamma_->setValue(std::pow(20., (value - 500) / 500.));
     });
-    connect(lut_, &QComboBox::currentTextChanged, this, applyDisplay);
     for (auto *check : {inverted_, linear_, composite_}) connect(check, &QCheckBox::toggled, this, applyDisplay);
     connect(removeRoi, &QPushButton::clicked, this, [this] {
         auto *doc = activeDocument(); const int index = rois_->currentRow(); if (!doc || index < 0) return;
@@ -1350,10 +1370,12 @@ void MainWindow::updateDisplayControls()
     if (loadingPanels_) return;
     QScopedValueRollback loading(loadingPanels_, true);
     const auto *doc = activeDocument();
-    for (auto *widget : std::initializer_list<QWidget *>{minimum_, maximum_, gamma_, minimumSlider_, maximumSlider_, gammaSlider_, lut_, inverted_, linear_, composite_}) widget->setEnabled(doc != nullptr);
+    for (auto *widget : std::initializer_list<QWidget *>{minimum_, maximum_, gamma_, minimumSlider_, maximumSlider_, gammaSlider_, inverted_, linear_, composite_}) widget->setEnabled(doc != nullptr);
+    lutMenu_->menuAction()->setEnabled(doc != nullptr);
+    for (auto *action : lutMenu_->actions()) action->setChecked(doc && action->data().toString() == doc->viewer->lut());
     if (doc) {
         minimum_->setValue(doc->viewer->windowMinimum()); maximum_->setValue(doc->viewer->windowMaximum());
-        gamma_->setValue(doc->viewer->gamma()); lut_->setCurrentText(doc->viewer->lut());
+        gamma_->setValue(doc->viewer->gamma());
         const auto [sliceMinimum, sliceMaximum] = doc->viewer->sliceRange();
         sliderMinimum_ = std::clamp(std::min(sliceMinimum, minimum_->value()), minimum_->minimum(), minimum_->maximum());
         sliderMaximum_ = std::clamp(std::max(sliceMaximum, maximum_->value()), maximum_->minimum(), maximum_->maximum());

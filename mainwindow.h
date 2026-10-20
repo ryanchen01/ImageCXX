@@ -13,7 +13,6 @@ class QTableView;
 class QStandardItemModel;
 class QDoubleSpinBox;
 class QSlider;
-class QComboBox;
 class QCheckBox;
 class QLabel;
 class QProgressBar;
@@ -60,7 +59,7 @@ private:
     QSlider *gammaSlider_;
     double sliderMinimum_ = 0;
     double sliderMaximum_ = 1;
-    QComboBox *lut_;
+    QMenu *lutMenu_;
     QCheckBox *inverted_;
     QCheckBox *linear_;
     QCheckBox *composite_;
