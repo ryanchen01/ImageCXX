@@ -76,7 +76,7 @@ TEST(Analysis, ExtremeFiniteValuesDoNotOverflowHistogramOrDeviation) {
 TEST(Analysis, CancellationStopsSamplingBeforeTheWholeImageIsRead) {
     class CancellingStorage final : public Storage {
     public:
-        std::stop_source cancellation;
+        mutable std::stop_source cancellation;
         mutable std::size_t reads = 0;
         std::size_t cancelAt = 1;
         std::size_t size() const override { return 16; }

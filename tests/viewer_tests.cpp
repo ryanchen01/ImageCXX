@@ -5,6 +5,7 @@
 #include <QElapsedTimer>
 #include <QKeyEvent>
 #include <QMouseEvent>
+#include <QRhiWidget>
 #include <QThread>
 #include <gtest/gtest.h>
 #include <array>
@@ -33,9 +34,12 @@ bool waitFor(const std::function<bool()> &condition)
 
 QColor displayColor(ImageViewer &viewer, QPointF imagePoint)
 {
-    const auto pixmap = viewer.grab();
-    const auto position = viewer.imageToWidget(imagePoint) * pixmap.devicePixelRatio();
-    return pixmap.toImage().pixelColor(qRound(position.x()), qRound(position.y()));
+    // Check shader output directly, without QWidget/QPixmap composition and conversion.
+    const auto frame = viewer.findChild<QRhiWidget *>()->grabFramebuffer();
+    EXPECT_FALSE(frame.isNull());
+    if (frame.isNull()) return {};
+    const auto position = viewer.imageToWidget(imagePoint) * frame.devicePixelRatio();
+    return frame.pixelColor(qRound(position.x()), qRound(position.y()));
 }
 
 void roiMouse(ImageViewer &viewer, QEvent::Type type, QPointF point, Qt::KeyboardModifiers modifiers = {})
