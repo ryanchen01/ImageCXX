@@ -111,6 +111,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         QToolBar { spacing: 2px; padding: 4px; border-bottom: 1px solid #D8D2C9; }
         QToolButton { color: #1A1C1F; padding: 5px; border-radius: 4px; }
         QToolButton:checked, QPushButton:hover { background: #DED8CF; color: #1A1C1F; }
+        QToolBar#imageTools QToolButton:enabled:hover { background: #F0ECE6; }
+        QToolBar#imageTools QToolButton:enabled:pressed,
+        QToolBar#imageTools QToolButton:enabled:checked:hover { background: #D4CDC3; }
         QTreeView, QListView, QTableView { background: #FAF7F2; alternate-background-color: #F0ECE6;
             color: #1A1C1F; border: 0; selection-background-color: #DED8CF; selection-color: #1A1C1F; }
         QHeaderView::section { background: #F0ECE6; color: #1A1C1F; padding: 7px; border: 0; }
