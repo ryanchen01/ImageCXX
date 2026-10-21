@@ -22,6 +22,8 @@ build/tools/linuxdeploy.AppImage --appdir "$appdir" \
     --desktop-file packaging/linux/com.ryanchen01.ImageCXX.desktop \
     --icon-file resources/icons/imagecxx.svg --icon-filename com.ryanchen01.ImageCXX \
     --plugin qt --output appimage
+# appimagetool writes zsync metadata to the current directory.
+mv "$root/${LDAI_OUTPUT##*/}.zsync" "$LDAI_OUTPUT.zsync"
 test -s "$LDAI_OUTPUT.zsync"
 env -u LD_LIBRARY_PATH -u QT_PLUGIN_PATH -u QML2_IMPORT_PATH -u QML_IMPORT_PATH \
     "$LDAI_OUTPUT" --batch --version | grep -Fx "ImageCXX $version"

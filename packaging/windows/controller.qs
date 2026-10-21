@@ -25,7 +25,7 @@ function Controller() {
     }
     if (this.existing && (!installer.fileExists(this.existing + "/ImageCXXMaintenanceTool.exe")
         || !installer.fileExists(this.existing + "/components.xml")
-        || installer.readFile(this.existing + "/components.xml").indexOf('name="com.ryanchen01.ImageCXX"') < 0)) {
+        || installer.readFile(this.existing + "/components.xml", "UTF-8").indexOf('<Name>com.ryanchen01.ImageCXX</Name>') < 0)) {
         throw new Error("The existing ImageCXX installation cannot be updated. Repair it before continuing.");
     }
     installer.installationFinished.connect(this, this.cleanup);
@@ -33,7 +33,7 @@ function Controller() {
 
 Controller.prototype.cleanup = function() {
     if (!this.repository) return;
-    var files = JSON.parse(installer.readFile(":/imagecxx/repository-files.json"));
+    var files = JSON.parse(installer.readFile(":/imagecxx/repository-files.json", "UTF-8"));
     for (var i = 0; i < files.length; ++i)
         installer.performOperation("Delete", [this.repository + "/" + files[i]]);
     installer.performOperation("Delete", [this.repository + "/repository.7z"]);

@@ -9,8 +9,8 @@ New-Item -ItemType Directory -Force $meta, "$fixture/packages/com.ryanchen01.Ima
 # Exercise the shipped bootstrap's embedded repository, not only IFW's maintenance API.
 $freshTarget = "$fixture/fresh-installed"
 & "$root/dist/ImageCXX-$Version-windows-x86_64.exe" --root $freshTarget --accept-licenses --default-answer --confirm-command install | Out-Host
-$registration = Get-Content "$freshTarget/components.xml" -Raw
-if (!$registration.Contains('name="com.ryanchen01.ImageCXX"')) { throw 'The bootstrap did not register the expected component' }
+[xml]$registration = Get-Content "$freshTarget/components.xml" -Raw
+if (@($registration.Packages.Package.Name) -notcontains 'com.ryanchen01.ImageCXX') { throw 'The bootstrap did not register the expected component' }
 & "$freshTarget/ImageCXXMaintenanceTool.exe" --accept-licenses --default-answer --confirm-command purge | Out-Host
 $config = (Get-Content packaging/windows/config.xml.in -Raw).Replace('@VERSION@', '0.0.0').Replace('<ControlScript>controller.qs</ControlScript>', '')
 $config | Set-Content "$fixture/config.xml" -Encoding utf8

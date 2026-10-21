@@ -21,8 +21,13 @@ function controller(options = {}) {
                 return ['', options.updateFailure ? 1 : 0];
             },
             fileExists: () => !options.broken,
-            readFile: path => path.endsWith('components.xml') ? '<Package name="com.ryanchen01.ImageCXX"/>'
-                : '["Updates.xml","com.ryanchen01.ImageCXX/0.3.0content.7z"]',
+            readFile: (path, encoding) => {
+                assert.equal(encoding, 'UTF-8');
+                if (path.endsWith('components.xml')) return '<Packages><Package><Name>'
+                    + (options.wrongComponent ? 'AnotherApp' : 'com.ryanchen01.ImageCXX')
+                    + '</Name></Package></Packages>';
+                return '["Updates.xml","com.ryanchen01.ImageCXX/0.3.0content.7z"]';
+            },
             installationFinished: { connect: () => {} },
             setCanceled: () => calls.push(['cancel']),
         },
@@ -52,6 +57,7 @@ const failed = controller({ existing: true, updateFailure: true });
 failed.instance.IntroductionPageCallback();
 assert(failed.calls.some(call => call[0] === 'warning'));
 assert.throws(() => controller({ existing: true, broken: true }), /cannot be updated/);
+assert.throws(() => controller({ existing: true, wrongComponent: true }), /cannot be updated/);
 assert.throws(() => controller({ extractFailure: true }), /Cannot extract/);
 assert.throws(() => controller({ existing: true, supplied: 'C:/Other' }), /does not match/);
 const maintenance = controller({ maintenance: true });
