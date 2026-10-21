@@ -23,7 +23,7 @@ add_library(imagecxx_core STATIC core/image.cpp core/roi.cpp core/history.cpp)
 target_include_directories(imagecxx_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(imagecxx_core PUBLIC Qt6::Core Qt6::Gui)
 
-add_library(imagecxx_processing STATIC processing/analysis.cpp processing/processing.cpp)
+add_library(imagecxx_processing STATIC processing/analysis.cpp processing/processing.cpp processing/reslice.cpp processing/memory.cpp)
 target_link_libraries(imagecxx_processing PUBLIC imagecxx_core PRIVATE ${ITK_LIBRARIES})
 target_include_directories(imagecxx_processing SYSTEM PRIVATE ${ITK_INCLUDE_DIRS})
 target_link_directories(imagecxx_processing INTERFACE ${ITK_LIBRARY_DIRS})

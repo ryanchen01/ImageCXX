@@ -11,7 +11,10 @@
 #include <limits>
 
 namespace imagecxx {
-DocumentWidget::DocumentWidget(Image source, QWidget *parent) : QWidget(parent),
+// Establish the separate window before constructing its QRhiWidget. Creating a
+// child first and reparenting afterward can leave the launcher's backing store
+// registered for graphics composition, including unrelated raster dialogs.
+DocumentWidget::DocumentWidget(Image source, QWidget *parent) : QWidget(parent, Qt::Window),
     image(std::move(source)), viewer(new ImageViewer(this)), z_(new QSlider(Qt::Horizontal, this)),
     channel_(new QSlider(Qt::Horizontal, this)), time_(new QSlider(Qt::Horizontal, this)),
     position_(new QLabel(this))

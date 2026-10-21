@@ -4,6 +4,7 @@
 #include "io/image_io.h"
 #include "plots/plot_widget.h"
 #include "processing/processing.h"
+#include "processing/memory.h"
 #include <QActionGroup>
 #include <QAbstractSpinBox>
 #include <QKeyEvent>
@@ -357,6 +358,91 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                 updatePanels();
             });
     });
+    commands_.add({"stacks.reslice", tr("Reslice..."), "Stacks", {}, true, {}, [this](const QVariantMap &) {
+        const auto *document = activeDocument(); if (!document) return;
+        const Image input = document->image;
+        ResliceOptions options;
+        options.outputSpacing = input.metadata().axes.size() > 2 ? input.metadata().axes[2].spacing : 1;
+        if (input.depth() < 2) throw std::invalid_argument("Reslice requires a Z stack with at least two slices");
+        QDialog dialog(this);
+        dialog.setObjectName("resliceDialog"); dialog.setWindowTitle(tr("Reslice")); dialog.setMinimumWidth(360);
+        auto *layout = new QFormLayout(&dialog);
+        layout->setContentsMargins(20, 20, 20, 20); layout->setVerticalSpacing(14);
+        auto *spacingLabel = new QLabel(&dialog);
+        auto *spacing = new QDoubleSpinBox(&dialog);
+        spacing->setObjectName("resliceSpacing"); spacing->setDecimals(6); spacing->setRange(.000001, 1e9);
+        spacing->setValue(options.outputSpacing); spacing->setMinimumWidth(130);
+        spacing->setToolTip(tr("Distance between output planes in the swept source axis's units."));
+        layout->addRow(spacingLabel, spacing);
+        auto *start = new QComboBox(&dialog); start->setObjectName("resliceStart");
+        start->addItems({tr("Top"), tr("Left"), tr("Bottom"), tr("Right")});
+        layout->addRow(tr("Start at:"), start);
+        auto *flip = new QCheckBox(tr("Flip vertically"), &dialog); flip->setObjectName("resliceFlip");
+        auto *rotate = new QCheckBox(tr("Rotate 90 degrees"), &dialog); rotate->setObjectName("resliceRotate");
+        auto *avoid = new QCheckBox(tr("Avoid interpolation"), &dialog); avoid->setObjectName("resliceAvoidInterpolation");
+        layout->addRow(flip); layout->addRow(rotate); layout->addRow(avoid);
+        auto *hint = new QLabel(tr("(use 1 pixel spacing)"), &dialog); layout->addRow(hint);
+        const auto &axes = input.metadata().axes;
+        layout->addRow(new QLabel(tr("Voxel size: %1 × %2 × %3 %4").arg(axes[0].spacing, 0, 'g', 6)
+            .arg(axes[1].spacing, 0, 'g', 6).arg(axes[2].spacing, 0, 'g', 6).arg(axes[0].unit), &dialog));
+        auto *size = new QLabel(&dialog); size->setObjectName("resliceOutputSize"); size->setWordWrap(true);
+        layout->addRow(size);
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel | QDialogButtonBox::Help, &dialog);
+        for (auto *button : buttons->buttons()) button->setIcon(QIcon{});
+        layout->addRow(buttons);
+        const auto update = [&] {
+            options.start = static_cast<ResliceStart>(start->currentIndex());
+            options.outputSpacing = spacing->value(); options.flipVertically = flip->isChecked();
+            options.rotate90 = rotate->isChecked(); options.avoidInterpolation = avoid->isChecked();
+            spacing->setEnabled(!options.avoidInterpolation);
+            const auto sweep = start->currentIndex() % 2 == 0 ? 1 : 0;
+            spacingLabel->setText(tr("Output spacing (%1):").arg(options.avoidInterpolation ? tr("pixels") : axes[sweep].unit));
+            try {
+                const auto geometry = resliceGeometry(input, options);
+                const auto available = detail::availableMemoryBytes();
+                QStringList dimensions; for (auto length : geometry.shape) dimensions << QString::number(length);
+                size->setText(tr("Output size: %1 MiB\n%2\nAvailable memory: %3 MiB").arg(double(geometry.byteCount) / (1024 * 1024), 0, 'f', 2)
+                    .arg(dimensions.join(QStringLiteral(" × "))).arg(double(available.value_or(0)) / (1024 * 1024), 0, 'f', 0));
+                size->setToolTip(tr("Estimated output and working memory: %1 MiB. 10% of available memory is kept free. Memory is checked again when processing starts.")
+                    .arg(double(geometry.requiredMemoryBytes) / (1024 * 1024), 0, 'f', 2));
+                detail::checkMemoryBudget(geometry.requiredMemoryBytes, available);
+                buttons->button(QDialogButtonBox::Ok)->setEnabled(true);
+            } catch (const std::exception &error) {
+                size->setText(QString::fromUtf8(error.what())); buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
+            }
+        };
+        connect(spacing, &QDoubleSpinBox::valueChanged, &dialog, update);
+        connect(start, &QComboBox::currentIndexChanged, &dialog, update);
+        connect(flip, &QCheckBox::toggled, &dialog, update);
+        connect(rotate, &QCheckBox::toggled, &dialog, update);
+        double interpolatedSpacing = spacing->value();
+        connect(avoid, &QCheckBox::toggled, &dialog, [&](bool checked) {
+            const QSignalBlocker blocker(spacing);
+            if (checked) { interpolatedSpacing = spacing->value(); spacing->setValue(1); }
+            else spacing->setValue(interpolatedSpacing);
+            update();
+        });
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        connect(buttons, &QDialogButtonBox::helpRequested, &dialog, [&dialog] {
+            QMessageBox::information(&dialog, tr("Reslice help"),
+                tr("Top and Bottom create XZ planes; Left and Right create YZ planes through the full image. "
+                   "Output spacing is the distance between those planes. Z is interpolated at the profile axis's pixel spacing.\n\n"
+                   "Flip vertically reverses the source Z order. Rotate exchanges the two plane axes, as in ImageJ. "
+                   "Avoid interpolation copies source pixels exactly and keeps their original spacing.\n\n"
+                   "Channels and time points are kept separately. The result opens in a new image window."));
+        });
+        update();
+        spacing->selectAll(); spacing->setFocus();
+        if (dialog.exec() != QDialog::Accepted) return;
+        auto output = std::make_shared<Image>();
+        jobs_.submit(tr("Reslice"), [input, options, output](auto stop, auto progress) {
+            *output = reslice(input, options, stop, progress);
+        }, [this, output](auto error) {
+            if (showJobError(error)) return;
+            addDocument(*output)->modified = true; updatePanels();
+        });
+    }});
     commands_.add({"analyze.measure", tr("Measure selection"), "Analyze", QKeySequence("M"), true, {}, [this](const QVariantMap &) {
         const auto *doc = activeDocument(); if (!doc) return;
         const auto slice = doc->image.slice(doc->viewer->slice(), doc->viewer->channel(), doc->viewer->time());
@@ -680,6 +766,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
 
     QMap<QString, QMenu *> menus;
     for (const auto &category : {"File", "Edit", "Process", "Analyze", "View"}) menus.insert(category, menuBar()->addMenu(tr(category)));
+    auto *stacksMenu = new QMenu(tr("Stacks"), this); stacksMenu->setObjectName("stacksMenu");
+    menus.insert("Stacks", stacksMenu);
     const QMap<QString, QStringList> bindings{
             {"file.open", {"O"}}, {"file.new", {"N"}}, {"file.save", {"S"}},
             {"file.next", {"Shift+O", "Alt+Shift+O"}}, {"file.revert", {"R", "Alt+R"}},
@@ -805,6 +893,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         auto *action = lutMenu_->addAction(name);
         action->setCheckable(true); action->setData(name); luts->addAction(action);
     }
+    toolbar->addAction(stacksMenu->menuAction());
     toolbar->addAction(lutMenu_->menuAction());
     auto *lutButton = qobject_cast<QToolButton *>(toolbar->widgetForAction(lutMenu_->menuAction()));
     lutButton->setObjectName("lutButton");
@@ -816,6 +905,15 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         QToolButton#lutButton::menu-indicator { image: none; width: 0px; }
     )");
     connect(lutMenu_, &QMenu::aboutToShow, this, &MainWindow::updateDisplayControls);
+    auto *stacksButton = qobject_cast<QToolButton *>(toolbar->widgetForAction(stacksMenu->menuAction()));
+    stacksButton->setObjectName("stacksButton"); stacksButton->setText(tr("Stk"));
+    stacksButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    stacksButton->setPopupMode(QToolButton::InstantPopup);
+    stacksButton->setAccessibleName(tr("Stacks")); stacksButton->setToolTip(tr("Stacks"));
+    stacksButton->setStyleSheet(R"(
+        QToolButton#stacksButton { min-width: 24px; min-height: 24px; padding: 5px; }
+        QToolButton#stacksButton::menu-indicator { image: none; width: 0px; }
+    )");
     connect(luts, &QActionGroup::triggered, this, [this](QAction *action) {
         if (loadingPanels_) return;
         if (auto *doc = activeDocument()) doc->viewer->setLut(action->data().toString());
@@ -958,7 +1056,6 @@ void MainWindow::clearDocuments()
 DocumentWidget *MainWindow::addDocument(Image image)
 {
     auto *document = new DocumentWidget(std::move(image), this);
-    document->setWindowFlag(Qt::Window);
     document->setAttribute(Qt::WA_DeleteOnClose);
     documents_.append(document);
     const QRect available = screen() ? screen()->availableGeometry() : QRect(0, 0, 1280, 900);
@@ -1398,6 +1495,7 @@ void MainWindow::updatePanels()
     QScopedValueRollback loading(loadingPanels_, true);
     auto *doc = activeDocument();
     for (auto *action : imageActions_) action->setEnabled(doc != nullptr);
+    findChild<QAction *>("stacks.reslice")->setEnabled(doc && doc->image.depth() > 1);
     metadata_->clear(); history_->clear();
     const QString selectedId = rois_->currentItem() ? rois_->currentItem()->data(Qt::UserRole).toString() : QString{};
     QSignalBlocker roiSignals(rois_); rois_->clear();

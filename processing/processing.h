@@ -2,6 +2,7 @@
 
 #include "core/image.h"
 #include "core/roi.h"
+#include <array>
 #include <functional>
 #include <optional>
 #include <stop_token>
@@ -27,6 +28,35 @@ struct ProcessingOptions {
 Image process(const Image &image, const ProcessingOptions &options,
               std::stop_token stop = {}, Progress progress = {});
 QString operationName(Operation operation);
+
+enum class ResliceStart { Top, Left, Bottom, Right };
+struct ResliceOptions {
+    // Distance between output planes, in the swept source axis's physical units.
+    double outputSpacing = 1.0;
+    ResliceStart start = ResliceStart::Top;
+    bool flipVertically = false;
+    bool rotate90 = false;
+    // Exact axis permutation: one source pixel per output pixel, without scaling Z.
+    bool avoidInterpolation = false;
+};
+
+struct ResliceGeometry {
+    std::vector<std::size_t> shape;
+    ImageMetadata metadata;
+    // Output index -> source index, before applying the source world transform.
+    std::array<std::size_t, 3> sourceAxes;
+    std::array<double, 3> start;
+    std::array<double, 3> step;
+    std::size_t byteCount = 0;
+    std::size_t requiredMemoryBytes = 0;
+};
+
+// Orthogonal XZ/YZ stacks. Channel/time axes stay independent. Interpolation
+// samples only within source voxel centers; Z is sampled at profile-axis spacing.
+// rotate90 exchanges the output plane axes, matching ImageJ's reslice option.
+ResliceGeometry resliceGeometry(const Image &image, const ResliceOptions &options);
+Image reslice(const Image &image, const ResliceOptions &options,
+              std::stop_token stop = {}, Progress progress = {});
 Measurement measure(const Image &slice, const std::optional<Roi> &roi = {},
                     bool calibrated = true, std::stop_token stop = {});
 Histogram histogram(const Image &slice, std::size_t bins = 256,

@@ -46,6 +46,19 @@ Start `build/dev-vcpkg/ImageCXX` on Linux, `build/dev-vcpkg/ImageCXX.exe` on Win
 4. Draw a rectangle, ellipse, polygon or line. Use **Analyze → Measure selection**, **Histogram** or **Line profile**.
 5. Run a filter from **Process**, then use **Edit → Undo processing** if needed. Save the resulting image separately.
 
+Use **Stk → Reslice...** on the main toolbar to create XZ or YZ stacks in a new image window.
+Top/Bottom sweep Y and Left/Right sweep X. Output spacing is in the swept axis's units;
+Z is interpolated at the profile axis's spacing. **Avoid interpolation** instead copies
+one source voxel per output voxel and keeps the original spacing. Flip reverses Z;
+Rotate exchanges the two output plane axes as in ImageJ. Reslice processes the full
+Z stack and keeps channels and time points separate. Spatial axes must use matching units.
+The X/Y/Z unit labels must be identical; convertible units and spelling aliases are
+not normalized. Identical pixel or unknown labels are treated as a common scale.
+Memory is checked against currently available RAM and visible process/container limits,
+including output and working buffers, with 10% left free for the OS and UI.
+The worker rechecks before allocating; allocation failures leave the source unchanged.
+Reslice supports cancellation from the toolbar.
+
 Use **File → Save image as…** to save image pixels and **Analyze → Export measurements as CSV…** to export measurement results as CSV. ROIs stay in memory and are never saved.
 
 Wait for a save to finish before saving to the same destination again. Multi-file DICOM series cannot use Revert because reopening one slice would discard the rest of the stack. DICOM and NIfTI exports require calibrated spatial units; DICOM converts them to millimeters.
