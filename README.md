@@ -6,7 +6,7 @@ The image model and undo history are in `core/`, format adapters in `io/`, and I
 
 ## Build
 
-Install CMake 3.24 or later, Ninja, a C++20 compiler and the official Qt **6.12.0** desktop SDK. Add Qt Shader Tools, Qt Graphs and Qt Image Formats. Qt SVG is included in the base desktop SDK and must not be requested as an aqt add-on module. This Qt SDK also needs Qt Quick 3D as a transitive dependency of Qt Graphs, although ImageCXX uses only 2D plots. The desktop SDK also needs Qt Declarative, including Qt Quick, QML and QuickWidgets. Keep the matching Qt private development headers installed because the viewer uses Qt RHI behind its internal interface.
+Install CMake 3.24 or later, Ninja, a C++20 compiler and the official Qt **6.12.0** desktop SDK. Add Qt Shader Tools, Qt Graphs and Qt Image Formats. Qt SVG is included in the base desktop SDK and must not be requested as an aqt add-on module. This Qt SDK also needs Qt Quick 3D as a transitive dependency of Qt Graphs, although ImageCXX uses only 2D plots. Include Qt Quick Timeline for the Qt Quick 3D QML plugins deployed in release packages. The desktop SDK also needs Qt Declarative, including Qt Quick, QML and QuickWidgets. Keep the matching Qt private development headers installed because the viewer uses Qt RHI behind its internal interface.
 
 The supported dependency route is the [vcpkg manifest](vcpkg.json), pinned to baseline `bf19794383e8fb95eba5aa553235bc8ec2271688`. Qt comes from the official SDK, while ITK, DCMTK, libtiff, GoogleTest and Google Benchmark come from vcpkg. Do not install another Qt through vcpkg.
 

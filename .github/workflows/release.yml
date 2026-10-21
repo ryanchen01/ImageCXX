@@ -68,7 +68,7 @@ jobs:
           version: '6.12.0'
           aqtsource: 'git+https://github.com/miurahr/aqtinstall.git@7e5a5c3d95cf962cfc2f36c86ffa0d2c07f1a0d4'
           arch: ${{ matrix.qt-arch }}
-          modules: 'qtshadertools qtgraphs qtimageformats qtquick3d'
+          modules: 'qtshadertools qtgraphs qtimageformats qtquick3d qtquicktimeline'
           tools: ${{ runner.os == 'Windows' && 'tools_ifw' || '' }}
           cache: true
 

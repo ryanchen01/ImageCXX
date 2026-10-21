@@ -58,7 +58,7 @@ jobs:
           aqtsource: 'git+https://github.com/miurahr/aqtinstall.git@7e5a5c3d95cf962cfc2f36c86ffa0d2c07f1a0d4'
           arch: ${{ matrix.qt-arch }}
           # SVG and Declarative are included in the base desktop SDK.
-          modules: 'qtshadertools qtgraphs qtimageformats qtquick3d'
+          modules: 'qtshadertools qtgraphs qtimageformats qtquick3d qtquicktimeline'
           cache: true
 
       - name: Check out pinned vcpkg
