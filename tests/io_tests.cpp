@@ -6,6 +6,13 @@
 #include <QColor>
 #include <QDir>
 #include <QTemporaryDir>
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <QScopeGuard>
+#endif
 #include <gtest/gtest.h>
 #include <tiffio.h>
 #include <dcmtk/dcmdata/dctk.h>
@@ -458,11 +465,17 @@ TEST(ImageIo, ImportDiscoveryReportsUnreadableSlices)
     QTemporaryDir directory;
     const auto blocked = directory.filePath("last.IMA");
     writeDicom(fixture(PixelType::UInt16, {5, 3, 1}), blocked);
-    ASSERT_TRUE(QFile::setPermissions(blocked, {}));
-    const auto plan = discoverImageImports({directory.path()});
-    ASSERT_TRUE(QFile::setPermissions(blocked, QFileDevice::ReadOwner | QFileDevice::WriteOwner));
 #ifdef Q_OS_WIN
-    if (plan.errors.isEmpty()) GTEST_SKIP() << "File permission flags do not deny reads on this filesystem";
+    const auto handle = CreateFileW(reinterpret_cast<LPCWSTR>(blocked.utf16()), GENERIC_READ, 0,
+                                   nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    ASSERT_NE(handle, INVALID_HANDLE_VALUE);
+    const auto close = qScopeGuard([&] { CloseHandle(handle); });
+#else
+    ASSERT_TRUE(QFile::setPermissions(blocked, {}));
+#endif
+    const auto plan = discoverImageImports({directory.path()});
+#ifndef Q_OS_WIN
+    ASSERT_TRUE(QFile::setPermissions(blocked, QFileDevice::ReadOwner | QFileDevice::WriteOwner));
 #endif
     EXPECT_TRUE(plan.images.isEmpty());
     EXPECT_TRUE(plan.errors.join('\n').contains(blocked));

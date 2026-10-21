@@ -51,10 +51,12 @@ ImageImportPlan discoverImageImports(const QStringList &paths, std::stop_token s
         detail::checkIo(stop, progress, double(i) / candidates.size());
         const auto &candidate = candidates[i];
         const QFileInfo info(candidate.path);
-        if (!info.isReadable()) {
+        QFile readable(candidate.path);
+        if (!readable.open(QIODevice::ReadOnly)) {
             plan.errors.append(QStringLiteral("Cannot read %1").arg(candidate.path));
             continue;
         }
+        readable.close();
         const auto canonical = info.canonicalFilePath();
         if (seen.contains(canonical)) continue;
         seen.insert(canonical);
