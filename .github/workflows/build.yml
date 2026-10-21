@@ -2,6 +2,7 @@ name: Build and test
 
 on:
   push:
+    branches: ['**']
   pull_request:
   workflow_dispatch:
 
@@ -101,6 +102,9 @@ jobs:
 
       - name: Run tests
         run: ctest --preset release-vcpkg --timeout 120
+
+      - name: Test installer routing
+        run: node tests/installer_tests.js
 
       - name: Install Linux graphics test runtime
         if: runner.os == 'Linux'

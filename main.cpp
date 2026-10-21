@@ -1,9 +1,15 @@
 #include "mainwindow.h"
 #include "app/batch.h"
 #include "app/processing_commands.h"
+#ifdef IMAGECXX_ENABLE_UPDATES
+#include "app/update_checker.h"
+#include <QMessageBox>
+#include <QProcess>
+#endif
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QCoreApplication>
+#include <QIcon>
 #include <QJsonDocument>
 #include <QPalette>
 #include <QStyleFactory>
@@ -19,7 +25,7 @@ int main(int argc, char *argv[])
     else application = std::make_unique<QApplication>(argc, argv);
     QCoreApplication::setApplicationName("ImageCXX");
     QCoreApplication::setOrganizationName("ImageCXX");
-    QCoreApplication::setApplicationVersion("0.2.0");
+    QCoreApplication::setApplicationVersion(IMAGECXX_VERSION);
     QCommandLineParser parser;
     parser.setApplicationDescription("ImageCXX scientific image analysis");
     parser.addHelpOption(); parser.addVersionOption();
@@ -42,6 +48,7 @@ int main(int argc, char *argv[])
         } catch (const std::exception &error) { std::fprintf(stderr, "%s\n", error.what()); return 2; }
     }
     QApplication::setStyle(QStyleFactory::create("Fusion"));
+    QApplication::setWindowIcon(QIcon(":/icons/imagecxx.svg"));
     QPalette palette;
     const QColor background("#FAF7F2");
     const QColor foreground("#1A1C1F");
@@ -64,5 +71,16 @@ int main(int argc, char *argv[])
     MainWindow window;
     window.show();
     window.openPaths(parser.positionalArguments());
+#ifdef IMAGECXX_ENABLE_UPDATES
+    imagecxx::UpdateChecker updates(window);
+    const int result = application->exec();
+    if (!updates.pendingProgram.isEmpty() && !QProcess::startDetached(updates.pendingProgram, updates.pendingArguments)) {
+        QMessageBox::critical(nullptr, QObject::tr("Update failed"),
+            QObject::tr("Cannot launch %1. Please run it manually.").arg(updates.pendingProgram));
+        return 1;
+    }
+    return result;
+#else
     return application->exec();
+#endif
 }

@@ -50,7 +50,7 @@ The `sanitizers` and `sanitizers-vcpkg` presets enable AddressSanitizer and Unde
 
 Run `imagecxx_benchmarks` from the selected build directory with `--benchmark_out=benchmarks.json --benchmark_out_format=json`. It measures shared snapshots, slice views, buffer copies, histograms and ITK Gaussian filtering on deterministic generated inputs. These are CPU microbenchmarks. Record hardware, OS, compiler, build type and dependency versions alongside results before comparing runs. They do not measure launch time, GPU frame timing or real file decoding.
 
-The [GitHub Actions workflow](.github/workflows/build.yml) defines Windows, macOS and Linux build/test jobs with cached dependencies. Linux also runs graphics and interactive plot tests under Xvfb with software rendering. Hosted runs and cross-platform release packaging have not yet been verified. CI requires the pinned Qt SDK and its add-on archives to be available from Qt's download service.
+The [GitHub Actions workflow](.github/workflows/build.yml) defines Windows, macOS and Linux build/test jobs with cached dependencies. Linux also runs graphics and interactive plot tests under Xvfb with software rendering. The [release workflow](.github/workflows/release.yml) builds tagged installers and update packages. See [releasing and updates](docs/releases.md) for signing secrets, tag names, and platform behavior. CI requires the pinned Qt SDK and its add-on archives to be available from Qt's download service.
 
 `clang-format` uses [.clang-format](.clang-format), and `clang-tidy` can use the generated `compile_commands.json` with [.clang-tidy](.clang-tidy).
 

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Package>
+    <DisplayName>ImageCXX</DisplayName>
+    <Description>Scientific image viewing and analysis</Description>
+    <Version>@VERSION@</Version>
+    <ReleaseDate>@DATE@</ReleaseDate>
+    <Name>com.ryanchen01.ImageCXX</Name>
+    <Default>true</Default>
+    <ForcedInstallation>true</ForcedInstallation>
+    <Script>installscript.qs</Script>
+    <Licenses><License name="GPL-3.0-or-later" file="LICENSE.txt"/></Licenses>
+</Package>

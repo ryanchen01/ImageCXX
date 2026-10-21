@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+set -euo pipefail
+version="$1"
+: "${MACOS_CERTIFICATE_P12:?Missing release environment certificate}"
+: "${MACOS_CERTIFICATE_PASSWORD:?Missing certificate password}"
+: "${APPSTORE_API_KEY_ID:?Missing App Store Connect key ID}"
+: "${APPSTORE_API_PRIVATE_KEY:?Missing App Store Connect key}"
+: "${APPSTORE_ISSUER_ID:?Missing App Store Connect issuer ID}"
+: "${SPARKLE_PRIVATE_KEY:?Missing Sparkle signing key}"
+root="$PWD"
+stage="$root/build/macos-package"
+app="$stage/ImageCXX.app"
+temporary=$(mktemp -d)
+keychain="$temporary/release.keychain-db"
+keychain_password=$(openssl rand -hex 32)
+old_keychains=()
+while IFS= read -r line; do old_keychains+=("$line"); done < <(security list-keychains -d user | sed 's/^ *"//;s/"$//')
+cleanup() {
+    security list-keychains -d user -s "${old_keychains[@]}"
+    security delete-keychain "$keychain" || true
+    rm -rf "$temporary"
+}
+trap cleanup EXIT
+umask 077
+python3 - "$temporary" <<'PY'
+import base64, os, pathlib, sys
+folder = pathlib.Path(sys.argv[1])
+(folder / "certificate.p12").write_bytes(base64.b64decode("".join(os.environ["MACOS_CERTIFICATE_P12"].split()), validate=True))
+key = os.environ["APPSTORE_API_PRIVATE_KEY"].strip()
+(folder / "AuthKey.p8").write_bytes(key.encode() if key.startswith("-----BEGIN") else base64.b64decode("".join(key.split()), validate=True))
+PY
+security create-keychain -p "$keychain_password" "$keychain"
+security set-keychain-settings -lut 21600 "$keychain"
+security unlock-keychain -p "$keychain_password" "$keychain"
+security import "$temporary/certificate.p12" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" >/dev/null
+security list-keychains -d user -s "$keychain" "${old_keychains[@]}"
+identity=$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.* \([A-F0-9]\{40\}\) "Developer ID Application:.*$/\1/p' | head -1)
+test -n "$identity"
+mkdir -p "$stage" "$root/dist"
+ditto "$root/build/release-vcpkg/ImageCXX.app" "$app"
+"$QT_ROOT_DIR/bin/macdeployqt" "$app" -qmldir="$root/plots" -always-overwrite -no-codesign
+mkdir -p "$app/Contents/Resources/licenses"
+cp LICENSE "$app/Contents/Resources/licenses/ImageCXX.txt"
+python3 - "$app" "$identity" "$keychain" <<'PY'
+import os, pathlib, subprocess, sys
+app, identity, keychain = sys.argv[1:]
+# QML can pull in QtSql; external database drivers require vendor SDKs we do not use.
+for driver in (pathlib.Path(app) / "Contents/PlugIns/sqldrivers").glob("*.dylib"):
+    if driver.name != "libqsqlite.dylib":
+        driver.unlink()
+magic = {bytes.fromhex(value) for value in ("feedface", "cefaedfe", "feedfacf", "cffaedfe", "cafebabe", "bebafeca", "cafebabf", "bfbafeca")}
+for folder, dirs, files in os.walk(app, topdown=False):
+    for name in files:
+        path = pathlib.Path(folder) / name
+        if path.is_symlink():
+            continue
+        with path.open("rb") as file:
+            is_macho = file.read(4) in magic
+        if is_macho:
+            dependencies = subprocess.check_output(["otool", "-L", str(path)], text=True).splitlines()[1:]
+            for dependency in dependencies:
+                library = dependency.strip().split(" (", 1)[0]
+                if library.startswith("/") and not library.startswith(("/System/Library/", "/usr/lib/", "/Library/Apple/System/Library/")):
+                    raise RuntimeError(f"Unbundled dependency in {path}: {library}")
+            subprocess.run(["codesign", "--force", "--sign", identity, "--keychain", keychain,
+                "--options", "runtime", "--timestamp", "--preserve-metadata=entitlements", str(path)], check=True)
+    if folder != app and folder.endswith((".app", ".xpc", ".framework", ".bundle")):
+        subprocess.run(["codesign", "--force", "--sign", identity, "--keychain", keychain,
+            "--options", "runtime", "--timestamp", "--preserve-metadata=entitlements", folder], check=True)
+PY
+codesign --force --sign "$identity" --keychain "$keychain" --options runtime --timestamp \
+    --entitlements packaging/macos/entitlements.plist "$app"
+codesign --verify --deep --strict --verbose=2 "$app"
+env -u DYLD_LIBRARY_PATH -u DYLD_FRAMEWORK_PATH -u QT_PLUGIN_PATH -u QML2_IMPORT_PATH -u QML_IMPORT_PATH \
+    "$app/Contents/MacOS/ImageCXX" --batch --version | grep -Fx "ImageCXX $version"
+ditto -c -k --sequesterRsrc --keepParent "$app" "$temporary/ImageCXX.zip"
+xcrun notarytool submit "$temporary/ImageCXX.zip" --key "$temporary/AuthKey.p8" \
+    --key-id "$APPSTORE_API_KEY_ID" --issuer "$APPSTORE_ISSUER_ID" --wait --output-format json > "$temporary/app-notary.json"
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["status"] == "Accepted", "App notarization failed"' "$temporary/app-notary.json"
+xcrun stapler staple "$app"
+spctl --assess --type execute --verbose=2 "$app"
+ln -s /Applications "$stage/Applications"
+dmg="$root/dist/ImageCXX-$version-macos-arm64.dmg"
+hdiutil create -volname ImageCXX -srcfolder "$stage" -format UDZO -ov "$dmg"
+codesign --sign "$identity" --keychain "$keychain" --timestamp "$dmg"
+xcrun notarytool submit "$dmg" --key "$temporary/AuthKey.p8" \
+    --key-id "$APPSTORE_API_KEY_ID" --issuer "$APPSTORE_ISSUER_ID" --wait --output-format json > "$temporary/dmg-notary.json"
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["status"] == "Accepted", "DMG notarization failed"' "$temporary/dmg-notary.json"
+xcrun stapler staple "$dmg"
+xcrun stapler validate "$dmg"
+signature=$(printf '%s' "$SPARKLE_PRIVATE_KEY" | build/tools/bin/sign_update --ed-key-file - -p "$dmg")
+public_key=$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$app/Contents/Info.plist")
+# Fail the release if the CI private key does not match the public key shipped in the app.
+swift - "$dmg" "$signature" "$public_key" <<'SWIFT'
+import Foundation
+import CryptoKit
+let data = try Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1]), options: .mappedIfSafe)
+let key = try Curve25519.Signing.PublicKey(rawRepresentation: Data(base64Encoded: CommandLine.arguments[3])!)
+guard let signature = Data(base64Encoded: CommandLine.arguments[2]), key.isValidSignature(signature, for: data) else {
+    fatalError("Sparkle signature does not match the embedded public key")
+}
+SWIFT
+python3 - "$version" "$dmg" "$signature" "$GITHUB_REF_NAME" <<'PY'
+import pathlib, sys, xml.etree.ElementTree as ET
+version, dmg, signature, tag = sys.argv[1:]
+namespace = "http://www.andymatuschak.org/xml-namespaces/sparkle"
+ET.register_namespace("sparkle", namespace)
+rss = ET.Element("rss", version="2.0")
+channel = ET.SubElement(rss, "channel")
+ET.SubElement(channel, "title").text = "ImageCXX updates"
+item = ET.SubElement(channel, "item")
+ET.SubElement(item, "title").text = "ImageCXX " + version
+ET.SubElement(item, "{" + namespace + "}version").text = version
+ET.SubElement(item, "{" + namespace + "}minimumSystemVersion").text = "14.4.0"
+ET.SubElement(item, "{" + namespace + "}hardwareRequirements").text = "arm64"
+ET.SubElement(item, "enclosure", {
+    "url": "https://github.com/ryanchen01/ImageCXX/releases/download/" + tag + "/" + pathlib.Path(dmg).name,
+    "length": str(pathlib.Path(dmg).stat().st_size), "type": "application/octet-stream",
+    "{" + namespace + "}edSignature": signature})
+ET.indent(rss)
+ET.ElementTree(rss).write("dist/appcast.xml", encoding="utf-8", xml_declaration=True)
+PY

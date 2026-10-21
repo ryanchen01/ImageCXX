@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Installer>
+    <Name>ImageCXX</Name>
+    <Version>@VERSION@</Version>
+    <Title>ImageCXX Setup</Title>
+    <InstallerApplicationIcon>imagecxx</InstallerApplicationIcon>
+    <Publisher>ImageCXX</Publisher>
+    <ProductUrl>https://github.com/ryanchen01/ImageCXX</ProductUrl>
+    <TargetDir>@HomeDir@/ImageCXX</TargetDir>
+    <StartMenuDir>ImageCXX</StartMenuDir>
+    <MaintenanceToolName>ImageCXXMaintenanceTool</MaintenanceToolName>
+    <ControlScript>controller.qs</ControlScript>
+    <RunProgram>@TargetDir@/bin/ImageCXX.exe</RunProgram>
+    <AllowNonAsciiCharacters>true</AllowNonAsciiCharacters>
+    <RemoveTargetDir>false</RemoveTargetDir>
+    <SaveDefaultRepositories>false</SaveDefaultRepositories>
+</Installer>

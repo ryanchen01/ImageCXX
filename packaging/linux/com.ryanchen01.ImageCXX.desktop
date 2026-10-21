@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=ImageCXX
+Exec=ImageCXX %F
+Icon=com.ryanchen01.ImageCXX
+Terminal=false
+Categories=Science;Graphics;
+MimeType=image/tiff;image/png;image/jpeg;

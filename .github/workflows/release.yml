@@ -1,0 +1,203 @@
+name: Release installers
+
+on:
+  push:
+    tags: ['*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  desktop:
+    name: Package ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    environment: release
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            triplet: x64-linux
+            qt-arch: linux_gcc_64
+          - os: windows-2025
+            triplet: x64-windows
+            qt-arch: win64_msvc2022_64
+          - os: macos-26
+            triplet: arm64-osx
+            qt-arch: clang_64
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}/build/vcpkg
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/build/vcpkg-cache
+      VCPKG_MAX_CONCURRENCY: 2
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Derive version from tag
+        id: version
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo 'Release tags must be vMAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH' >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        with:
+          arch: x64
+
+      - name: Restore pinned vcpkg path after MSVC setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '"VCPKG_ROOT=$env:GITHUB_WORKSPACE/build/vcpkg" >> $env:GITHUB_ENV'
+
+      - name: Install official Qt binaries
+        uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125 # v4.4.1
+        with:
+          version: '6.12.0'
+          aqtsource: 'git+https://github.com/miurahr/aqtinstall.git@7e5a5c3d95cf962cfc2f36c86ffa0d2c07f1a0d4'
+          arch: ${{ matrix.qt-arch }}
+          modules: 'qtshadertools qtgraphs qtimageformats qtquick3d'
+          tools: ${{ runner.os == 'Windows' && 'tools_ifw' || '' }}
+          cache: true
+
+      - name: Check out pinned vcpkg
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          repository: microsoft/vcpkg
+          ref: bf19794383e8fb95eba5aa553235bc8ec2271688
+          path: build/vcpkg
+
+      - name: Prepare binary cache
+        shell: bash
+        run: mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
+
+      - name: Restore scientific dependency cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: build/vcpkg-cache
+          key: vcpkg-${{ runner.os }}-${{ matrix.triplet }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-${{ runner.os }}-${{ matrix.triplet }}-
+
+      - name: Bootstrap vcpkg on Unix
+        if: runner.os != 'Windows'
+        shell: bash
+        run: '"$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics'
+
+      - name: Bootstrap vcpkg on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '& "$env:VCPKG_ROOT/bootstrap-vcpkg.bat" -disableMetrics'
+
+      - name: Download verified packaging tools
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash packaging/download-tools.sh ${{ runner.os == 'macOS' && 'macos' || 'linux' }}
+
+      - name: Configure
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          args=(-DIMAGECXX_VERSION="$VERSION" -DIMAGECXX_ENABLE_UPDATES=ON -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }})
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            args+=(-DIMAGECXX_SPARKLE_ROOT="$GITHUB_WORKSPACE/build/tools" -DCMAKE_OSX_DEPLOYMENT_TARGET=14.4 -DVCPKG_OVERLAY_TRIPLETS="$GITHUB_WORKSPACE/packaging/triplets")
+          fi
+          cmake --preset release-vcpkg "${args[@]}"
+
+      - name: Build
+        run: cmake --build --preset release-vcpkg
+
+      - name: Add dependency runtime libraries on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "$GITHUB_WORKSPACE/build/release-vcpkg/vcpkg_installed/${{ matrix.triplet }}/bin" >> "$GITHUB_PATH"
+
+      - name: Run tests
+        run: ctest --preset release-vcpkg --timeout 120
+
+      - name: Package Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./packaging/windows/package.ps1 -Version '${{ steps.version.outputs.version }}'
+
+      - name: Test Windows installer scripts
+        if: runner.os == 'Windows'
+        run: node tests/installer_tests.js
+
+      - name: Test in-place Windows upgrade
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./packaging/windows/test-upgrade.ps1 -Version '${{ steps.version.outputs.version }}'
+
+      - name: Package signed and notarized macOS DMG
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          APPSTORE_API_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+          APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: bash packaging/macos/package.sh '${{ steps.version.outputs.version }}'
+
+      - name: Install AppImage packaging runtime
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libfuse2t64 desktop-file-utils patchelf zsync
+
+      - name: Package Linux AppImage
+        if: runner.os == 'Linux'
+        run: bash packaging/linux/package.sh '${{ steps.version.outputs.version }}'
+
+      - name: Upload installers
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: installer-${{ matrix.triplet }}
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: release-test-logs-${{ matrix.triplet }}
+          path: build/release-vcpkg/Testing/Temporary/
+          if-no-files-found: ignore
+
+  publish:
+    needs: desktop
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download installers
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          pattern: installer-*
+          merge-multiple: true
+          path: dist
+
+      - name: Publish complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 5
+          (cd dist && sha256sum * > SHA256SUMS)
+          gh release create "$GITHUB_REF_NAME" dist/* --draft --verify-tag --title "ImageCXX ${GITHUB_REF_NAME#v}" --generate-notes
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest
