@@ -38,59 +38,6 @@ Keep Qt's `bin` and vcpkg's `build/dev-vcpkg/vcpkg_installed/x64-windows/debug/b
 
 Start `build/dev-vcpkg/ImageCXX` on Linux, `build/dev-vcpkg/ImageCXX.exe` on Windows, or `build/dev-vcpkg/ImageCXX.app` on macOS. You can also pass image paths as command-line arguments.
 
-## Try a workflow
-
-1. Choose **File → Open sample stack** or open an image.
-2. Browse Z, channel and time with the image-window controls. Drag to pan, use the wheel to browse slices, Ctrl or Command plus wheel to zoom, and press **Ctrl+0** to fit. Use Command instead of Ctrl on macOS.
-3. Press **Ctrl+J** or open **Window → Display** to adjust range and gamma. Choose a color map from **LUT** on the main toolbar. These settings do not alter pixel values.
-4. Draw a rectangle, ellipse, polygon or line. Use **Analyze → Measure selection**, **Histogram** or **Line profile**.
-5. Run a filter from **Process**, then use **Edit → Undo processing** if needed. Save the resulting image separately.
-
-Open multiple files with **File → Open images...**, or choose **File → Open folder...**
-to include files in subfolders. You can also drop files or folders onto the launcher
-or an image window. Ordinary images open separately. Single-frame grayscale DICOM
-files are grouped by study and series into one Z stack per series, ordered by patient
-position. Selecting a folder together with files inside it does not import those
-files twice. DICOM filenames can have `.dcm`, `.dicom`, another extension, or no extension.
-**File → Open DICOM series...** also accepts files from multiple series. Multiframe
-and color DICOM files open individually. Invalid series report an error while other
-images continue opening. Folder discovery runs in the background and supports cancellation.
-Unreadable files report their paths. Folder scans skip `.raw` and `.bin` files without
-a JSON layout; select those files directly to supply their layout. DICOM imports
-check memory for the decoded images and assembly buffers before loading. Decoding
-runs one DICOM import at a time, and an import waiting to decode can be cancelled.
-
-Use **Stk → Reslice...** on the main toolbar to create XZ or YZ stacks in a new image window.
-Top/Bottom sweep Y and Left/Right sweep X. Output spacing is in the swept axis's units;
-Z is interpolated at the profile axis's spacing. **Avoid interpolation** instead copies
-one source voxel per output voxel and keeps the original spacing. Flip reverses Z;
-Rotate exchanges the two output plane axes as in ImageJ. Reslice processes the full
-Z stack and keeps channels and time points separate. ITK's `AffineTransform` and
-`ResampleImageFilter` perform the spatial mapping and linear or nearest-neighbor
-resampling. Each component/channel/time volume uses ITK's normal multithreading;
-contiguous scalar input is imported without copying. Integer output is rounded
-and clamped to its original type; floating output retains Float32 or Float64.
-Spatial axes must use matching units.
-The X/Y/Z unit labels must be identical; convertible units and spelling aliases are
-not normalized. Identical pixel or unknown labels are treated as a common scale.
-Memory is checked against currently available RAM and visible process/container limits,
-including the final output, ITK's temporary double-precision output volume,
-any packed input component volume, and display buffers, with 10% left free for the OS and UI.
-The worker rechecks before allocating; allocation failures leave the source unchanged.
-Reslice supports cancellation from the toolbar.
-
-Use **File → Save image as…** to save image pixels and **Analyze → Export measurements as CSV…** to export measurement results as CSV. ROIs stay in memory and are never saved.
-
-Wait for a save to finish before saving to the same destination again. Multi-file DICOM series cannot use Revert because reopening one slice would discard the rest of the stack. DICOM and NIfTI exports require calibrated spatial units; DICOM converts them to millimeters.
-
-Batch mode runs without a desktop window and writes new TIFF files without replacing existing outputs:
-
-```sh
-build/dev-vcpkg/ImageCXX --batch --operation threshold --parameters '{"lower":100,"upper":255}' --output results input.tif
-```
-
-Built-in shortcut mappings and compatibility limits are listed in [docs/shortcuts.md](docs/shortcuts.md).
-
 ## Checks and benchmarks
 
 ```sh
