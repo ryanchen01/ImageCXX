@@ -2,6 +2,7 @@
 #include "core/memory.h"
 #include <gtest/gtest.h>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <limits>
 #include <numeric>
@@ -128,6 +129,100 @@ TEST(Projection, ValidatesGeometryMemoryAndCancellation) {
     cancel = std::stop_source{};
     EXPECT_THROW(project3D(source, options, cancel.get_token(), [&](double) { cancel.request_stop(); }), std::runtime_error);
     EXPECT_EQ(source.sample(0, 0), 0);
+}
+
+TEST(Projection, CroppedAndLazyVolumesMatchPackedStorage) {
+    class LazyStorage final : public Storage {
+    public:
+        Image source;
+        mutable std::atomic<bool> reading = false;
+        std::size_t size() const override { return source.byteCount(); }
+        const std::byte *data() const override { return nullptr; }
+        std::byte *mutableData() override { return nullptr; }
+        bool readOnly() const override { return true; }
+        QString kind() const override { return "Lazy"; }
+        void read(std::size_t offset, std::span<std::byte> destination) const override {
+            if (offset > size() || destination.size() > size() - offset) throw std::out_of_range("Invalid read");
+            if (reading.exchange(true)) throw std::runtime_error("Concurrent lazy reads");
+            std::memcpy(destination.data(), source.data() + offset, destination.size());
+            reading.store(false);
+        }
+    };
+    for (auto type : {PixelType::UInt8, PixelType::UInt16, PixelType::Int16, PixelType::Float32,
+                      PixelType::Float64, PixelType::RGB8, PixelType::RGBA8}) {
+        auto full = Image::allocate(type, {6, 5, 5, 2, 2});
+        for (std::size_t t = 0; t < 2; ++t) for (std::size_t c = 0; c < 2; ++c)
+            for (std::size_t z = 0; z < 5; ++z) for (std::size_t y = 0; y < 5; ++y) for (std::size_t x = 0; x < 6; ++x)
+                for (std::size_t k = 0; k < componentCount(type); ++k)
+                    full.setValue(std::array<std::size_t, 5>{x, y, z, c, t}, 7*x + 3*y + 11*z + 17*c + 23*t + k - 40., k);
+        auto storage = std::make_shared<LazyStorage>(); storage->source = full;
+        const auto lazy = Image::fromStorage(type, full.shape(), storage);
+        const std::array<std::size_t, 5> start{1, 1, 1, 0, 0}, extent{4, 3, 3, 2, 2};
+        const auto cropped = full.region(start, extent), lazyCrop = lazy.region(start, extent);
+        const auto packed = cropped.clone();
+        ProjectionOptions options; options.initialAngle = 37; options.totalRotation = 90; options.angleIncrement = 45;
+        options.sliceSpacing = 1.7; options.lower = -20; options.upper = 80;
+        options.opacity = 37; options.surfaceDepthCue = 40; options.interiorDepthCue = 60;
+        for (int axis = 0; axis < 3; ++axis) for (bool interpolate : {false, true})
+            for (auto method : {ProjectionMethod::NearestPoint, ProjectionMethod::BrightestPoint, ProjectionMethod::MeanValue}) {
+                SCOPED_TRACE(::testing::Message() << "type=" << int(type) << " axis=" << axis
+                    << " interpolate=" << interpolate << " method=" << int(method));
+                options.rotationAxis = axis; options.interpolate = interpolate; options.method = method;
+                const auto expected = project3D(packed, options);
+                for (const auto &source : {cropped, lazyCrop}) {
+                    const auto actual = project3D(source, options);
+                    ASSERT_EQ(actual.shape(), expected.shape());
+                    EXPECT_EQ(std::memcmp(actual.data(), expected.data(), expected.byteCount()), 0);
+                }
+            }
+    }
+}
+
+TEST(Projection, TransparentAndNonfiniteSamplesDoNotHideTheFirstVisiblePoint) {
+    auto source = Image::allocate(PixelType::Float64, {1, 1, 5});
+    const std::array values{std::numeric_limits<double>::quiet_NaN(), -5., 20., 80., std::numeric_limits<double>::infinity()};
+    std::memcpy(source.mutableData(), values.data(), source.byteCount());
+    ProjectionOptions options; options.rotationAxis = 2; options.totalRotation = 0;
+    options.lower = 10; options.upper = 50; options.surfaceDepthCue = options.interiorDepthCue = 0;
+    for (bool interpolate : {false, true})
+        for (auto method : {ProjectionMethod::NearestPoint, ProjectionMethod::BrightestPoint, ProjectionMethod::MeanValue}) {
+            options.interpolate = interpolate; options.method = method;
+            EXPECT_DOUBLE_EQ(project3D(source, options).sample(1, 1), 20);
+            options.lower = 30;
+            EXPECT_DOUBLE_EQ(project3D(source, options).sample(1, 1), 0);
+            options.lower = 10;
+        }
+}
+
+TEST(Projection, SingleAngleSerializesProgressAndPropagatesWorkerCancellationAndErrors) {
+    auto source = Image::allocate(PixelType::Float64, {48, 32, 16});
+    std::fill_n(reinterpret_cast<double *>(source.mutableData()), source.pixelCount(), 100.);
+    ProjectionOptions options; options.totalRotation = 0; options.initialAngle = 37;
+    options.method = ProjectionMethod::MeanValue;
+    options.surfaceDepthCue = options.interiorDepthCue = 0;
+    std::atomic<unsigned> callbacks = 0;
+    std::atomic<bool> active = false;
+    std::atomic<double> last = -1;
+    const auto result = project3D(source, options, {}, [&](double fraction) {
+        EXPECT_FALSE(active.exchange(true));
+        EXPECT_GE(fraction, last.exchange(fraction));
+        ++callbacks;
+        active.store(false);
+    });
+    EXPECT_GT(callbacks.load(), 2u); EXPECT_DOUBLE_EQ(last.load(), 1);
+    EXPECT_DOUBLE_EQ(result.sample(result.width()/2, result.height()/2), 100);
+    std::stop_source cancel;
+    EXPECT_THROW(project3D(source, options, cancel.get_token(), [&](double fraction) {
+        if (fraction > 0) cancel.request_stop();
+    }), std::runtime_error);
+    EXPECT_THROW(project3D(source, options, {}, [](double fraction) {
+        if (fraction > 0) throw std::logic_error("Progress callback failed");
+    }), std::logic_error);
+    EXPECT_THROW(project3D(source, options, {}, [](double fraction) {
+        if (fraction > 0) throw std::bad_alloc{};
+    }), std::runtime_error);
+    EXPECT_NO_THROW(project3D(source, options));
+    EXPECT_EQ(source.sample(0, 0), 100);
 }
 
 TEST(Reslice, ExactPermutationPreservesPixelsAndWorldCoordinatesForEveryOrientation) {

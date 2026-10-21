@@ -35,7 +35,7 @@ jobs:
       QT_QPA_PLATFORM: offscreen
     steps:
       - name: Check out source
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Set up MSVC
         if: runner.os == 'Windows'
@@ -61,7 +61,7 @@ jobs:
           cache: true
 
       - name: Check out pinned vcpkg
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           repository: microsoft/vcpkg
           ref: bf19794383e8fb95eba5aa553235bc8ec2271688
@@ -72,7 +72,7 @@ jobs:
         run: mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
 
       - name: Restore scientific dependency cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: build/vcpkg-cache
           key: vcpkg-${{ runner.os }}-${{ matrix.triplet }}-${{ hashFiles('vcpkg.json') }}
@@ -118,7 +118,7 @@ jobs:
 
       - name: Upload test logs
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: test-logs-${{ matrix.os }}
           path: build/release-vcpkg/Testing/Temporary/

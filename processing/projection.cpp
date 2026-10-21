@@ -1,11 +1,16 @@
 #include "processing/processing.h"
 #include "core/memory.h"
+#include <itkMultiThreaderBase.h>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstring>
+#include <exception>
 #include <limits>
 #include <mutex>
 #include <numbers>
 #include <stdexcept>
+#include <type_traits>
 
 namespace imagecxx {
 namespace {
@@ -72,6 +77,8 @@ Image project3D(const Image &image, const ProjectionOptions &options, std::stop_
         metadata.attributes.remove("ImageCXX.EmbeddedPlaneOrigin"); metadata.attributes.remove("ImageCXX.EmbeddedPlaneZUnit");
         auto output = Image::allocate(image.pixelType(), geometry.shape, metadata);
         const auto components = componentCount(image.pixelType());
+        const auto *buffer = image.data();
+        const auto &strides = image.strides();
         const double zExtent = double(image.depth() - 1) * options.sliceSpacing;
         const double radius = options.rotationAxis == 2 ? zExtent
             : std::hypot(double(image.dimension(options.rotationAxis == 0 ? 1 : 0) - 1), zExtent);
@@ -79,79 +86,142 @@ Image project3D(const Image &image, const ProjectionOptions &options, std::stop_
         const std::array<double, 3> halfSize{double(image.width())/2, double(image.height())/2, double(image.depth()) * options.sliceSpacing/2};
         const double outputCenterX = center[0] + std::ceil(double(output.width() - image.width())/2);
         const double outputCenterY = center[1] + std::ceil(double(output.height() - image.height())/2);
-        const double units = double(output.depth()) * image.channels() * image.frames() * components;
-        double completed = 0;
+        auto *destination = output.mutableData();
+        const auto pixelBytes = bytesPerPixel(image.pixelType());
+        const auto rows = output.pixelCount() / output.width() * components;
+        std::size_t completed = 0;
+        std::mutex progressMutex;
+        std::exception_ptr error;
+        std::atomic<bool> failed = false;
         if (progress) progress(0);
-        std::vector<std::size_t> index(output.shape().size(), 0);
-        for (std::size_t t = 0; t < image.frames(); ++t) for (std::size_t c = 0; c < image.channels(); ++c)
-            for (std::size_t angle = 0; angle < output.depth(); ++angle) for (std::size_t k = 0; k < components; ++k) {
+        auto threader = itk::MultiThreaderBase::New();
+        // Storage providers need not support concurrent reads without a shared buffer.
+        if (!buffer) {
+            threader->SetMaximumNumberOfThreads(1);
+            threader->SetNumberOfWorkUnits(1);
+        }
+        threader->ParallelizeArray(0, rows, [&](std::size_t row) {
+            try {
+                if (failed.load()) return;
+                if (stop.stop_requested()) throw std::runtime_error("3D projection cancelled");
+                auto remainder = row;
+                const auto y = remainder % output.height(); remainder /= output.height();
+                const auto k = remainder % components; remainder /= components;
+                const auto angle = remainder % output.depth(); remainder /= output.depth();
+                const auto c = remainder % image.channels();
+                const auto t = remainder / image.channels();
                 const auto degrees = options.initialAngle + angle * options.angleIncrement;
                 const double radians = degrees * std::numbers::pi / 180.;
                 double cosine = std::cos(radians), sine = std::sin(radians);
                 // Avoid floating-point drift across pixel boundaries in cardinal views.
                 if (degrees % 90 == 0) { cosine = std::round(cosine); sine = std::round(sine); }
-                if (index.size() > 3) index[3] = c;
-                if (index.size() > 4) index[4] = t;
-                index[2] = angle;
-                for (std::size_t y = 0; y < output.height(); ++y) {
-                    if (stop.stop_requested()) throw std::runtime_error("3D projection cancelled");
-                    if (progress) progress((completed + double(y) / output.height()) / units);
-                    for (std::size_t x = 0; x < output.width(); ++x) {
-                        const double px = double(x) - outputCenterX, py = double(y) - outputCenterY;
-                        std::array<double, 3> origin, direction;
-                        if (options.rotationAxis == 0) { origin = {px, cosine*py, -sine*py}; direction = {0, sine, cosine}; }
-                        else if (options.rotationAxis == 1) { origin = {cosine*px, py, sine*px}; direction = {-sine, 0, cosine}; }
-                        else { origin = {cosine*px + sine*py, -sine*px + cosine*py, 0}; direction = {0, 0, 1}; }
-                        double entry = -std::numeric_limits<double>::infinity(), exit = std::numeric_limits<double>::infinity();
-                        bool intersects = true;
+                const auto volumeOffset = (strides.size() > 3 ? c * strides[3] : 0)
+                    + (strides.size() > 4 ? t * strides[4] : 0) + (components > 1 ? k : 0);
+                const auto read = [&](std::size_t x, std::size_t y, std::size_t z) -> double {
+                    if (!buffer) return image.sample(x, y, z, c, t, k);
+                    const auto *at = buffer + volumeOffset + x * strides[0] + y * strides[1] + z * strides[2];
+                    // Views and mapped files can be unaligned; memcpy also avoids aliasing typed storage.
+                    switch (image.pixelType()) {
+                    case PixelType::UInt8: case PixelType::RGB8: case PixelType::RGBA8:
+                        return std::to_integer<std::uint8_t>(*at);
+                    case PixelType::UInt16: { std::uint16_t value; std::memcpy(&value, at, sizeof(value)); return value; }
+                    case PixelType::Int16: { std::int16_t value; std::memcpy(&value, at, sizeof(value)); return value; }
+                    case PixelType::Float32: { float value; std::memcpy(&value, at, sizeof(value)); return value; }
+                    case PixelType::Float64: { double value; std::memcpy(&value, at, sizeof(value)); return value; }
+                    }
+                    throw std::invalid_argument("Unknown pixel type");
+                };
+                for (std::size_t x = 0; x < output.width(); ++x) {
+                    const double px = double(x) - outputCenterX, py = double(y) - outputCenterY;
+                    std::array<double, 3> origin, direction;
+                    if (options.rotationAxis == 0) { origin = {px, cosine*py, -sine*py}; direction = {0, sine, cosine}; }
+                    else if (options.rotationAxis == 1) { origin = {cosine*px, py, sine*px}; direction = {-sine, 0, cosine}; }
+                    else { origin = {cosine*px + sine*py, -sine*px + cosine*py, 0}; direction = {0, 0, 1}; }
+                    double entry = -std::numeric_limits<double>::infinity(), exit = std::numeric_limits<double>::infinity();
+                    bool intersects = true;
+                    for (std::size_t axis = 0; axis < 3; ++axis) {
+                        if (direction[axis] == 0) {
+                            if (origin[axis] < -halfSize[axis] || origin[axis] >= halfSize[axis]) intersects = false;
+                        } else {
+                            const double a = (-halfSize[axis] - origin[axis]) / direction[axis];
+                            const double b = (halfSize[axis] - origin[axis]) / direction[axis];
+                            entry = std::max(entry, std::min(a, b)); exit = std::min(exit, std::max(a, b));
+                        }
+                    }
+                    if (!intersects || exit <= entry) continue;
+                    // Sample each output ray uniformly; rounding forward-mapped voxels leaves holes and uneven density.
+                    const double length = exit - entry;
+                    const auto samples = projectionSize(std::max({1., length * std::abs(direction[0]), length * std::abs(direction[1]),
+                        length * std::abs(direction[2]) / options.sliceSpacing}));
+                    ProjectedPixel pixel;
+                    for (std::size_t sample = 0; sample < samples; ++sample) {
+                        if ((sample & 4095) == 0 && (stop.stop_requested() || failed.load())) throw std::runtime_error("3D projection cancelled");
+                        const double depthPosition = std::lerp(entry, exit, (double(sample) + .5) / samples);
+                        std::array<std::size_t, 3> low, high;
+                        std::array<double, 3> fraction;
                         for (std::size_t axis = 0; axis < 3; ++axis) {
-                            if (direction[axis] == 0) {
-                                if (origin[axis] < -halfSize[axis] || origin[axis] >= halfSize[axis]) intersects = false;
-                            } else {
-                                const double a = (-halfSize[axis] - origin[axis]) / direction[axis];
-                                const double b = (halfSize[axis] - origin[axis]) / direction[axis];
-                                entry = std::max(entry, std::min(a, b)); exit = std::min(exit, std::max(a, b));
-                            }
+                            double coordinate = (origin[axis] + depthPosition * direction[axis]) / (axis == 2 ? options.sliceSpacing : 1) + center[axis];
+                            coordinate = std::clamp(coordinate, 0., double(image.dimension(axis) - 1));
+                            if (!options.interpolate) coordinate = std::round(coordinate);
+                            low[axis] = std::size_t(std::floor(coordinate)); high[axis] = std::min(low[axis] + 1, image.dimension(axis) - 1);
+                            fraction[axis] = coordinate - low[axis];
                         }
-                        if (!intersects || exit <= entry) continue;
-                        // Sample each output ray uniformly; rounding forward-mapped voxels leaves holes and uneven density.
-                        const double length = exit - entry;
-                        const auto samples = projectionSize(std::max({1., length * std::abs(direction[0]), length * std::abs(direction[1]),
-                            length * std::abs(direction[2]) / options.sliceSpacing}));
-                        ProjectedPixel pixel;
-                        for (std::size_t sample = 0; sample < samples; ++sample) {
-                            if ((sample & 4095) == 0 && stop.stop_requested()) throw std::runtime_error("3D projection cancelled");
-                            const double depthPosition = std::lerp(entry, exit, (double(sample) + .5) / samples);
-                            std::array<std::size_t, 3> low, high;
-                            std::array<double, 3> fraction;
-                            for (std::size_t axis = 0; axis < 3; ++axis) {
-                                double coordinate = (origin[axis] + depthPosition * direction[axis]) / (axis == 2 ? options.sliceSpacing : 1) + center[axis];
-                                coordinate = std::clamp(coordinate, 0., double(image.dimension(axis) - 1));
-                                if (!options.interpolate) coordinate = std::round(coordinate);
-                                low[axis] = std::size_t(std::floor(coordinate)); high[axis] = std::min(low[axis] + 1, image.dimension(axis) - 1);
-                                fraction[axis] = coordinate - low[axis];
-                            }
-                            double value = 0;
-                            for (int dz = 0; dz < 2; ++dz) for (int dy = 0; dy < 2; ++dy) for (int dx = 0; dx < 2; ++dx) {
-                                const double weight = (dx ? fraction[0] : 1-fraction[0]) * (dy ? fraction[1] : 1-fraction[1]) * (dz ? fraction[2] : 1-fraction[2]);
-                                if (weight > 0) value += weight * image.sample(dx ? high[0] : low[0], dy ? high[1] : low[1], dz ? high[2] : low[2], c, t, k);
-                            }
-                            if (!std::isfinite(value) || value < options.lower || value > options.upper) continue;
-                            const double depth = std::clamp(.5 + depthPosition / radius, 0., 1.);
-                            if (depth < pixel.nearestDepth) { pixel.nearestDepth = depth; pixel.surface = value; }
-                            if (value > pixel.brightest) { pixel.brightest = value; pixel.brightestDepth = depth; }
-                            ++pixel.count; pixel.mean = std::lerp(pixel.mean, value, 1. / pixel.count);
+                        double value = 0;
+                        if (!options.interpolate) value = read(low[0], low[1], low[2]);
+                        else for (int dz = 0; dz < 2; ++dz) for (int dy = 0; dy < 2; ++dy) for (int dx = 0; dx < 2; ++dx) {
+                            const double weight = (dx ? fraction[0] : 1-fraction[0]) * (dy ? fraction[1] : 1-fraction[1]) * (dz ? fraction[2] : 1-fraction[2]);
+                            if (weight > 0) value += weight * read(dx ? high[0] : low[0], dy ? high[1] : low[1], dz ? high[2] : low[2]);
                         }
-                        if (!pixel.count) continue;
-                        const double surface = pixel.surface * (1 - (k == 3 ? 0 : options.surfaceDepthCue) / 100. * pixel.nearestDepth);
-                        double value = options.method == ProjectionMethod::MeanValue ? pixel.mean
+                        if (!std::isfinite(value) || value < options.lower || value > options.upper) continue;
+                        if (!pixel.count) {
+                            pixel.nearestDepth = std::clamp(.5 + depthPosition / radius, 0., 1.);
+                            pixel.surface = value;
+                        }
+                        if (options.method == ProjectionMethod::BrightestPoint && value > pixel.brightest) {
+                            pixel.brightest = value;
+                            pixel.brightestDepth = std::clamp(.5 + depthPosition / radius, 0., 1.);
+                        }
+                        ++pixel.count;
+                        if (options.method == ProjectionMethod::NearestPoint) break;
+                        if (options.method == ProjectionMethod::MeanValue)
+                            pixel.mean = std::lerp(pixel.mean, value, 1. / pixel.count);
+                    }
+                    if (!pixel.count) continue;
+                    const double surface = pixel.surface * (1 - (k == 3 ? 0 : options.surfaceDepthCue) / 100. * pixel.nearestDepth);
+                    double value = surface;
+                    if (options.method != ProjectionMethod::NearestPoint) {
+                        value = options.method == ProjectionMethod::MeanValue ? pixel.mean
                             : pixel.brightest * (1 - (k == 3 ? 0 : options.interiorDepthCue) / 100. * pixel.brightestDepth);
-                        value = options.method == ProjectionMethod::NearestPoint ? surface : std::lerp(value, surface, options.opacity / 100.);
-                        index[0] = x; index[1] = y; output.setValue(index, value, k);
+                        value = std::lerp(value, surface, options.opacity / 100.);
+                    }
+                    const auto offset = (((t * image.channels() + c) * output.depth() + angle) * output.height() + y)
+                        * output.width() * pixelBytes + x * pixelBytes + (components > 1 ? k : 0);
+                    const auto write = [&]<typename T>() {
+                        double converted = value;
+                        if constexpr (std::is_integral_v<T>)
+                            converted = std::isnan(converted) ? 0 : std::round(std::clamp(converted,
+                                double(std::numeric_limits<T>::lowest()), double(std::numeric_limits<T>::max())));
+                        const T number = static_cast<T>(converted);
+                        std::memcpy(destination + offset, &number, sizeof(T));
+                    };
+                    switch (image.pixelType()) {
+                    case PixelType::UInt8: case PixelType::RGB8: case PixelType::RGBA8: write.template operator()<std::uint8_t>(); break;
+                    case PixelType::UInt16: write.template operator()<std::uint16_t>(); break;
+                    case PixelType::Int16: write.template operator()<std::int16_t>(); break;
+                    case PixelType::Float32: write.template operator()<float>(); break;
+                    case PixelType::Float64: write.template operator()<double>(); break;
                     }
                 }
+                const std::lock_guard guard(progressMutex);
                 ++completed;
+                if (progress && !failed.load() && !stop.stop_requested()) progress(double(completed) / double(rows));
+            } catch (...) {
+                const std::lock_guard guard(progressMutex);
+                if (!error) error = std::current_exception();
+                failed.store(true);
             }
+        }, nullptr);
+        if (error) std::rethrow_exception(error);
         if (stop.stop_requested()) throw std::runtime_error("3D projection cancelled");
         if (progress) progress(1);
         return output;

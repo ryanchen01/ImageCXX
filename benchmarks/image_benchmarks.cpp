@@ -58,6 +58,20 @@ void HistogramUInt16(benchmark::State &state) {
 }
 BENCHMARK(HistogramUInt16)->Arg(512)->Arg(2048)->Unit(benchmark::kMillisecond);
 
+void Project3D(benchmark::State &state) {
+    const auto image = unsignedRamp(128, 128);
+    ProjectionOptions options;
+    options.method = static_cast<ProjectionMethod>(state.range(0));
+    options.interpolate = state.range(1);
+    options.angleIncrement = 30;
+    options.upper = 65535;
+    for (auto _ : state) {
+        const auto result = project3D(image, options);
+        benchmark::DoNotOptimize(result.data());
+    }
+}
+BENCHMARK(Project3D)->ArgsProduct({{0, 1, 2}, {0, 1}})->Unit(benchmark::kMillisecond)->UseRealTime();
+
 void ItkGaussianFloat32(benchmark::State &state) {
     const auto edge = static_cast<std::size_t>(state.range(0));
     auto image = Image::allocate(PixelType::Float32, {edge, edge});
