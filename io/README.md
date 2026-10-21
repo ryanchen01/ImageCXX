@@ -20,6 +20,22 @@ NIfTI exports convert spatial units m/cm/mm/um/nm to millimeters and time units 
 
 DICOM imports native, RLE, JPEG and JPEG-LS encodings supported by DCMTK. Enhanced per-frame functional groups and unsupported compression fail explicitly. Single-file multiframe grayscale is read as a Z stack with shared geometry. Series import requires matching study/series/frame-of-reference identifiers, scalar encoding, calibration, orientation and spacing. It orders slices by patient coordinates and rejects duplicate positions, nonuniform spacing and shifted grids. Export writes one 2D secondary-capture image. Original stored pixel values stay separate from intensity calibration. MONOCHROME1 is retained in its metadata.
 
+Desktop imports recursively scan folders and deduplicate canonical file paths.
+Discovery reads DICOM headers without decoding pixel data and groups single-frame
+scalar files by Study Instance UID and Series Instance UID. Multiframe and color
+files remain separate. Each group goes through the existing series validation;
+files with inconsistent geometry are rejected together rather than silently split.
+Other supported images in the selection still open. Unrecognized non-image files
+in folders are skipped; explicitly selected files retain their read errors.
+Unreadable files report errors. Folder-discovered raw files need a JSON sidecar;
+otherwise they are skipped so detached MHD/NHDR payloads are not imported twice.
+Single-file DICOM reloads use the same reader fallback as ordinary imports.
+Series also require matching photometric interpretation and intensity units.
+DICOM batch admission budgets all decoded images plus the largest assembly buffer.
+Reads serialize their memory checks and decoding, recheck available
+memory before allocation, and support cancellation while waiting for admission.
+Compressed reads also budget the encoded file while decoding its pixels.
+
 DICOM export converts spatial units m/cm/mm/um/nm to millimeters and rejects uncalibrated units. It preserves intrinsic 2D rotations as a plane in 3D. Multi-file series results do not carry a single-file reload path, so Revert cannot replace a series with one slice.
 
 A 2D slice with an embedded 3D plane retains its full origin, depth unit and direction through PNG, TIFF and DICOM, including unrotated volumes with an implicit identity direction. Scientific export rejects that slice instead of discarding its plane; save the original volume or choose TIFF/DICOM. Two-dimensional scientific images with intrinsic 2D geometry remain supported.

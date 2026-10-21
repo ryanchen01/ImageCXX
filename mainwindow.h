@@ -81,6 +81,7 @@ private:
     QString repeatCommand_;
     QVariantMap repeatParameters_;
     void importRaw(const QString &path);
+    void openFiles(const QStringList &paths);
     void setActiveDocument(imagecxx::DocumentWidget *document);
     void clearDocuments();
     void updatePanels();

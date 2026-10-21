@@ -3,7 +3,10 @@
 #include "io/image_io.h"
 #include <QJsonObject>
 
+class DcmItem;
+
 namespace imagecxx::detail {
+std::size_t dicomImageBytes(DcmItem &dataset);
 void checkIo(std::stop_token stop, const IoProgress &progress, double fraction);
 void atomicCopy(const QString &source, const QString &destination,
                 std::stop_token stop, const IoProgress &progress = {});

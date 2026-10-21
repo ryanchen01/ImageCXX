@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include "io/image_io.h"
+#include <dcmtk/dcmdata/dctk.h>
 #include <gtest/gtest.h>
 #include <limits>
 #include <atomic>
@@ -83,6 +84,37 @@ QString saveImage(MainWindow &window, const QString &path)
     picker.start(1);
     window.commands().execute("file.save");
     return error;
+}
+
+QStringList writeImportSeries(const QString &directory, int series)
+{
+    QStringList paths;
+    for (int z : {1, 0}) {
+        ImageMetadata metadata;
+        metadata.axes = {{"X", 1, 0, "mm"}, {"Y", 1, 0, "mm"}, {"Z", 2, double(z * 2), "mm"}};
+        metadata.attributes.insert("DICOM.0020,000d", "1.2.826.0.1.3680043.10.543.10");
+        metadata.attributes.insert("DICOM.0020,000e", QString("1.2.826.0.1.3680043.10.543.%1").arg(series));
+        auto slice = Image::allocate(PixelType::UInt16, {4, 4, 1}, metadata);
+        slice.setValue(std::array<std::size_t, 3>{0, 0, 0}, series * 100 + z);
+        const auto path = QDir(directory).filePath(QString("series-%1-%2.dcm").arg(series).arg(z));
+        writeDicom(slice, path);
+        paths.append(path);
+    }
+    return paths;
+}
+
+void dropPaths(QWidget *target, const QStringList &paths)
+{
+    QMimeData mime;
+    QList<QUrl> urls;
+    for (const auto &path : paths) urls.append(QUrl::fromLocalFile(path));
+    mime.setUrls(urls);
+    QDragEnterEvent enter(QPointF(10, 10), Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(target, &enter);
+    EXPECT_TRUE(enter.isAccepted());
+    QDropEvent drop(QPointF(10, 10), Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(target, &drop);
+    EXPECT_TRUE(drop.isAccepted());
 }
 }
 
@@ -564,6 +596,187 @@ TEST(Desktop, WorkerOpensImageAndPublishesOnUiThread)
     EXPECT_EQ(window.activeDocument()->image.depth(), 3u);
     EXPECT_FLOAT_EQ(window.activeDocument()->image.sample(4, 7, 2), -17.25f);
     EXPECT_EQ(window.activeDocument()->thread(), QCoreApplication::instance()->thread());
+}
+
+TEST(Desktop, ImportGroupsOneSeriesFromSelectedFilesOrDroppedFolder)
+{
+    QTemporaryDir directory;
+    const auto paths = writeImportSeries(directory.path(), 1);
+    for (bool folder : {false, true}) {
+        MainWindow window; window.show();
+        if (folder) dropPaths(&window, {directory.path()});
+        else window.openPaths(paths);
+        ASSERT_TRUE(finishJobs(window));
+        ASSERT_EQ(window.documents().size(), 1);
+        const auto &image = window.activeDocument()->image;
+        EXPECT_EQ(image.depth(), 2);
+        EXPECT_EQ(image.sample(0, 0, 0), 100);
+        EXPECT_EQ(image.sample(0, 0, 1), 101);
+        EXPECT_EQ(image.metadata().axes[2].spacing, 2);
+        EXPECT_TRUE(image.metadata().sourcePath.isEmpty());
+    }
+}
+
+TEST(Desktop, ImportMultipleSeriesAndOrdinaryImagesThroughLauncherAndImageWindows)
+{
+    QTemporaryDir directory;
+    ASSERT_TRUE(QDir(directory.path()).mkpath("nested"));
+    auto paths = writeImportSeries(directory.path(), 1);
+    paths.append(writeImportSeries(directory.filePath("nested"), 2));
+    const auto raster = directory.filePath("ordinary.tif");
+    writeImage(Image::allocate(PixelType::UInt8, {4, 4}), raster);
+    paths.append(raster);
+    for (int mode : {0, 1, 2}) {
+        MainWindow window; window.show();
+        if (mode == 0) dropPaths(&window, paths);
+        else if (mode == 1) dropPaths(&window, {directory.path(), paths.front()});
+        else {
+            auto *existing = window.addDocument(Image::allocate(PixelType::UInt8, {4, 4}));
+            dropPaths(existing, {directory.path()});
+        }
+        ASSERT_TRUE(finishJobs(window));
+        ASSERT_EQ(window.documents().size(), mode == 2 ? 4 : 3);
+        QSet<int> values;
+        int stackCount = 0;
+        for (const auto *document : window.documents()) if (document->image.depth() == 2) {
+            ++stackCount;
+            values.insert(int(document->image.sample(0, 0, 0)));
+        }
+        EXPECT_EQ(stackCount, 2);
+        EXPECT_EQ(values, (QSet<int>{100, 200}));
+    }
+}
+
+TEST(Desktop, InvalidDicomSeriesDoesNotBlockOtherImports)
+{
+    QTemporaryDir directory;
+    auto paths = writeImportSeries(directory.path(), 1);
+    // A different file at the same physical position must still be rejected.
+    const auto duplicate = directory.filePath("duplicate.dcm");
+    ASSERT_TRUE(QFile::copy(paths.back(), duplicate));
+    paths.append(duplicate);
+    paths.append(writeImportSeries(directory.path(), 2));
+    const auto raster = directory.filePath("ordinary.tif");
+    writeImage(Image::allocate(PixelType::UInt8, {4, 4}), raster);
+    paths.append(raster);
+    MainWindow window;
+    QStringList errors;
+    QTimer dismiss;
+    QObject::connect(&dismiss, &QTimer::timeout, &window, [&] {
+        if (auto *message = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+            errors.append(message->text()); message->accept();
+        }
+    });
+    dismiss.start(1);
+    window.openPaths(paths);
+    ASSERT_TRUE(finishJobs(window));
+    ASSERT_EQ(window.documents().size(), 2);
+    ASSERT_EQ(errors.size(), 1);
+    EXPECT_TRUE(errors.front().contains("duplicate slice positions"));
+    EXPECT_TRUE(errors.front().contains(paths.front()));
+}
+
+TEST(Desktop, RevertReloadsContentDetectedDicom)
+{
+    QTemporaryDir directory;
+    const auto original = writeImportSeries(directory.path(), 1).front();
+    const auto path = directory.filePath("single.IMA");
+    ASSERT_TRUE(QFile::rename(original, path));
+    MainWindow window;
+    window.openPaths({path});
+    ASSERT_TRUE(finishJobs(window));
+    auto *document = window.activeDocument(); ASSERT_NE(document, nullptr);
+    auto edited = document->image.clone();
+    edited.setValue(std::array<std::size_t, 3>{0, 0, 0}, 999);
+    document->replaceImage(edited, "Edit");
+    QString error;
+    QTimer dismiss;
+    QObject::connect(&dismiss, &QTimer::timeout, &window, [&] {
+        if (auto *message = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+            if (message->standardButtons().testFlag(QMessageBox::Yes)) message->button(QMessageBox::Yes)->click();
+            else { error = message->text(); message->accept(); }
+        }
+    });
+    dismiss.start(1);
+    window.executeCommand("file.revert");
+    ASSERT_TRUE(finishJobs(window));
+    EXPECT_TRUE(error.isEmpty()) << error.toStdString();
+    EXPECT_EQ(document->image.sample(0, 0), 101);
+    EXPECT_FALSE(document->modified);
+    EXPECT_EQ(document->image.metadata().sourcePath, path);
+}
+
+TEST(Desktop, FolderImportsDetachedImageWithoutPromptingForItsPayload)
+{
+    QTemporaryDir directory;
+    QFile header(directory.filePath("volume.mhd"));
+    ASSERT_TRUE(header.open(QIODevice::WriteOnly));
+    header.write("ObjectType = Image\nNDims = 3\nBinaryData = True\nBinaryDataByteOrderMSB = False\n"
+                 "ElementSpacing = 1 1 1\nDimSize = 4 4 1\nElementType = MET_USHORT\nElementDataFile = volume.raw\n");
+    header.close();
+    QFile payload(directory.filePath("volume.raw"));
+    ASSERT_TRUE(payload.open(QIODevice::WriteOnly)); payload.write(QByteArray(32, '\0')); payload.close();
+    MainWindow window;
+    int prompts = 0;
+    QTimer dismiss;
+    QObject::connect(&dismiss, &QTimer::timeout, &window, [&] {
+        if (auto *dialog = window.findChild<QDialog *>("rawImportDialog")) { ++prompts; dialog->reject(); }
+    });
+    dismiss.start(1);
+    window.openPaths({directory.path()});
+    ASSERT_TRUE(finishJobs(window));
+    EXPECT_EQ(prompts, 0);
+    ASSERT_EQ(window.documents().size(), 1);
+    EXPECT_EQ(window.activeDocument()->image.metadata().sourcePath, header.fileName());
+}
+
+TEST(Desktop, ExcessiveDicomMemoryDoesNotBlockOrdinaryImages)
+{
+    QTemporaryDir directory;
+    const auto path = writeImportSeries(directory.path(), 1).front();
+    DcmFileFormat file;
+    ASSERT_TRUE(file.loadFile(QFile::encodeName(path).constData()).good());
+    auto *dataset = file.getDataset();
+    ASSERT_TRUE(dataset->putAndInsertUint16(DCM_Rows, 65535).good());
+    ASSERT_TRUE(dataset->putAndInsertUint16(DCM_Columns, 65535).good());
+    ASSERT_TRUE(dataset->putAndInsertUint16(DCM_BitsAllocated, 8).good());
+    ASSERT_TRUE(dataset->putAndInsertUint16(DCM_BitsStored, 8).good());
+    ASSERT_TRUE(dataset->putAndInsertUint16(DCM_HighBit, 7).good());
+    ASSERT_TRUE(dataset->putAndInsertString(DCM_NumberOfFrames, "2147483647").good());
+    ASSERT_TRUE(file.saveFile(QFile::encodeName(path).constData(), EXS_LittleEndianExplicit).good());
+    EXPECT_THROW(readDicom(path), std::length_error);
+    const auto raster = directory.filePath("ordinary.tif");
+    writeImage(Image::allocate(PixelType::UInt8, {4, 4}), raster);
+    MainWindow window;
+    QString error;
+    QTimer dismiss;
+    QObject::connect(&dismiss, &QTimer::timeout, &window, [&] {
+        if (auto *message = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+            error = message->text(); message->accept();
+        }
+    });
+    dismiss.start(1);
+    window.openPaths({path, raster});
+    ASSERT_TRUE(finishJobs(window));
+    EXPECT_TRUE(error.contains("memory")) << error.toStdString();
+    ASSERT_EQ(window.documents().size(), 1);
+    EXPECT_EQ(window.activeDocument()->image.metadata().sourcePath, raster);
+}
+
+TEST(Desktop, ExplicitRawAndOverlappingFolderImportOnlyOnce)
+{
+    QTemporaryDir directory;
+    const auto raw = directory.filePath("image.raw");
+    writeImage(Image::allocate(PixelType::UInt16, {4, 4}), raw);
+    writeImage(Image::allocate(PixelType::UInt8, {4, 4}), directory.filePath("ordinary.tif"));
+    MainWindow window;
+    window.openPaths({raw, directory.path(), raw});
+    ASSERT_TRUE(finishJobs(window));
+    ASSERT_EQ(window.documents().size(), 2);
+    int rawCount = 0;
+    for (const auto *document : window.documents())
+        if (document->image.metadata().sourcePath == raw) ++rawCount;
+    EXPECT_EQ(rawCount, 1);
 }
 
 TEST(Desktop, DroppedRawStackPromptsAndKeepsInvalidLayoutEditable)

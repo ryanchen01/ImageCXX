@@ -32,9 +32,12 @@ signals:
     void changed();
     void activated();
     void closing();
+    void pathsDropped(const QStringList &paths);
 protected:
     bool event(QEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
+    void dragEnterEvent(QDragEnterEvent *event) override;
+    void dropEvent(QDropEvent *event) override;
 private:
     QSlider *z_;
     QSlider *channel_;

@@ -1,5 +1,5 @@
 #include "processing/processing.h"
-#include "processing/memory.h"
+#include "core/memory.h"
 #include <gtest/gtest.h>
 #include <array>
 #include <cmath>

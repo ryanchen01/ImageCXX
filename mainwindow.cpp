@@ -4,7 +4,7 @@
 #include "io/image_io.h"
 #include "plots/plot_widget.h"
 #include "processing/processing.h"
-#include "processing/memory.h"
+#include "core/memory.h"
 #include <QActionGroup>
 #include <QAbstractSpinBox>
 #include <QKeyEvent>
@@ -43,6 +43,7 @@
 #include <QScreen>
 #include <QScopedValueRollback>
 #include <QSettings>
+#include <QSet>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
@@ -255,17 +256,17 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     commands_.add({"file.open", tr("Open images..."), "File", QKeySequence::Open, false, {}, [this](const QVariantMap &) {
         openPaths(QFileDialog::getOpenFileNames(this, tr("Open images"), {}, imageFileFilter()));
     }});
+    commands_.add({"file.folder", tr("Open folder..."), "File", {}, false, {}, [this](const QVariantMap &) {
+        const auto path = QFileDialog::getExistingDirectory(this, tr("Open image folder"));
+        if (!path.isEmpty()) openPaths({path});
+    }});
     commands_.add({"file.raw", tr("Import raw binary..."), "File", {}, false, {}, [this](const QVariantMap &) {
         const auto path = QFileDialog::getOpenFileName(this, tr("Import raw binary"));
         if (path.isEmpty()) return;
         importRaw(path);
     }});
     commands_.add({"file.dicomSeries", tr("Open DICOM series..."), "File", {}, false, {}, [this](const QVariantMap &) {
-        const auto paths = QFileDialog::getOpenFileNames(this, tr("Select files from one DICOM series"), {}, "DICOM (*.dcm *.dicom);;All files (*)");
-        if (paths.isEmpty()) return;
-        auto output = std::make_shared<Image>();
-        jobs_.submit(tr("Reading DICOM series"), [paths, output](auto stop, auto progress) { *output = readDicomSeries(paths, stop, progress); },
-            [this, output](auto error) { if (!showJobError(error)) addDocument(*output); });
+        openPaths(QFileDialog::getOpenFileNames(this, tr("Select DICOM files"), {}, "DICOM (*.dcm *.dicom);;All files (*)"));
     }});
     commands_.add({"file.save", tr("Save image as..."), "File", QKeySequence::Save, true, {}, [this](const QVariantMap &) {
         const QPointer<DocumentWidget> document = activeDocument(); if (!document) return;
@@ -1056,6 +1057,7 @@ void MainWindow::clearDocuments()
 DocumentWidget *MainWindow::addDocument(Image image)
 {
     auto *document = new DocumentWidget(std::move(image), this);
+    connect(document, &DocumentWidget::pathsDropped, this, &MainWindow::openPaths);
     document->setAttribute(Qt::WA_DeleteOnClose);
     documents_.append(document);
     const QRect available = screen() ? screen()->availableGeometry() : QRect(0, 0, 1280, 900);
@@ -1280,6 +1282,58 @@ void MainWindow::importRaw(const QString &path)
 }
 
 void MainWindow::openPaths(const QStringList &paths)
+{
+    QStringList pending;
+    QSet<QString> explicitRaw;
+    for (const auto &path : paths) {
+        if (path.isEmpty()) continue;
+        const QFileInfo info(path);
+        const auto suffix = info.suffix().toLower();
+        // Keep explicit raw layout dialogs immediate, including cancellation
+        // followed by other files in the same selection.
+        if (!info.isDir() && (suffix == "raw" || suffix == "bin")) {
+            const auto key = info.exists() ? info.canonicalFilePath() : info.absoluteFilePath();
+            if (!explicitRaw.contains(key)) { explicitRaw.insert(key); openFiles({path}); }
+        } else pending.append(path);
+    }
+    if (pending.isEmpty()) return;
+    auto plan = std::make_shared<ImageImportPlan>();
+    jobs_.submit(tr("Scanning images"), [pending, plan](auto stop, auto progress) {
+        *plan = discoverImageImports(pending, stop, progress);
+        try { checkDicomImportMemory(plan->images, detail::availableMemoryBytes()); }
+        catch (const std::exception &error) {
+            plan->errors.append(QString::fromUtf8(error.what()));
+            plan->images.removeIf([](const auto &image) { return image.dicomBytes || image.paths.size() > 1; });
+        }
+    }, [this, plan, explicitRaw](auto error) {
+        if (showJobError(error)) return;
+        for (const auto &image : plan->images) {
+            if (image.paths.size() == 1) {
+                if (explicitRaw.isEmpty() || !explicitRaw.contains(QFileInfo(image.paths.front()).canonicalFilePath())) openFiles(image.paths);
+                continue;
+            }
+            auto output = std::make_shared<Image>();
+            const auto paths = image.paths;
+            jobs_.submit(tr("Reading DICOM %1").arg(QFileInfo(paths.front()).fileName()),
+                [paths, output](auto stop, auto progress) {
+                    *output = readDicomSeries(paths, stop, progress);
+                }, [this, paths, output](auto error) {
+                    if (error) {
+                        try { std::rethrow_exception(error); }
+                        catch (const std::exception &exception) {
+                            showError(tr("Could not import DICOM %1:\n%2").arg(paths.front(), QString::fromUtf8(exception.what())));
+                        }
+                        catch (...) { showJobError(error); }
+                        return;
+                    }
+                    addDocument(*output);
+                });
+        }
+        if (!plan->errors.isEmpty()) showError(plan->errors.join('\n'));
+    });
+}
+
+void MainWindow::openFiles(const QStringList &paths)
 {
     for (const auto &path : paths) {
         if (path.isEmpty()) continue;
@@ -1681,12 +1735,13 @@ void MainWindow::closeEvent(QCloseEvent *event)
 
 void MainWindow::dragEnterEvent(QDragEnterEvent *event)
 {
-    if (event->mimeData()->hasUrls()) event->acceptProposedAction();
+    for (const auto &url : event->mimeData()->urls())
+        if (url.isLocalFile()) { event->acceptProposedAction(); return; }
 }
 
 void MainWindow::dropEvent(QDropEvent *event)
 {
     QStringList paths;
     for (const auto &url : event->mimeData()->urls()) if (url.isLocalFile()) paths.append(url.toLocalFile());
-    openPaths(paths); event->acceptProposedAction();
+    if (!paths.isEmpty()) { openPaths(paths); event->acceptProposedAction(); }
 }

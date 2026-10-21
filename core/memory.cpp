@@ -153,10 +153,9 @@ std::optional<std::size_t> availableMemoryBytes() {
 
 void checkMemoryBudget(std::size_t required, std::optional<std::size_t> available) {
     if (!available)
-        throw std::runtime_error("Cannot determine available memory safely. Reslice was not started.");
+        throw std::runtime_error("Cannot determine available memory safely.");
     const auto usable = *available - (*available / 10 + (*available % 10 != 0));
     if (required > usable)
-        throw std::length_error("Not enough available memory for the resliced image and working buffers. "
-                                "Increase output spacing or use a smaller stack.");
+        throw std::length_error("Not enough available memory for the image and working buffers.");
 }
 } // namespace imagecxx::detail

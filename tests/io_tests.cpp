@@ -8,11 +8,16 @@
 #include <QTemporaryDir>
 #include <gtest/gtest.h>
 #include <tiffio.h>
+#include <dcmtk/dcmdata/dctk.h>
+#include <dcmtk/dcmdata/dcrleerg.h>
 #include <array>
 #include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
+#include <future>
+#include <chrono>
 #include <stdexcept>
 #include <tuple>
 
@@ -339,6 +344,186 @@ TEST(ImageIo, DicomSeriesOrdersPhysicalPositionsAndRejectsMixedSeries)
     paths << path;
     EXPECT_THROW(readDicomSeries(paths), std::runtime_error);
     EXPECT_THROW(readDicomSeries({paths[0], paths[0]}), std::runtime_error);
+}
+
+TEST(ImageIo, ImportDiscoveryRecursesGroupsStudiesAndDeduplicatesSelections)
+{
+    QTemporaryDir directory;
+    ASSERT_TRUE(QDir(directory.path()).mkpath("nested/deeper"));
+    QStringList selected;
+    // Two series in one study, plus the same series UID in a different study.
+    for (const auto &[study, series] : {std::pair{1, 1}, {1, 2}, {2, 1}}) {
+        for (int z : {1, 0}) {
+            auto slice = fixture(PixelType::UInt16, {5, 3, 1});
+            slice.metadata().axes[2].origin = 7 + 1.5 * z;
+            slice.metadata().attributes.insert("DICOM.0020,000d", QString("1.2.826.0.1.3680043.10.543.%1").arg(study));
+            slice.metadata().attributes.insert("DICOM.0020,000e", QString("1.2.826.0.1.3680043.10.544.%1").arg(series));
+            slice.setValue(std::array<std::size_t, 3>{0, 0, 0}, study * 100 + series * 10 + z);
+            const auto path = directory.filePath(QString("nested/deeper/%1-%2-%3%4")
+                .arg(study).arg(series).arg(z).arg(z ? ".IMA" : ""));
+            writeDicom(slice, path);
+            selected.append(path);
+        }
+    }
+    const auto raster = directory.filePath("ordinary.PNG");
+    writeImage(fixture(PixelType::UInt16, {5, 3}), raster);
+    QFile notes(directory.filePath("notes.txt"));
+    ASSERT_TRUE(notes.open(QIODevice::WriteOnly)); notes.write("Not an image\n"); notes.close();
+    QFile sidecar(directory.filePath("ordinary.PNG.json"));
+    ASSERT_TRUE(sidecar.open(QIODevice::WriteOnly)); sidecar.write("{}"); sidecar.close();
+
+    auto plan = discoverImageImports({directory.path(), selected.front(), directory.filePath("nested")});
+    ASSERT_TRUE(plan.errors.isEmpty());
+    ASSERT_EQ(plan.images.size(), 4);
+    int seriesCount = 0, rasterCount = 0;
+    for (const auto &image : plan.images) {
+        if (image.dicomBytes) {
+            ++seriesCount;
+            ASSERT_EQ(image.paths.size(), 2);
+            const auto stack = readDicomSeries(image.paths);
+            EXPECT_EQ(stack.depth(), 2);
+            EXPECT_EQ(stack.sample(0, 0, 1), stack.sample(0, 0, 0) + 1);
+        } else {
+            ++rasterCount;
+            EXPECT_EQ(image.paths, QStringList{raster});
+        }
+    }
+    EXPECT_EQ(seriesCount, 3);
+    EXPECT_EQ(rasterCount, 1);
+    // Three 60-byte stacks retain 180 bytes and need one 60-byte assembly buffer.
+    EXPECT_NO_THROW(checkDicomImportMemory(plan.images, 267));
+    EXPECT_THROW(checkDicomImportMemory(plan.images, 266), std::length_error);
+    EXPECT_THROW(checkDicomImportMemory({{{"too-large"}, std::numeric_limits<std::size_t>::max()}}, 400), std::length_error);
+    // The same grouping applies when files are selected without their folders.
+    plan = discoverImageImports(selected);
+    ASSERT_EQ(plan.images.size(), 3);
+    for (const auto &image : plan.images) EXPECT_EQ(image.paths.size(), 2);
+}
+
+TEST(ImageIo, ImportDiscoveryKeepsColorAndMultiframeDicomStandalone)
+{
+    QTemporaryDir directory;
+    auto gray = fixture(PixelType::UInt16, {5, 3, 1});
+    gray.metadata().attributes.insert("DICOM.0020,000e", "1.2.826.0.1.3680043.10.543.1");
+    const auto grayPath = directory.filePath("gray.dcm");
+    writeDicom(gray, grayPath);
+    auto color = fixture(PixelType::RGB8, {5, 3, 1});
+    color.metadata().attributes = gray.metadata().attributes;
+    writeDicom(color, directory.filePath("color.dcm"));
+
+    DcmFileFormat file;
+    ASSERT_TRUE(file.loadFile(QFile::encodeName(grayPath).constData()).good());
+    ASSERT_TRUE(file.getDataset()->putAndInsertString(DCM_NumberOfFrames, "2").good());
+    std::array<Uint16, 30> pixels{};
+    pixels[15] = 1234;
+    ASSERT_TRUE(file.getDataset()->putAndInsertUint16Array(DCM_PixelData, pixels.data(), pixels.size()).good());
+    const auto multiframe = directory.filePath("multiframe.dcm");
+    ASSERT_TRUE(file.saveFile(QFile::encodeName(multiframe).constData(), EXS_LittleEndianExplicit).good());
+
+    const auto plan = discoverImageImports({directory.path()});
+    ASSERT_TRUE(plan.errors.isEmpty());
+    ASSERT_EQ(plan.images.size(), 3);
+    for (const auto &image : plan.images) {
+        EXPECT_GT(image.dicomBytes, 0u);
+        EXPECT_EQ(image.paths.size(), 1);
+    }
+    const auto stack = readDicom(multiframe);
+    EXPECT_EQ(stack.depth(), 2);
+    EXPECT_EQ(stack.sample(0, 0, 1), 1234);
+}
+
+TEST(ImageIo, ImportDiscoveryReportsEmptyMissingAndUnsupportedInputsAndSupportsCancellation)
+{
+    QTemporaryDir directory;
+    auto plan = discoverImageImports({directory.path(), directory.filePath("missing")});
+    EXPECT_TRUE(plan.images.isEmpty());
+    EXPECT_EQ(plan.errors.size(), 2);
+    QFile notes(directory.filePath("notes.txt"));
+    ASSERT_TRUE(notes.open(QIODevice::WriteOnly)); notes.write("Not an image\n"); notes.close();
+    plan = discoverImageImports({directory.path()});
+    EXPECT_TRUE(plan.images.isEmpty());
+    EXPECT_FALSE(plan.errors.isEmpty());
+    // An explicitly selected unknown file is retained so its read error is visible.
+    plan = discoverImageImports({notes.fileName()});
+    ASSERT_EQ(plan.images.size(), 1);
+    EXPECT_EQ(plan.images.front().paths.front(), notes.fileName());
+    std::stop_source cancellation;
+    EXPECT_THROW(discoverImageImports({directory.path()}, cancellation.get_token(), [&](double) {
+        cancellation.request_stop();
+    }), std::runtime_error);
+}
+
+TEST(ImageIo, ImportDiscoveryReportsUnreadableSlices)
+{
+    QTemporaryDir directory;
+    const auto blocked = directory.filePath("last.IMA");
+    writeDicom(fixture(PixelType::UInt16, {5, 3, 1}), blocked);
+    ASSERT_TRUE(QFile::setPermissions(blocked, {}));
+    const auto plan = discoverImageImports({directory.path()});
+    ASSERT_TRUE(QFile::setPermissions(blocked, QFileDevice::ReadOwner | QFileDevice::WriteOwner));
+#ifdef Q_OS_WIN
+    if (plan.errors.isEmpty()) GTEST_SKIP() << "File permission flags do not deny reads on this filesystem";
+#endif
+    EXPECT_TRUE(plan.images.isEmpty());
+    EXPECT_TRUE(plan.errors.join('\n').contains(blocked));
+}
+
+TEST(ImageIo, DicomSeriesRejectsMixedPhotometricInterpretationAndIntensityUnits)
+{
+    QTemporaryDir directory;
+    auto first = fixture(PixelType::UInt16, {5, 3, 1});
+    first.metadata().attributes.insert("DICOM.0020,000e", "1.2.826.0.1.3680043.10.543.1");
+    first.metadata().attributes.insert("DICOM.0020,000d", "1.2.826.0.1.3680043.10.543.10");
+    const auto firstPath = directory.filePath("first.dcm"), secondPath = directory.filePath("second.dcm");
+    writeDicom(first, firstPath);
+    auto second = first.clone();
+    second.metadata().axes[2].origin += 1.5;
+    for (bool photometric : {true, false}) {
+        second.metadata().attributes.insert("DICOM.0028,0004", photometric ? "MONOCHROME1" : "MONOCHROME2");
+        second.metadata().intensityUnit = photometric ? first.metadata().intensityUnit : "US";
+        writeDicom(second, secondPath);
+        EXPECT_THROW(readDicomSeries({firstPath, secondPath}), std::runtime_error);
+    }
+}
+
+TEST(ImageIo, CompressedDicomPreservesPixelsWithMemoryAdmission)
+{
+    QTemporaryDir directory;
+    const auto original = fixture(PixelType::UInt16, {5, 3, 1});
+    const auto path = directory.filePath("compressed.dcm");
+    writeDicom(original, path);
+    DcmFileFormat file;
+    ASSERT_TRUE(file.loadFile(QFile::encodeName(path).constData()).good());
+    DcmRLEEncoderRegistration::registerCodecs();
+    ASSERT_TRUE(file.chooseRepresentation(EXS_RLELossless, nullptr).good());
+    ASSERT_TRUE(file.saveFile(QFile::encodeName(path).constData(), EXS_RLELossless).good());
+    expectPixels(readImage(path), original);
+}
+
+TEST(ImageIo, WaitingDicomImportCanBeCancelled)
+{
+    using namespace std::chrono_literals;
+    QTemporaryDir directory;
+    const auto path = directory.filePath("image.dcm");
+    writeDicom(fixture(PixelType::UInt16, {5, 3, 1}), path);
+    std::promise<void> entered, release;
+    auto started = entered.get_future();
+    const auto released = release.get_future().share();
+    auto first = std::async(std::launch::async, [&] {
+        return readDicom(path, {}, [&](double p) {
+            if (p == 0) { entered.set_value(); released.wait(); }
+        });
+    });
+    EXPECT_EQ(started.wait_for(5s), std::future_status::ready);
+    std::stop_source cancellation;
+    auto second = std::async(std::launch::async, [&] { return readDicom(path, cancellation.get_token()); });
+    EXPECT_EQ(second.wait_for(30ms), std::future_status::timeout);
+    cancellation.request_stop();
+    const auto cancelled = second.wait_for(1s);
+    release.set_value();
+    EXPECT_EQ(cancelled, std::future_status::ready);
+    EXPECT_THROW(second.get(), std::runtime_error);
+    EXPECT_NO_THROW(first.get());
 }
 
 TEST(ImageIo, DicomConvertsSpatialUnitsAndEmbedsTwoDimensionalRotation)

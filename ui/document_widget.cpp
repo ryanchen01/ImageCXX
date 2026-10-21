@@ -7,6 +7,10 @@
 #include <QCloseEvent>
 #include <QEvent>
 #include <QMessageBox>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QMimeData>
+#include <QUrl>
 #include <algorithm>
 #include <limits>
 
@@ -19,6 +23,7 @@ DocumentWidget::DocumentWidget(Image source, QWidget *parent) : QWidget(parent, 
     channel_(new QSlider(Qt::Horizontal, this)), time_(new QSlider(Qt::Horizontal, this)),
     position_(new QLabel(this))
 {
+    setAcceptDrops(true);
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
@@ -53,6 +58,20 @@ DocumentWidget::DocumentWidget(Image source, QWidget *parent) : QWidget(parent, 
     connect(viewer, &ImageViewer::roiEdited, this, &DocumentWidget::editRoi);
     connect(this, &DocumentWidget::changed, this, [this] { setWindowTitle(title()); });
     refresh();
+}
+
+void DocumentWidget::dragEnterEvent(QDragEnterEvent *event)
+{
+    for (const auto &url : event->mimeData()->urls())
+        if (url.isLocalFile()) { event->acceptProposedAction(); return; }
+}
+
+void DocumentWidget::dropEvent(QDropEvent *event)
+{
+    QStringList paths;
+    for (const auto &url : event->mimeData()->urls())
+        if (url.isLocalFile()) paths.append(url.toLocalFile());
+    if (!paths.isEmpty()) { emit pathsDropped(paths); event->acceptProposedAction(); }
 }
 
 void DocumentWidget::setSelection(std::optional<Roi> roi)

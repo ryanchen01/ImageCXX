@@ -46,6 +46,20 @@ Start `build/dev-vcpkg/ImageCXX` on Linux, `build/dev-vcpkg/ImageCXX.exe` on Win
 4. Draw a rectangle, ellipse, polygon or line. Use **Analyze → Measure selection**, **Histogram** or **Line profile**.
 5. Run a filter from **Process**, then use **Edit → Undo processing** if needed. Save the resulting image separately.
 
+Open multiple files with **File → Open images...**, or choose **File → Open folder...**
+to include files in subfolders. You can also drop files or folders onto the launcher
+or an image window. Ordinary images open separately. Single-frame grayscale DICOM
+files are grouped by study and series into one Z stack per series, ordered by patient
+position. Selecting a folder together with files inside it does not import those
+files twice. DICOM filenames can have `.dcm`, `.dicom`, another extension, or no extension.
+**File → Open DICOM series...** also accepts files from multiple series. Multiframe
+and color DICOM files open individually. Invalid series report an error while other
+images continue opening. Folder discovery runs in the background and supports cancellation.
+Unreadable files report their paths. Folder scans skip `.raw` and `.bin` files without
+a JSON layout; select those files directly to supply their layout. DICOM imports
+check memory for the decoded images and assembly buffers before loading. Decoding
+runs one DICOM import at a time, and an import waiting to decode can be cancelled.
+
 Use **Stk → Reslice...** on the main toolbar to create XZ or YZ stacks in a new image window.
 Top/Bottom sweep Y and Left/Right sweep X. Output spacing is in the swept axis's units;
 Z is interpolated at the profile axis's spacing. **Avoid interpolation** instead copies

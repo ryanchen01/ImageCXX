@@ -1,5 +1,6 @@
 #include "io/image_io.h"
 #include "io/io_detail.h"
+#include "core/memory.h"
 
 #include <QFile>
 #include <QFileInfo>
@@ -18,13 +19,46 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <chrono>
 #include <cstring>
 #include <numeric>
 #include <mutex>
+#include <limits>
 #include <stdexcept>
 
 namespace imagecxx {
+
+std::size_t detail::dicomImageBytes(DcmItem &dataset)
+{
+    Uint16 rows = 0, columns = 0, bits = 0, samples = 1;
+    Sint32 frames = 1;
+    dataset.findAndGetUint16(DCM_Rows, rows);
+    dataset.findAndGetUint16(DCM_Columns, columns);
+    dataset.findAndGetUint16(DCM_BitsAllocated, bits);
+    dataset.findAndGetUint16(DCM_SamplesPerPixel, samples);
+    if (dataset.tagExists(DCM_NumberOfFrames)) dataset.findAndGetSint32(DCM_NumberOfFrames, frames);
+    // Invalid encodings are rejected by readDicom before allocating pixel buffers.
+    if (!rows || !columns || !samples || frames <= 0 || (bits != 8 && bits != 16)) return 0;
+    std::size_t bytes = bits / 8;
+    for (const auto size : {std::size_t(rows), std::size_t(columns), std::size_t(samples), std::size_t(frames)}) {
+        if (size > std::numeric_limits<std::size_t>::max() / 2 / bytes)
+            throw std::length_error("DICOM image exceeds the addressable size");
+        bytes *= size;
+    }
+    return bytes;
+}
+
 namespace {
+std::unique_lock<std::recursive_timed_mutex> lockDicomImport(std::stop_token stop)
+{
+    // Serialize decoding so separate import requests cannot race their memory checks.
+    static std::recursive_timed_mutex mutex;
+    std::unique_lock lock(mutex, std::defer_lock);
+    while (!lock.try_lock_for(std::chrono::milliseconds(50))) detail::checkIo(stop, {}, 0);
+    detail::checkIo(stop, {}, 0);
+    return lock;
+}
+
 void dicomCheck(const OFCondition &condition)
 {
     if (condition.bad()) throw std::runtime_error(condition.text());
@@ -46,22 +80,12 @@ double dicomNumber(DcmItem *dataset, const DcmTagKey &tag, double fallback, unsi
 
 Image readDicom(const QString &path, std::stop_token stop, IoProgress progress)
 {
+    const auto admission = lockDicomImport(stop);
     detail::checkIo(stop, progress, 0);
     DcmFileFormat file;
     dicomCheck(file.loadFile(QFile::encodeName(path).constData()));
     auto *dataset = file.getDataset();
     dicomCheck(dataset->convertToUTF8());
-    if (DcmXfer(dataset->getOriginalXfer()).isPixelDataCompressed()) {
-        static std::once_flag codecs;
-        std::call_once(codecs, [] {
-            DcmRLEDecoderRegistration::registerCodecs();
-            DJDecoderRegistration::registerCodecs();
-            DJLSDecoderRegistration::registerCodecs();
-        });
-        dicomCheck(dataset->chooseRepresentation(EXS_LittleEndianExplicit, nullptr));
-        if (!dataset->canWriteXfer(EXS_LittleEndianExplicit))
-            throw std::runtime_error("DICOM compression is unsupported by the installed DCMTK codecs");
-    }
     if (dataset->tagExists(DCM_PerFrameFunctionalGroupsSequence))
         throw std::runtime_error("Enhanced DICOM per-frame geometry is unsupported");
     Uint16 rows = 0, columns = 0, samples = 1, bits = 0, stored = 0, highBit = 0, representation = 0;
@@ -87,6 +111,23 @@ Image readDicom(const QString &path, std::stop_token stop, IoProgress progress)
     Sint32 frames = 1;
     if (dataset->tagExists(DCM_NumberOfFrames)) dicomCheck(dataset->findAndGetSint32(DCM_NumberOfFrames, frames));
     if (frames <= 0) throw std::runtime_error("Invalid DICOM frame count");
+    const bool compressed = DcmXfer(dataset->getOriginalXfer()).isPixelDataCompressed();
+    const auto pixelBytes = detail::dicomImageBytes(*dataset) * 2;
+    const auto encodedBytes = compressed ? std::size_t(QFileInfo(path).size()) : 0;
+    if (encodedBytes > std::numeric_limits<std::size_t>::max() - pixelBytes)
+        throw std::length_error("DICOM image exceeds the addressable size");
+    detail::checkMemoryBudget(pixelBytes + encodedBytes, detail::availableMemoryBytes());
+    if (compressed) {
+        static std::once_flag codecs;
+        std::call_once(codecs, [] {
+            DcmRLEDecoderRegistration::registerCodecs();
+            DJDecoderRegistration::registerCodecs();
+            DJLSDecoderRegistration::registerCodecs();
+        });
+        dicomCheck(dataset->chooseRepresentation(EXS_LittleEndianExplicit, nullptr));
+        if (!dataset->canWriteXfer(EXS_LittleEndianExplicit))
+            throw std::runtime_error("DICOM compression is unsupported by the installed DCMTK codecs");
+    }
     ImageMetadata metadata;
     metadata.name = QFileInfo(path).fileName();
     metadata.sourcePath = QFileInfo(path).absoluteFilePath();
@@ -173,12 +214,18 @@ Image readDicom(const QString &path, std::stop_token stop, IoProgress progress)
 Image readDicomSeries(const QStringList &paths, std::stop_token stop, IoProgress progress)
 {
     if (paths.isEmpty()) throw std::runtime_error("DICOM series is empty");
+    const auto admission = lockDicomImport(stop);
     std::vector<Image> slices;
     for (int i = 0; i < paths.size(); ++i) {
         detail::checkIo(stop, progress, 0.8 * i / paths.size());
         auto slice = readDicom(paths[i], stop);
         if (slice.depth() != 1 || componentCount(slice.pixelType()) != 1)
             throw std::runtime_error("Series import requires single-frame scalar DICOM files");
+        if (slices.empty()) {
+            if (std::size_t(paths.size()) > std::numeric_limits<std::size_t>::max() / slice.byteCount())
+                throw std::length_error("DICOM series exceeds the addressable size");
+            checkDicomImportMemory({{paths, slice.byteCount() * paths.size()}}, detail::availableMemoryBytes());
+        }
         slices.push_back(std::move(slice));
     }
     const auto &reference = slices.front();
@@ -194,6 +241,8 @@ Image readDicomSeries(const QStringList &paths, std::stop_token stop, IoProgress
             current.attributes.value("DICOM.0020,000e") != metadata.attributes.value("DICOM.0020,000e") ||
             current.attributes.value("DICOM.0020,000d") != metadata.attributes.value("DICOM.0020,000d") ||
             current.attributes.value("DICOM.0020,0052") != metadata.attributes.value("DICOM.0020,0052") ||
+            current.attributes.value("DICOM.0028,0004") != metadata.attributes.value("DICOM.0028,0004") ||
+            current.intensityUnit != metadata.intensityUnit ||
             current.intensityScale != metadata.intensityScale || current.intensityOffset != metadata.intensityOffset)
             throw std::runtime_error("DICOM files have inconsistent series or pixel encoding");
         if (!current.attributes.contains("DICOM.0020,0032") || !current.attributes.contains("DICOM.0020,0037"))
@@ -226,6 +275,9 @@ Image readDicomSeries(const QStringList &paths, std::stop_token stop, IoProgress
                     throw std::runtime_error("DICOM series has a shifted slice grid");
         }
     }
+    if (slices.size() > std::numeric_limits<std::size_t>::max() / reference.byteCount())
+        throw std::length_error("DICOM series exceeds the addressable size");
+    detail::checkMemoryBudget(reference.byteCount() * slices.size(), detail::availableMemoryBytes());
     auto image = Image::allocate(reference.pixelType(), {reference.width(), reference.height(), slices.size()}, outputMetadata);
     auto *destination = image.mutableData();
     for (std::size_t i = 0; i < order.size(); ++i) {

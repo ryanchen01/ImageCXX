@@ -46,4 +46,20 @@ void writeScientific(const Image &image, const QString &path,
 QString imageFileFilter();
 QString imageSaveFilter();
 
+struct ImageImport {
+    QStringList paths;
+    std::size_t dicomBytes = 0;
+};
+
+struct ImageImportPlan {
+    QList<ImageImport> images;
+    QStringList errors;
+};
+
+// Recursively expands folders, removes duplicate paths and groups single-frame
+// scalar DICOM images by study/series UID without decoding their pixel data.
+ImageImportPlan discoverImageImports(const QStringList &paths, std::stop_token stop = {},
+                                     IoProgress progress = {});
+void checkDicomImportMemory(const QList<ImageImport> &images, std::optional<std::size_t> available);
+
 } // namespace imagecxx

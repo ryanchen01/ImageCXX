@@ -351,6 +351,8 @@ Image readImage(const QString &path, const std::optional<RawImportOptions> &raw,
         // Orientation is retained in pixel order; scientific coordinates are never transformed implicitly.
         reader.setAutoTransform(false);
         QImage raster = reader.read();
+        if (raster.isNull() && reader.error() == QImageReader::UnsupportedFormatError)
+            return readDicom(path, stop, progress);
         if (raster.isNull()) throw std::runtime_error(reader.errorString().toStdString());
         if (raster.depth() > 32)
             throw std::runtime_error("High-bit-depth color raster pixels are unsupported; no conversion was applied");
