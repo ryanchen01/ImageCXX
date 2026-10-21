@@ -6,7 +6,7 @@ Missing or incomplete features, checked against the current source. Unchecked it
 
 Register new commands through the existing `CommandRegistry`, with Qt actions, menus, shortcuts and generated parameter forms as appropriate.
 
-- [ ] Add a color picker.
+- [x] Add a color picker.
 - [ ] Add selection properties beyond the existing ROI rename and drag/resize controls.
 - [ ] Add the overlay-add command. Use separate project-owned ROI/annotation models and the viewer's overlay layer.
 - [x] Add reslice. Use ITK for resampling and spatial transformations, preserve geometry and numeric types, and declare the operation's scope.
@@ -14,7 +14,7 @@ Register new commands through the existing `CommandRegistry`, with Qt actions, m
 - [ ] Add gel-lane analysis commands.
 - [ ] Add the ImageJ control panel command.
 - [ ] Add the remaining ImageJ tool modifiers. Keep text fields and modal dialogs' keyboard handling intact.
-- [ ] Add configurable drawing colors. Fill and Draw currently use white, and Clear uses zero.
+- [x] Add configurable drawing colors. Fill and Draw use the selected color with type-aware scalar intensity mapping. Clear uses zero.
 - [ ] Extend Draw beyond area selections.
 - [ ] Add paste modes beyond the existing typed internal copy/paste.
 - [ ] Add modifier-specific histogram and profile dialogs. Reuse Qt Graphs 2D in separate `QQuickWidget` plot windows, created on demand.

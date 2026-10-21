@@ -3,6 +3,7 @@
 #include "app/job_scheduler.h"
 #include "ui/document_widget.h"
 #include <QMainWindow>
+#include <QColor>
 #include <QMap>
 #include <QPointer>
 class QMenu;
@@ -78,6 +79,7 @@ private:
     bool loadingPanels_ = false;
     QMap<QKeySequence, QAction *> shortcutActions_;
     imagecxx::Image clipboard_;
+    QColor drawingColor_ = Qt::white;
     QString repeatCommand_;
     QVariantMap repeatParameters_;
     void importRaw(const QString &path);

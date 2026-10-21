@@ -13,6 +13,7 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QColorDialog>
 #include <QImage>
 #include <QPrintDialog>
 #include <QPrinter>
@@ -635,6 +636,13 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     commands_.add({"image.animate", tr("Start/stop animation"), "View", QKeySequence(Qt::Key_Backslash), true, {}, [animation](const QVariantMap &) {
         if (animation->isActive()) animation->stop(); else animation->start();
     }});
+    commands_.add({"edit.color", tr("Drawing color..."), "Edit", {}, false, {}, [this](const QVariantMap &) {
+        const auto color = QColorDialog::getColor(drawingColor_, this, tr("Drawing color"));
+        if (!color.isValid()) return;
+        drawingColor_ = color;
+        QPixmap swatch(24, 24); swatch.fill(color);
+        findChild<QAction *>("edit.color")->setIcon(QIcon(swatch));
+    }});
     for (const auto &operation : {QString("clear"), QString("fill"), QString("draw"), QString("invert"), QString("smooth")}) {
         const QMap<QString, QString> labels{{"clear", tr("Clear")}, {"fill", tr("Fill")}, {"draw", tr("Draw")},
             {"invert", tr("Invert pixels")}, {"smooth", tr("Smooth")}};
@@ -647,15 +655,20 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             const auto input = doc->image;
             const auto z = doc->viewer->slice(), c = doc->viewer->channel(), t = doc->viewer->time();
             const auto revision = doc->revision; const QPointer<DocumentWidget> target = doc;
+            const auto color = drawingColor_;
             auto output = std::make_shared<Image>();
-            jobs_.submit(operation, [input, output, roi, z, c, t, operation](auto stop, auto progress) {
+            jobs_.submit(operation, [input, output, roi, z, c, t, operation, color](auto stop, auto progress) {
                 *output = input.clone();
                 const auto type = input.pixelType();
+                const bool painting = operation == "fill" || operation == "draw";
                 double maximum = type == PixelType::UInt16 ? 65535 : type == PixelType::Int16 ? 32767 : 255;
                 double minimum = type == PixelType::Int16 ? -32768 : 0;
-                if (operation == "invert" && (type == PixelType::Float32 || type == PixelType::Float64)) {
+                if ((operation == "invert" || painting) && (type == PixelType::Float32 || type == PixelType::Float64)) {
                     const auto stats = measure(input.slice(z, c, t), {}, false, stop); minimum = stats.minimum; maximum = stats.maximum;
+                    if (painting && !stats.count) throw std::runtime_error("Cannot draw without a finite intensity range.");
                 }
+                const double gray = std::lerp(minimum, maximum, qGray(color.rgb()) / 255.0);
+                const std::array<double, 3> rgb{double(color.red()), double(color.green()), double(color.blue())};
                 for (std::size_t y = 0; y < input.height(); ++y) {
                     if (stop.stop_requested()) throw std::runtime_error("Operation cancelled");
                     for (std::size_t x = 0; x < input.width(); ++x) {
@@ -668,6 +681,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                         for (std::size_t component = 0; component < componentCount(type); ++component) {
                             if (type == PixelType::RGBA8 && component == 3) continue;
                             double value = operation == "clear" ? 0 : maximum;
+                            if (painting) value = componentCount(type) > 1 ? rgb[component] : gray;
                             if (operation == "invert") value = minimum + maximum - input.sample(x, y, z, c, t, component);
                             if (operation == "smooth") {
                                 value = 0;
@@ -806,6 +820,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         const QMap<QString, QString> icons{{"file.open", "open"}, {"analyze.measure", "measure"},
             {"analyze.histogram", "histogram"}, {"edit.undo", "undo"}};
         if (icons.contains(command.id)) action->setIcon(QIcon(":/icons/" + icons.value(command.id) + ".svg"));
+        if (command.id == "edit.color") {
+            QPixmap swatch(24, 24); swatch.fill(drawingColor_); action->setIcon(QIcon(swatch));
+        }
         connect(action, &QAction::triggered, this, [this, id = command.id] { executeCommand(id); });
         if (command.needsImage) imageActions_.append(action);
     }
@@ -886,6 +903,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     toolbar->addSeparator(); toolbar->addAction(findChild<QAction *>("analyze.measure"));
     toolbar->addAction(findChild<QAction *>("analyze.histogram"));
     toolbar->addAction(findChild<QAction *>("edit.undo"));
+    toolbar->addAction(findChild<QAction *>("edit.color"));
     toolbar->addSeparator();
     lutMenu_ = new QMenu(tr("LUT"), toolbar);
     lutMenu_->setObjectName("lutMenu");

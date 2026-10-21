@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 #include <limits>
 #include <atomic>
+#include <cmath>
 #include <QApplication>
 #include <QAction>
 #include <QKeyEvent>
@@ -13,6 +14,7 @@
 #include <QCheckBox>
 #include <QToolButton>
 #include <QClipboard>
+#include <QColorDialog>
 #include <QImage>
 #include <QCoreApplication>
 #include <QDockWidget>
@@ -63,6 +65,17 @@ bool finishJobs(MainWindow &window)
     while (window.jobs().busy() && timer.elapsed() < 5000) { QCoreApplication::processEvents(); QThread::msleep(2); }
     QCoreApplication::processEvents();
     return !window.jobs().busy();
+}
+
+void chooseDrawingColor(MainWindow &window, QColor color, bool accept = true)
+{
+    QTimer::singleShot(0, &window, [color, accept] {
+        auto *dialog = qobject_cast<QColorDialog *>(QApplication::activeModalWidget());
+        ASSERT_NE(dialog, nullptr);
+        dialog->setCurrentColor(color);
+        if (accept) dialog->accept(); else dialog->reject();
+    });
+    window.commands().execute("edit.color");
 }
 
 QString saveImage(MainWindow &window, const QString &path)
@@ -268,6 +281,101 @@ TEST(Shortcuts, FillCopyPasteInvertAndUndoPreserveScientificValues)
     EXPECT_DOUBLE_EQ(doc->image.sample(1, 1), 64335);
     sendKey(doc->viewer, Qt::Key_Z, Qt::ControlModifier);
     EXPECT_DOUBLE_EQ(doc->image.sample(1, 1), 1200);
+}
+
+TEST(Desktop, DrawingColorUsesScientificTypesAndPreservesAlphaAndOtherPlanes)
+{
+    for (const auto type : {PixelType::UInt8, PixelType::UInt16, PixelType::Int16,
+                           PixelType::Float32, PixelType::Float64, PixelType::RGB8, PixelType::RGBA8}) {
+        SCOPED_TRACE(pixelTypeName(type).toStdString());
+        MainWindow window;
+        chooseDrawingColor(window, QColor(255, 0, 0));
+        chooseDrawingColor(window, Qt::blue, false);
+        auto *action = window.findChild<QAction *>("edit.color"); ASSERT_NE(action, nullptr);
+        EXPECT_EQ(action->icon().pixmap(24, 24).toImage().pixelColor(12, 12), QColor(Qt::red));
+        auto image = Image::allocate(type, {6, 6, 2, 2, 2});
+        const bool floating = type == PixelType::Float32 || type == PixelType::Float64;
+        const double low = type == PixelType::Float64 ? 1e12 : floating ? -10 : 0;
+        const double high = type == PixelType::Float64 ? 1e12 + .25 : floating ? 30 : 100;
+        if (floating) for (std::size_t y = 0; y < 6; ++y) for (std::size_t x = 0; x < 6; ++x)
+            image.setValue(std::array<std::size_t, 5>{x, y, 1, 1, 1}, low);
+        image.setValue(std::array<std::size_t, 5>{0, 0, 1, 1, 1}, low);
+        image.setValue(std::array<std::size_t, 5>{5, 5, 1, 1, 1}, high);
+        if (type == PixelType::RGBA8) image.setValue(std::array<std::size_t, 5>{1, 1, 1, 1, 1}, 23, 3);
+        image.metadata().intensityScale = 2; image.metadata().intensityOffset = 100;
+        auto *doc = window.addDocument(image);
+        doc->viewer->setSlice(1, 1, 1);
+        doc->viewer->setLut("hot"); doc->viewer->setWindow(1000, 2000);
+        Roi roi; roi.points = {{1, 1}, {5, 5}}; roi.z = roi.channel = roi.time = 1;
+        doc->setSelection(roi);
+        const double gray = qGray(qRgb(255, 0, 0)) / 255.0;
+        const double expected = floating ? std::lerp(low, high, gray)
+            : std::round(std::lerp(type == PixelType::Int16 ? -32768.0 : 0.0,
+                type == PixelType::UInt16 ? 65535.0 : type == PixelType::Int16 ? 32767.0 : 255.0, gray));
+        for (const auto *command : {"edit.draw", "edit.fill"}) {
+            window.commands().execute(command); ASSERT_TRUE(finishJobs(window));
+            for (std::size_t component = 0; component < componentCount(type); ++component) {
+                const double value = component == 3 ? 23 : componentCount(type) > 1 ? (component == 0 ? 255 : 0) : expected;
+                EXPECT_NEAR(doc->image.sample(1, 1, 1, 1, 1, component), value, type == PixelType::Float32 ? 1e-5 : 0);
+            }
+            const double stored = componentCount(type) > 1 ? 255 : type == PixelType::Float32 ? double(float(expected)) : expected;
+            EXPECT_DOUBLE_EQ(doc->image.sample(3, 3, 1, 1, 1), QString(command) == "edit.draw" ? low : stored);
+            EXPECT_DOUBLE_EQ(doc->image.sample(0, 0, 1, 1, 1), low);
+            EXPECT_DOUBLE_EQ(doc->image.sample(5, 5, 1, 1, 1), high);
+            EXPECT_DOUBLE_EQ(doc->image.sample(1, 1, 0, 1, 1), 0);
+            EXPECT_DOUBLE_EQ(doc->image.sample(1, 1, 1, 0, 1), 0);
+            EXPECT_DOUBLE_EQ(doc->image.sample(1, 1, 1, 1, 0), 0);
+            EXPECT_EQ(doc->image.pixelType(), type);
+            EXPECT_DOUBLE_EQ(doc->image.metadata().intensityScale, 2);
+            EXPECT_DOUBLE_EQ(doc->image.metadata().intensityOffset, 100);
+            window.commands().execute("edit.undo");
+            EXPECT_DOUBLE_EQ(doc->image.sample(1, 1, 1, 1, 1), image.sample(1, 1, 1, 1, 1));
+            window.commands().execute("edit.redo");
+            EXPECT_DOUBLE_EQ(doc->image.sample(1, 1, 1, 1, 1), stored);
+            window.commands().execute("edit.undo");
+        }
+        window.commands().execute("edit.clear"); ASSERT_TRUE(finishJobs(window));
+        EXPECT_DOUBLE_EQ(doc->image.sample(1, 1, 1, 1, 1), 0);
+    }
+}
+
+TEST(Desktop, FloatDrawingHandlesConstantExtremeAndNonFiniteRanges)
+{
+    for (const auto type : {PixelType::Float32, PixelType::Float64}) {
+        MainWindow window;
+        chooseDrawingColor(window, Qt::black);
+        auto image = Image::allocate(type, {2, 2});
+        for (std::size_t y = 0; y < 2; ++y) for (std::size_t x = 0; x < 2; ++x)
+            image.setValue(std::array<std::size_t, 2>{x, y}, -42.5);
+        auto *doc = window.addDocument(image);
+        window.commands().execute("edit.fill"); ASSERT_TRUE(finishJobs(window));
+        EXPECT_DOUBLE_EQ(doc->image.sample(0, 0), -42.5);
+
+        const double limit = type == PixelType::Float32 ? std::numeric_limits<float>::max() : std::numeric_limits<double>::max();
+        image.setValue(std::array<std::size_t, 2>{0, 0}, -limit);
+        image.setValue(std::array<std::size_t, 2>{1, 0}, limit);
+        doc = window.addDocument(image);
+        chooseDrawingColor(window, QColor(128, 128, 128));
+        window.commands().execute("edit.fill"); ASSERT_TRUE(finishJobs(window));
+        EXPECT_TRUE(std::isfinite(doc->image.sample(0, 0)));
+        EXPECT_EQ(doc->image.pixelType(), type);
+
+        for (std::size_t y = 0; y < 2; ++y) for (std::size_t x = 0; x < 2; ++x)
+            image.setValue(std::array<std::size_t, 2>{x, y}, std::numeric_limits<double>::quiet_NaN());
+        doc = window.addDocument(image);
+        QString error;
+        QTimer dismiss;
+        QObject::connect(&dismiss, &QTimer::timeout, &window, [&error] {
+            if (auto *dialog = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+                error = dialog->text(); dialog->accept();
+            }
+        });
+        dismiss.start(1);
+        window.commands().execute("edit.fill"); ASSERT_TRUE(finishJobs(window));
+        EXPECT_TRUE(error.contains("finite intensity range"));
+        EXPECT_TRUE(std::isnan(doc->image.sample(0, 0)));
+        EXPECT_EQ(doc->revision, 0u);
+    }
 }
 
 TEST(Desktop, FloatInvertUsesRawLimitsAndKeepsCalibration)
