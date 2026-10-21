@@ -64,7 +64,7 @@ TEST(Projection, RotationsInterpolationTransparencyOpacityAndDepthCueing) {
     auto two = source.region(std::array<std::size_t, 3>{0, 0, 0}, std::array<std::size_t, 3>{1, 1, 2});
     options = {}; options.totalRotation = 0; options.rotationAxis = 0; options.initialAngle = 90;
     options.sliceSpacing = 4; options.interiorDepthCue = 0;
-    EXPECT_EQ(project3D(two, options).sample(0, 4), 0);
+    EXPECT_EQ(project3D(two, options).sample(0, 4), 30);
     options.interpolate = true;
     EXPECT_DOUBLE_EQ(project3D(two, options).sample(0, 4), 20);
     options.sliceSpacing = .1; EXPECT_NO_THROW(project3D(two, options));
@@ -76,11 +76,39 @@ TEST(Projection, RotationsInterpolationTransparencyOpacityAndDepthCueing) {
     EXPECT_EQ(tied.sample(1, 0), 0);
 }
 
+TEST(Projection, RotatedUniformVolumesHaveNoInteriorHoles) {
+    auto source = Image::allocate(PixelType::Float64, {17, 17, 17});
+    std::fill_n(reinterpret_cast<double *>(source.mutableData()), source.pixelCount(), 50.);
+    ProjectionOptions options; options.totalRotation = 0; options.initialAngle = 45;
+    options.surfaceDepthCue = options.interiorDepthCue = 0;
+    for (int axis = 0; axis < 3; ++axis) for (bool interpolate : {false, true})
+        for (auto method : {ProjectionMethod::NearestPoint, ProjectionMethod::BrightestPoint, ProjectionMethod::MeanValue}) {
+            options.rotationAxis = axis; options.interpolate = interpolate; options.method = method;
+            const auto output = project3D(source, options);
+            for (std::size_t y = output.height()/2 - 3; y <= output.height()/2 + 3; ++y)
+                for (std::size_t x = output.width()/2 - 3; x <= output.width()/2 + 3; ++x)
+                    EXPECT_DOUBLE_EQ(output.sample(x, y), 50) << "axis=" << axis << " x=" << x << " y=" << y;
+        }
+}
+
+TEST(Projection, LinearInterpolationMatchesAnAnalyticRampAtAnObliqueAngle) {
+    auto source = Image::allocate(PixelType::Float64, {17, 17, 17});
+    for (std::size_t z = 0; z < 17; ++z) for (std::size_t y = 0; y < 17; ++y) for (std::size_t x = 0; x < 17; ++x)
+        source.setValue(std::array<std::size_t, 3>{x, y, z}, 100 + 2*x + 3*y + 5*z);
+    ProjectionOptions options; options.rotationAxis = 2; options.initialAngle = 45; options.totalRotation = 0;
+    options.method = ProjectionMethod::MeanValue; options.interpolate = true; options.upper = 1000;
+    options.surfaceDepthCue = options.interiorDepthCue = 0;
+    const auto output = project3D(source, options);
+    for (int py = -3; py <= 3; ++py) for (int px = -3; px <= 3; ++px)
+        EXPECT_NEAR(output.sample(output.width()/2 + px, output.height()/2 + py),
+            180 + (2*px + 3*py + 2*py - 3*px) / std::sqrt(2.), 1e-12);
+}
+
 TEST(Projection, ValidatesGeometryMemoryAndCancellation) {
     auto source = Image::allocate(PixelType::Float32, {4, 3, 2});
     ProjectionOptions options;
     auto geometry = projectionGeometry(source, options);
-    EXPECT_EQ(geometry.shape[2], 36u); EXPECT_GT(geometry.requiredMemoryBytes, geometry.byteCount);
+    EXPECT_EQ(geometry.shape[2], 36u); EXPECT_EQ(geometry.requiredMemoryBytes, geometry.byteCount);
     options.angleIncrement = 7; EXPECT_EQ(projectionGeometry(source, options).shape[2], 52u);
     options.totalRotation = 90; options.angleIncrement = 30; EXPECT_EQ(projectionGeometry(source, options).shape[2], 4u);
     options.totalRotation = 0; EXPECT_EQ(projectionGeometry(source, options).shape[2], 1u);

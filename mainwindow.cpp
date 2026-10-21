@@ -526,7 +526,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                 tr("Projects the full Z stack at each rotation angle. A full turn omits the duplicate 360-degree view.\n\n"
                    "Nearest Point shows the front surface; Brightest Point selects the highest raw value; Mean Value averages visible samples. "
                    "Opacity blends the front surface with the selected projection. Depth cueing darkens more distant points. "
-                   "Interpolate fills gaps between Z slices when slice spacing exceeds one pixel.\n\n"
+                   "Interpolate uses linear sampling between voxels; otherwise sampling uses the nearest voxel.\n\n"
                    "Bounds use raw pixel values. Output keeps the pixel type, channels and time points, with pixel coordinates and an angle axis. "
                    "The result opens in a new image window."));
         });

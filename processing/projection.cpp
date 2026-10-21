@@ -53,10 +53,7 @@ ProjectionGeometry projectionGeometry(const Image &image, const ProjectionOption
             throw std::overflow_error("3D projection buffer exceeds the addressable size");
         geometry.byteCount *= length;
     }
-    const auto plane = geometry.shape[0] * geometry.shape[1];
-    if (plane > (std::numeric_limits<std::size_t>::max() - geometry.byteCount) / sizeof(ProjectedPixel))
-        throw std::overflow_error("3D projection working memory exceeds the addressable size");
-    geometry.requiredMemoryBytes = geometry.byteCount + plane * sizeof(ProjectedPixel);
+    geometry.requiredMemoryBytes = geometry.byteCount;
     return geometry;
 }
 
@@ -74,64 +71,77 @@ Image project3D(const Image &image, const ProjectionOptions &options, std::stop_
         metadata.attributes.insert("ImageCXX.LastOperation", "3D Project");
         metadata.attributes.remove("ImageCXX.EmbeddedPlaneOrigin"); metadata.attributes.remove("ImageCXX.EmbeddedPlaneZUnit");
         auto output = Image::allocate(image.pixelType(), geometry.shape, metadata);
-        std::vector<ProjectedPixel> pixels(geometry.shape[0] * geometry.shape[1]);
         const auto components = componentCount(image.pixelType());
-        const auto samples = options.interpolate && options.sliceSpacing > 1
-            ? projectionSize(std::ceil(double(image.depth() - 1) * options.sliceSpacing) + 1) : image.depth();
         const double zExtent = double(image.depth() - 1) * options.sliceSpacing;
-        const double radius = options.rotationAxis == 2 ? std::max(zExtent, 1.)
+        const double radius = options.rotationAxis == 2 ? zExtent
             : std::hypot(double(image.dimension(options.rotationAxis == 0 ? 1 : 0) - 1), zExtent);
+        const std::array<double, 3> center{double(image.width() - 1)/2, double(image.height() - 1)/2, double(image.depth() - 1)/2};
+        const std::array<double, 3> halfSize{double(image.width())/2, double(image.height())/2, double(image.depth()) * options.sliceSpacing/2};
+        const double outputCenterX = center[0] + std::ceil(double(output.width() - image.width())/2);
+        const double outputCenterY = center[1] + std::ceil(double(output.height() - image.height())/2);
         const double units = double(output.depth()) * image.channels() * image.frames() * components;
         double completed = 0;
         if (progress) progress(0);
         std::vector<std::size_t> index(output.shape().size(), 0);
         for (std::size_t t = 0; t < image.frames(); ++t) for (std::size_t c = 0; c < image.channels(); ++c)
             for (std::size_t angle = 0; angle < output.depth(); ++angle) for (std::size_t k = 0; k < components; ++k) {
-                std::fill(pixels.begin(), pixels.end(), ProjectedPixel{});
                 const auto degrees = options.initialAngle + angle * options.angleIncrement;
                 const double radians = degrees * std::numbers::pi / 180.;
                 double cosine = std::cos(radians), sine = std::sin(radians);
                 // Avoid floating-point drift across pixel boundaries in cardinal views.
                 if (degrees % 90 == 0) { cosine = std::round(cosine); sine = std::round(sine); }
-                for (std::size_t z = 0; z < samples; ++z) {
-                    const double sourceZ = samples == image.depth() ? double(z)
-                        : double(z) * double(image.depth() - 1) / double(samples - 1);
-                    const auto z0 = std::size_t(std::floor(sourceZ)), z1 = std::min(z0 + 1, image.depth() - 1);
-                    const double fraction = sourceZ - z0;
-                    for (std::size_t y = 0; y < image.height(); ++y) {
-                        if (stop.stop_requested()) throw std::runtime_error("3D projection cancelled");
-                        if (progress && y == 0) progress((completed + double(z) / samples) / units);
-                        for (std::size_t x = 0; x < image.width(); ++x) {
-                            double value = image.sample(x, y, z0, c, t, k);
-                            if (fraction > 0) value = (1 - fraction) * value + fraction * image.sample(x, y, z1, c, t, k);
-                            if (!std::isfinite(value) || value < options.lower || value > options.upper) continue;
-                            const double sx = double(x) - double(image.width() - 1) / 2;
-                            const double sy = double(y) - double(image.height() - 1) / 2;
-                            const double sz = sourceZ * options.sliceSpacing - zExtent / 2;
-                            double px = sx, py = sy, pz = sz;
-                            if (options.rotationAxis == 0) { py = cosine * sy - sine * sz; pz = sine * sy + cosine * sz; }
-                            if (options.rotationAxis == 1) { px = cosine * sx + sine * sz; pz = -sine * sx + cosine * sz; }
-                            if (options.rotationAxis == 2) { px = cosine * sx - sine * sy; py = sine * sx + cosine * sy; }
-                            const auto ox = std::lround(px + double(output.width() - 1) / 2);
-                            const auto oy = std::lround(py + double(output.height() - 1) / 2);
-                            if (ox < 0 || oy < 0 || std::size_t(ox) >= output.width() || std::size_t(oy) >= output.height()) continue;
-                            auto &pixel = pixels[std::size_t(oy) * output.width() + std::size_t(ox)];
-                            const double depth = std::clamp(.5 + pz / radius, 0., 1.);
-                            if (depth < pixel.nearestDepth) { pixel.nearestDepth = depth; pixel.surface = value; }
-                            if (value > pixel.brightest || (value == pixel.brightest && depth < pixel.brightestDepth)) {
-                                pixel.brightest = value; pixel.brightestDepth = depth;
-                            }
-                            ++pixel.count; pixel.mean = std::lerp(pixel.mean, value, 1. / pixel.count);
-                        }
-                    }
-                }
                 if (index.size() > 3) index[3] = c;
                 if (index.size() > 4) index[4] = t;
                 index[2] = angle;
                 for (std::size_t y = 0; y < output.height(); ++y) {
                     if (stop.stop_requested()) throw std::runtime_error("3D projection cancelled");
+                    if (progress) progress((completed + double(y) / output.height()) / units);
                     for (std::size_t x = 0; x < output.width(); ++x) {
-                        const auto &pixel = pixels[y * output.width() + x];
+                        const double px = double(x) - outputCenterX, py = double(y) - outputCenterY;
+                        std::array<double, 3> origin, direction;
+                        if (options.rotationAxis == 0) { origin = {px, cosine*py, -sine*py}; direction = {0, sine, cosine}; }
+                        else if (options.rotationAxis == 1) { origin = {cosine*px, py, sine*px}; direction = {-sine, 0, cosine}; }
+                        else { origin = {cosine*px + sine*py, -sine*px + cosine*py, 0}; direction = {0, 0, 1}; }
+                        double entry = -std::numeric_limits<double>::infinity(), exit = std::numeric_limits<double>::infinity();
+                        bool intersects = true;
+                        for (std::size_t axis = 0; axis < 3; ++axis) {
+                            if (direction[axis] == 0) {
+                                if (origin[axis] < -halfSize[axis] || origin[axis] >= halfSize[axis]) intersects = false;
+                            } else {
+                                const double a = (-halfSize[axis] - origin[axis]) / direction[axis];
+                                const double b = (halfSize[axis] - origin[axis]) / direction[axis];
+                                entry = std::max(entry, std::min(a, b)); exit = std::min(exit, std::max(a, b));
+                            }
+                        }
+                        if (!intersects || exit <= entry) continue;
+                        // Sample each output ray uniformly; rounding forward-mapped voxels leaves holes and uneven density.
+                        const double length = exit - entry;
+                        const auto samples = projectionSize(std::max({1., length * std::abs(direction[0]), length * std::abs(direction[1]),
+                            length * std::abs(direction[2]) / options.sliceSpacing}));
+                        ProjectedPixel pixel;
+                        for (std::size_t sample = 0; sample < samples; ++sample) {
+                            if ((sample & 4095) == 0 && stop.stop_requested()) throw std::runtime_error("3D projection cancelled");
+                            const double depthPosition = std::lerp(entry, exit, (double(sample) + .5) / samples);
+                            std::array<std::size_t, 3> low, high;
+                            std::array<double, 3> fraction;
+                            for (std::size_t axis = 0; axis < 3; ++axis) {
+                                double coordinate = (origin[axis] + depthPosition * direction[axis]) / (axis == 2 ? options.sliceSpacing : 1) + center[axis];
+                                coordinate = std::clamp(coordinate, 0., double(image.dimension(axis) - 1));
+                                if (!options.interpolate) coordinate = std::round(coordinate);
+                                low[axis] = std::size_t(std::floor(coordinate)); high[axis] = std::min(low[axis] + 1, image.dimension(axis) - 1);
+                                fraction[axis] = coordinate - low[axis];
+                            }
+                            double value = 0;
+                            for (int dz = 0; dz < 2; ++dz) for (int dy = 0; dy < 2; ++dy) for (int dx = 0; dx < 2; ++dx) {
+                                const double weight = (dx ? fraction[0] : 1-fraction[0]) * (dy ? fraction[1] : 1-fraction[1]) * (dz ? fraction[2] : 1-fraction[2]);
+                                if (weight > 0) value += weight * image.sample(dx ? high[0] : low[0], dy ? high[1] : low[1], dz ? high[2] : low[2], c, t, k);
+                            }
+                            if (!std::isfinite(value) || value < options.lower || value > options.upper) continue;
+                            const double depth = std::clamp(.5 + depthPosition / radius, 0., 1.);
+                            if (depth < pixel.nearestDepth) { pixel.nearestDepth = depth; pixel.surface = value; }
+                            if (value > pixel.brightest) { pixel.brightest = value; pixel.brightestDepth = depth; }
+                            ++pixel.count; pixel.mean = std::lerp(pixel.mean, value, 1. / pixel.count);
+                        }
                         if (!pixel.count) continue;
                         const double surface = pixel.surface * (1 - (k == 3 ? 0 : options.surfaceDepthCue) / 100. * pixel.nearestDepth);
                         double value = options.method == ProjectionMethod::MeanValue ? pixel.mean
