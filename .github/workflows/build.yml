@@ -69,15 +69,21 @@ jobs:
           path: build/vcpkg
 
       - name: Prepare binary cache
+        id: cache-image
         shell: bash
-        run: mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
+        run: |
+          mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
+          echo "image=${ImageOS:?}-${ImageVersion:?}" >> "$GITHUB_OUTPUT"
 
       - name: Restore scientific dependency cache
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        id: vcpkg-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: build/vcpkg-cache
-          key: vcpkg-${{ runner.os }}-${{ matrix.triplet }}-${{ hashFiles('vcpkg.json') }}
-          restore-keys: vcpkg-${{ runner.os }}-${{ matrix.triplet }}-
+          key: vcpkg-${{ runner.os }}-${{ matrix.triplet }}-${{ steps.cache-image.outputs.image }}-${{ hashFiles('vcpkg.json', 'packaging/triplets/**') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ matrix.triplet }}-${{ steps.cache-image.outputs.image }}-
+            vcpkg-${{ runner.os }}-${{ matrix.triplet }}-
 
       - name: Bootstrap vcpkg on Unix
         if: runner.os != 'Windows'
@@ -91,6 +97,13 @@ jobs:
 
       - name: Configure
         run: cmake --preset release-vcpkg -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DIMAGECXX_BUILD_BENCHMARKS=ON
+
+      - name: Save scientific dependency cache
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: build/vcpkg-cache
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
 
       - name: Build
         run: cmake --build --preset release-vcpkg
