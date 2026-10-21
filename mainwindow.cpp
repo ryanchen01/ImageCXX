@@ -363,8 +363,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     commands_.add({"stacks.reslice", tr("Reslice..."), "Stacks", {}, true, {}, [this](const QVariantMap &) {
         const auto *document = activeDocument(); if (!document) return;
         const Image input = document->image;
+        QSettings settings; settings.beginGroup("reslice/v1");
         ResliceOptions options;
-        options.outputSpacing = input.metadata().axes.size() > 2 ? input.metadata().axes[2].spacing : 1;
+        options.outputSpacing = settings.value("outputSpacing", input.metadata().axes.size() > 2 ? input.metadata().axes[2].spacing : 1).toDouble();
         if (input.depth() < 2) throw std::invalid_argument("Reslice requires a Z stack with at least two slices");
         QDialog dialog(this);
         dialog.setObjectName("resliceDialog"); dialog.setWindowTitle(tr("Reslice")); dialog.setMinimumWidth(360);
@@ -378,10 +379,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         layout->addRow(spacingLabel, spacing);
         auto *start = new QComboBox(&dialog); start->setObjectName("resliceStart");
         start->addItems({tr("Top"), tr("Left"), tr("Bottom"), tr("Right")});
+        start->setCurrentIndex(std::clamp(settings.value("start", 0).toInt(), 0, 3));
         layout->addRow(tr("Start at:"), start);
         auto *flip = new QCheckBox(tr("Flip vertically"), &dialog); flip->setObjectName("resliceFlip");
         auto *rotate = new QCheckBox(tr("Rotate 90 degrees"), &dialog); rotate->setObjectName("resliceRotate");
         auto *avoid = new QCheckBox(tr("Avoid interpolation"), &dialog); avoid->setObjectName("resliceAvoidInterpolation");
+        flip->setChecked(settings.value("flipVertically", false).toBool());
+        rotate->setChecked(settings.value("rotate90", false).toBool());
+        avoid->setChecked(settings.value("avoidInterpolation", false).toBool());
         layout->addRow(flip); layout->addRow(rotate); layout->addRow(avoid);
         auto *hint = new QLabel(tr("(use 1 pixel spacing)"), &dialog); layout->addRow(hint);
         const auto &axes = input.metadata().axes;
@@ -418,6 +423,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         connect(flip, &QCheckBox::toggled, &dialog, update);
         connect(rotate, &QCheckBox::toggled, &dialog, update);
         double interpolatedSpacing = spacing->value();
+        if (avoid->isChecked()) spacing->setValue(1);
         connect(avoid, &QCheckBox::toggled, &dialog, [&](bool checked) {
             const QSignalBlocker blocker(spacing);
             if (checked) { interpolatedSpacing = spacing->value(); spacing->setValue(1); }
@@ -437,9 +443,101 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         update();
         spacing->selectAll(); spacing->setFocus();
         if (dialog.exec() != QDialog::Accepted) return;
+        settings.setValue("outputSpacing", options.avoidInterpolation ? interpolatedSpacing : options.outputSpacing);
+        settings.setValue("start", start->currentIndex());
+        settings.setValue("flipVertically", options.flipVertically); settings.setValue("rotate90", options.rotate90);
+        settings.setValue("avoidInterpolation", options.avoidInterpolation); settings.sync();
         auto output = std::make_shared<Image>();
         jobs_.submit(tr("Reslice"), [input, options, output](auto stop, auto progress) {
             *output = reslice(input, options, stop, progress);
+        }, [this, output](auto error) {
+            if (showJobError(error)) return;
+            addDocument(*output)->modified = true; updatePanels();
+        });
+    }});
+    commands_.add({"stacks.project3d", tr("3D Project..."), "Stacks", {}, true, {}, [this](const QVariantMap &) {
+        const auto *document = activeDocument(); if (!document) return;
+        const Image input = document->image;
+        QSettings settings; settings.beginGroup("projection3d/v1");
+        ProjectionOptions options;
+        QDialog dialog(this); dialog.setObjectName("projection3dDialog"); dialog.setWindowTitle(tr("3D Projection"));
+        auto *layout = new QFormLayout(&dialog);
+        layout->setContentsMargins(20, 20, 20, 20); layout->setVerticalSpacing(10);
+        auto *method = new QComboBox(&dialog); method->setObjectName("projectionMethod");
+        method->addItems({tr("Nearest Point"), tr("Brightest Point"), tr("Mean Value")});
+        method->setCurrentIndex(std::clamp(settings.value("method", 1).toInt(), 0, 2));
+        layout->addRow(tr("Projection method:"), method);
+        auto *axis = new QComboBox(&dialog); axis->setObjectName("projectionAxis");
+        axis->addItems({tr("X-Axis"), tr("Y-Axis"), tr("Z-Axis")});
+        axis->setCurrentIndex(std::clamp(settings.value("axis", 1).toInt(), 0, 2));
+        layout->addRow(tr("Axis of rotation:"), axis);
+        QMap<QString, QDoubleSpinBox *> numbers;
+        const auto number = [&](const QString &key, const QString &label, double value, double low, double high, int decimals = 0) {
+            auto *spin = new QDoubleSpinBox(&dialog); spin->setObjectName(key);
+            spin->setDecimals(decimals); spin->setRange(low, high); spin->setFixedWidth(165);
+            spin->setValue(settings.value(key, value).toDouble()); layout->addRow(label, spin); numbers.insert(key, spin);
+            return spin;
+        };
+        const auto &axes = input.metadata().axes;
+        auto *spacing = number("sliceSpacing", tr("Slice spacing (pixels):"), axes.size() > 2 ? axes[2].spacing / axes[0].spacing : 1, .000001, 1e9, 6);
+        auto *initial = number("initialAngle", tr("Initial angle (0-359 degrees):"), 0, 0, 359);
+        auto *total = number("totalRotation", tr("Total rotation (0-360 degrees):"), 360, 0, 360);
+        auto *increment = number("angleIncrement", tr("Rotation angle increment:"), 10, 1, 360);
+        auto *lower = number("lower", tr("Lower transparency bound:"), input.pixelType() == PixelType::Int16 ? -32768 : 1, -1e300, 1e300, 6);
+        const double defaultUpper = input.pixelType() == PixelType::UInt16 ? 65535 : input.pixelType() == PixelType::Int16 ? 32767
+            : std::max(255., document->viewer->windowMaximum());
+        auto *upper = number("upper", tr("Upper transparency bound:"), defaultUpper, -1e300, 1e300, 6);
+        lower->setToolTip(tr("Inclusive bounds in raw pixel values. Values outside this range are transparent."));
+        upper->setToolTip(lower->toolTip());
+        auto *opacity = number("opacity", tr("Opacity (0-100%):"), 0, 0, 100);
+        auto *surface = number("surfaceDepthCue", tr("Surface depth-cueing (0-100%):"), 100, 0, 100);
+        auto *interior = number("interiorDepthCue", tr("Interior depth-cueing (0-100%):"), 50, 0, 100);
+        auto *interpolate = new QCheckBox(tr("Interpolate"), &dialog); interpolate->setObjectName("projectionInterpolate");
+        interpolate->setChecked(settings.value("interpolate", false).toBool()); layout->addRow(interpolate);
+        auto *size = new QLabel(&dialog); size->setObjectName("projectionOutputSize"); size->setWordWrap(true); layout->addRow(size);
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel | QDialogButtonBox::Help, &dialog);
+        for (auto *button : buttons->buttons()) button->setIcon(QIcon{});
+        layout->addRow(buttons);
+        const auto update = [&] {
+            options.method = static_cast<ProjectionMethod>(method->currentIndex()); options.rotationAxis = axis->currentIndex();
+            options.sliceSpacing = spacing->value(); options.initialAngle = int(initial->value());
+            options.totalRotation = int(total->value()); options.angleIncrement = int(increment->value());
+            options.lower = lower->value(); options.upper = upper->value(); options.opacity = int(opacity->value());
+            options.surfaceDepthCue = int(surface->value()); options.interiorDepthCue = int(interior->value());
+            options.interpolate = interpolate->isChecked();
+            try {
+                const auto geometry = projectionGeometry(input, options);
+                detail::checkMemoryBudget(geometry.requiredMemoryBytes, detail::availableMemoryBytes());
+                size->setText(tr("Output: %1 × %2 × %3 angles, %4 MiB").arg(geometry.shape[0]).arg(geometry.shape[1])
+                    .arg(geometry.shape[2]).arg(double(geometry.byteCount) / (1024 * 1024), 0, 'f', 2));
+                buttons->button(QDialogButtonBox::Ok)->setEnabled(true);
+            } catch (const std::exception &error) {
+                size->setText(QString::fromUtf8(error.what())); buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
+            }
+        };
+        for (auto *spin : numbers) connect(spin, &QDoubleSpinBox::valueChanged, &dialog, update);
+        connect(method, &QComboBox::currentIndexChanged, &dialog, update);
+        connect(axis, &QComboBox::currentIndexChanged, &dialog, update);
+        connect(interpolate, &QCheckBox::toggled, &dialog, update);
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        connect(buttons, &QDialogButtonBox::helpRequested, &dialog, [&dialog] {
+            QMessageBox::information(&dialog, tr("3D Project help"),
+                tr("Projects the full Z stack at each rotation angle. A full turn omits the duplicate 360-degree view.\n\n"
+                   "Nearest Point shows the front surface; Brightest Point selects the highest raw value; Mean Value averages visible samples. "
+                   "Opacity blends the front surface with the selected projection. Depth cueing darkens more distant points. "
+                   "Interpolate fills gaps between Z slices when slice spacing exceeds one pixel.\n\n"
+                   "Bounds use raw pixel values. Output keeps the pixel type, channels and time points, with pixel coordinates and an angle axis. "
+                   "The result opens in a new image window."));
+        });
+        update();
+        if (dialog.exec() != QDialog::Accepted) return;
+        for (auto it = numbers.cbegin(); it != numbers.cend(); ++it) settings.setValue(it.key(), it.value()->value());
+        settings.setValue("method", method->currentIndex()); settings.setValue("axis", axis->currentIndex());
+        settings.setValue("interpolate", options.interpolate); settings.sync();
+        auto output = std::make_shared<Image>();
+        jobs_.submit(tr("3D Project"), [input, options, output](auto stop, auto progress) {
+            *output = project3D(input, options, stop, progress);
         }, [this, output](auto error) {
             if (showJobError(error)) return;
             addDocument(*output)->modified = true; updatePanels();
@@ -1568,6 +1666,7 @@ void MainWindow::updatePanels()
     auto *doc = activeDocument();
     for (auto *action : imageActions_) action->setEnabled(doc != nullptr);
     findChild<QAction *>("stacks.reslice")->setEnabled(doc && doc->image.depth() > 1);
+    findChild<QAction *>("stacks.project3d")->setEnabled(doc && doc->image.depth() > 1);
     metadata_->clear(); history_->clear();
     const QString selectedId = rois_->currentItem() ? rois_->currentItem()->data(Qt::UserRole).toString() : QString{};
     QSignalBlocker roiSignals(rois_); rois_->clear();

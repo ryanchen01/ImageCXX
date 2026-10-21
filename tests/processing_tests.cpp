@@ -10,6 +10,98 @@
 
 using namespace imagecxx;
 
+TEST(Projection, MethodsPreserveTypesComponentsAndIndependentVolumes) {
+    for (auto type : {PixelType::UInt8, PixelType::UInt16, PixelType::Int16, PixelType::Float32,
+                      PixelType::Float64, PixelType::RGB8, PixelType::RGBA8}) {
+        ImageMetadata metadata; metadata.name = "Original"; metadata.sourcePath = "/original.tif";
+        metadata.intensityScale = 2; metadata.intensityOffset = -5; metadata.intensityUnit = "HU";
+        auto source = Image::allocate(type, {1, 1, 3, 2, 2}, metadata);
+        const std::array values{10., 30., 20.};
+        for (std::size_t t = 0; t < 2; ++t) for (std::size_t c = 0; c < 2; ++c)
+            for (std::size_t z = 0; z < 3; ++z) for (std::size_t k = 0; k < componentCount(type); ++k)
+                source.setValue(std::array<std::size_t, 5>{0, 0, z, c, t}, values[z] + 40*c + 80*t + k, k);
+        ProjectionOptions options; options.rotationAxis = 2; options.totalRotation = 0;
+        options.surfaceDepthCue = options.interiorDepthCue = 0;
+        for (auto method : {ProjectionMethod::NearestPoint, ProjectionMethod::BrightestPoint, ProjectionMethod::MeanValue}) {
+            options.method = method;
+            double progress = -1;
+            const auto output = project3D(source, options, {}, [&](double p) { EXPECT_GE(p, progress); progress = p; });
+            EXPECT_EQ(output.pixelType(), type); EXPECT_EQ(output.shape(), (std::vector<std::size_t>{2, 2, 1, 2, 2}));
+            for (std::size_t t = 0; t < 2; ++t) for (std::size_t c = 0; c < 2; ++c)
+                for (std::size_t k = 0; k < componentCount(type); ++k) {
+                    const double expected = method == ProjectionMethod::NearestPoint ? 10 : method == ProjectionMethod::BrightestPoint ? 30 : 20;
+                    EXPECT_DOUBLE_EQ(output.sample(1, 1, 0, c, t, k), expected + 40*c + 80*t + k);
+                }
+            EXPECT_DOUBLE_EQ(progress, 1); EXPECT_TRUE(output.metadata().sourcePath.isEmpty());
+            EXPECT_EQ(output.metadata().axes[2].name, "Angle"); EXPECT_EQ(output.metadata().axes[2].unit, "degrees");
+            EXPECT_EQ(output.metadata().intensityScale, 2); EXPECT_EQ(output.metadata().intensityOffset, -5);
+            EXPECT_EQ(output.metadata().intensityUnit, "HU");
+        }
+        EXPECT_EQ(source.sample(0, 0, 1), 30); EXPECT_EQ(source.metadata().sourcePath, "/original.tif");
+    }
+}
+
+TEST(Projection, RotationsInterpolationTransparencyOpacityAndDepthCueing) {
+    auto source = Image::allocate(PixelType::Float64, {1, 1, 3});
+    source.setValue(std::array<std::size_t, 3>{0, 0, 0}, 10);
+    source.setValue(std::array<std::size_t, 3>{0, 0, 1}, 30);
+    source.setValue(std::array<std::size_t, 3>{0, 0, 2}, 20);
+    ProjectionOptions options; options.totalRotation = 0; options.interiorDepthCue = options.surfaceDepthCue = 0;
+    options.rotationAxis = 0; options.initialAngle = 90;
+    auto output = project3D(source, options);
+    EXPECT_EQ(output.sample(0, 3), 10); EXPECT_EQ(output.sample(0, 2), 30); EXPECT_EQ(output.sample(0, 1), 20);
+    options.rotationAxis = 1; output = project3D(source, options);
+    EXPECT_EQ(output.sample(1, 0), 10); EXPECT_EQ(output.sample(2, 0), 30); EXPECT_EQ(output.sample(3, 0), 20);
+    options.rotationAxis = 2; options.initialAngle = 0; options.interiorDepthCue = 50;
+    EXPECT_DOUBLE_EQ(project3D(source, options).sample(1, 1), 22.5);
+    options.interiorDepthCue = 0; options.opacity = 50;
+    EXPECT_DOUBLE_EQ(project3D(source, options).sample(1, 1), 20);
+    options.opacity = 0; options.lower = 15; options.upper = 25;
+    EXPECT_EQ(project3D(source, options).sample(1, 1), 20);
+    options.method = ProjectionMethod::NearestPoint; options.surfaceDepthCue = 100;
+    EXPECT_DOUBLE_EQ(project3D(source, options).sample(1, 1), 0);
+    options.lower = 50; EXPECT_THROW(project3D(source, options), std::invalid_argument);
+    auto two = source.region(std::array<std::size_t, 3>{0, 0, 0}, std::array<std::size_t, 3>{1, 1, 2});
+    options = {}; options.totalRotation = 0; options.rotationAxis = 0; options.initialAngle = 90;
+    options.sliceSpacing = 4; options.interiorDepthCue = 0;
+    EXPECT_EQ(project3D(two, options).sample(0, 4), 0);
+    options.interpolate = true;
+    EXPECT_DOUBLE_EQ(project3D(two, options).sample(0, 4), 20);
+    options.sliceSpacing = .1; EXPECT_NO_THROW(project3D(two, options));
+    auto equal = Image::allocate(PixelType::Float64, {1, 1, 3});
+    for (std::size_t z = 0; z < 3; ++z) equal.setValue(std::array<std::size_t, 3>{0, 0, z}, 30);
+    options = {}; options.initialAngle = 180; options.totalRotation = 0; options.interiorDepthCue = 100;
+    const auto tied = project3D(equal, options);
+    EXPECT_DOUBLE_EQ(tied.sample(2, 0), 30);
+    EXPECT_EQ(tied.sample(1, 0), 0);
+}
+
+TEST(Projection, ValidatesGeometryMemoryAndCancellation) {
+    auto source = Image::allocate(PixelType::Float32, {4, 3, 2});
+    ProjectionOptions options;
+    auto geometry = projectionGeometry(source, options);
+    EXPECT_EQ(geometry.shape[2], 36u); EXPECT_GT(geometry.requiredMemoryBytes, geometry.byteCount);
+    options.angleIncrement = 7; EXPECT_EQ(projectionGeometry(source, options).shape[2], 52u);
+    options.totalRotation = 90; options.angleIncrement = 30; EXPECT_EQ(projectionGeometry(source, options).shape[2], 4u);
+    options.totalRotation = 0; EXPECT_EQ(projectionGeometry(source, options).shape[2], 1u);
+    EXPECT_THROW(project3D(Image{}, options), std::invalid_argument);
+    EXPECT_THROW(project3D(source.slice(), options), std::invalid_argument);
+    options.angleIncrement = 0; EXPECT_THROW(project3D(source, options), std::invalid_argument);
+    options = {}; options.sliceSpacing = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW(project3D(source, options), std::invalid_argument);
+    options.sliceSpacing = 1e300; EXPECT_THROW(project3D(source, options), std::overflow_error);
+    options = {}; options.opacity = 101; EXPECT_THROW(project3D(source, options), std::invalid_argument);
+    options = {}; options.rotationAxis = 3; EXPECT_THROW(project3D(source, options), std::invalid_argument);
+    options = {}; options.lower = -std::numeric_limits<double>::infinity();
+    EXPECT_THROW(project3D(source, options), std::invalid_argument);
+    options = {};
+    std::stop_source cancel; cancel.request_stop();
+    EXPECT_THROW(project3D(source, options, cancel.get_token()), std::runtime_error);
+    cancel = std::stop_source{};
+    EXPECT_THROW(project3D(source, options, cancel.get_token(), [&](double) { cancel.request_stop(); }), std::runtime_error);
+    EXPECT_EQ(source.sample(0, 0), 0);
+}
+
 TEST(Reslice, ExactPermutationPreservesPixelsAndWorldCoordinatesForEveryOrientation) {
     for (auto type : {PixelType::UInt8, PixelType::UInt16, PixelType::Int16, PixelType::Float32,
                       PixelType::Float64, PixelType::RGB8, PixelType::RGBA8}) {

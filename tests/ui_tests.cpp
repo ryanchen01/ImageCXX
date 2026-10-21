@@ -11,6 +11,7 @@
 #include <QMenu>
 #include <QSet>
 #include <QSettings>
+#include <QScreen>
 #include <QCheckBox>
 #include <QToolButton>
 #include <QClipboard>
@@ -1154,6 +1155,115 @@ TEST(Desktop, ExplicitRawImportUsesTheSameDialogForAnyExtension)
     EXPECT_EQ(image.sample(1, 1, 0, 1, 1), 42);
     EXPECT_EQ(image.metadata().axes[0].spacing, 0.5);
     EXPECT_EQ(image.metadata().axes[1].spacing, 0.75);
+}
+
+TEST(Desktop, ProjectionOpensNewWindowAndRemembersAcceptedOptionsAcrossWindowsAndCancellation)
+{
+    QSettings settings; settings.remove("projection3d");
+    auto image = Image::allocate(PixelType::UInt8, {64, 56, 20}); image.metadata().name = "Cells stack";
+    for (std::size_t z = 0; z < image.depth(); ++z) for (std::size_t y = 0; y < image.height(); ++y)
+        for (std::size_t x = 0; x < image.width(); ++x) {
+            double value = 0;
+            for (int cell = 0; cell < 5; ++cell) {
+                const double dx = double(x) - (12 + cell * 9), dy = double(y) - (12 + cell % 3 * 14);
+                const double dz = double(z) - (4 + cell % 3 * 5);
+                value += 220 * std::exp(-(dx*dx + dy*dy + 4*dz*dz) / 45.);
+            }
+            image.setValue(std::array<std::size_t, 3>{x, y, z}, value);
+        }
+    const QMap<QString, double> saved{{"sliceSpacing", 2.5}, {"initialAngle", 30}, {"totalRotation", 180},
+        {"angleIncrement", 45}, {"lower", 2}, {"upper", 240}, {"opacity", 25}, {"surfaceDepthCue", 75}, {"interiorDepthCue", 30}};
+    const auto capture = qEnvironmentVariable("IMAGECXX_STACK_CAPTURE_DIR");
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        MainWindow window; window.show(); window.move(30, 30);
+        auto *action = window.findChild<QAction *>("stacks.project3d"); ASSERT_NE(action, nullptr);
+        EXPECT_FALSE(action->isEnabled());
+        window.addDocument(Image::allocate(PixelType::UInt8, {2, 2})); EXPECT_FALSE(action->isEnabled());
+        auto *source = window.addDocument(image); source->move(30, 180); source->resize(420, 360);
+        EXPECT_TRUE(action->isEnabled());
+        EXPECT_TRUE(window.findChild<QMenu *>("stacksMenu")->actions().contains(action));
+        bool prompted = false;
+        QTimer::singleShot(0, &window, [&] {
+            auto *dialog = window.findChild<QDialog *>("projection3dDialog"); EXPECT_NE(dialog, nullptr);
+            if (!dialog) return;
+            prompted = true;
+            auto *method = dialog->findChild<QComboBox *>("projectionMethod");
+            auto *axis = dialog->findChild<QComboBox *>("projectionAxis");
+            auto *interpolate = dialog->findChild<QCheckBox *>("projectionInterpolate");
+            auto *ok = dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok);
+            if (attempt == 0) {
+                if (!capture.isEmpty()) EXPECT_TRUE(dialog->grab().save(capture + "/3d-project-options.png"));
+                dialog->findChild<QDoubleSpinBox *>("lower")->setValue(300);
+                EXPECT_FALSE(ok->isEnabled());
+                method->setCurrentIndex(2); axis->setCurrentIndex(0); interpolate->setChecked(true);
+                for (auto it = saved.cbegin(); it != saved.cend(); ++it) dialog->findChild<QDoubleSpinBox *>(it.key())->setValue(it.value());
+                EXPECT_TRUE(ok->isEnabled()); ok->click();
+            } else {
+                EXPECT_EQ(method->currentIndex(), 2); EXPECT_EQ(axis->currentIndex(), 0); EXPECT_TRUE(interpolate->isChecked());
+                for (auto it = saved.cbegin(); it != saved.cend(); ++it)
+                    EXPECT_DOUBLE_EQ(dialog->findChild<QDoubleSpinBox *>(it.key())->value(), it.value());
+                method->setCurrentIndex(0); axis->setCurrentIndex(2); interpolate->setChecked(false);
+                dialog->findChild<QDoubleSpinBox *>("sliceSpacing")->setValue(9); dialog->reject();
+            }
+        });
+        action->trigger(); EXPECT_TRUE(prompted); ASSERT_TRUE(finishJobs(window));
+        EXPECT_EQ(window.documents().size(), attempt == 0 ? 3 : 2);
+        EXPECT_FALSE(source->modified); EXPECT_FALSE(source->history.canUndo());
+        EXPECT_EQ(source->image.sample(12, 12, 4), image.sample(12, 12, 4));
+        if (attempt == 0) {
+            auto *output = window.activeDocument(); ASSERT_NE(output, source);
+            EXPECT_TRUE(output->modified); EXPECT_TRUE(output->image.metadata().sourcePath.isEmpty());
+            EXPECT_EQ(output->image.depth(), 5u); EXPECT_EQ(output->image.metadata().axes[2].origin, 30);
+            if (!capture.isEmpty()) {
+                window.documents().front()->hide(); output->move(500, 180); output->resize(420, 360);
+                output->viewer->setSlice(1);
+                QElapsedTimer timer; timer.start();
+                while (timer.elapsed() < 400) { QCoreApplication::processEvents(); QThread::msleep(2); }
+                const auto frame = output->frameGeometry();
+                EXPECT_TRUE(output->screen()->grabWindow(0, frame.x(), frame.y(), frame.width(), frame.height())
+                    .save(capture + "/3d-project-result.png"));
+                auto *menu = window.findChild<QMenu *>("stacksMenu");
+                menu->popup(window.mapToGlobal(QPoint(300, window.height()))); QCoreApplication::processEvents();
+                EXPECT_TRUE(window.screen()->grabWindow(0, 0, 0, 950, 590).save(capture + "/3d-project-windows.png"));
+                menu->hide();
+            }
+        }
+    }
+    settings.remove("projection3d");
+}
+
+TEST(Desktop, ResliceRemembersAllAcceptedOptionsAndKeepsInterpolationSpacingAfterCancellation)
+{
+    QSettings settings; settings.remove("reslice");
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        MainWindow window;
+        auto *source = window.addDocument(Image::allocate(PixelType::UInt8, {8, 6, 4}));
+        bool prompted = false;
+        QTimer::singleShot(0, &window, [&] {
+            auto *dialog = window.findChild<QDialog *>("resliceDialog"); EXPECT_NE(dialog, nullptr);
+            if (!dialog) return;
+            prompted = true;
+            auto *spacing = dialog->findChild<QDoubleSpinBox *>("resliceSpacing");
+            auto *start = dialog->findChild<QComboBox *>("resliceStart");
+            auto *flip = dialog->findChild<QCheckBox *>("resliceFlip");
+            auto *rotate = dialog->findChild<QCheckBox *>("resliceRotate");
+            auto *avoid = dialog->findChild<QCheckBox *>("resliceAvoidInterpolation");
+            if (attempt == 0) {
+                spacing->setValue(2.5); start->setCurrentIndex(3); flip->setChecked(true); rotate->setChecked(true); avoid->setChecked(true);
+                dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok)->click();
+            } else {
+                EXPECT_EQ(start->currentIndex(), 3); EXPECT_TRUE(flip->isChecked()); EXPECT_TRUE(rotate->isChecked());
+                EXPECT_TRUE(avoid->isChecked()); EXPECT_FALSE(spacing->isEnabled()); EXPECT_EQ(spacing->value(), 1);
+                const auto capture = qEnvironmentVariable("IMAGECXX_STACK_CAPTURE_DIR");
+                if (attempt == 1 && !capture.isEmpty()) EXPECT_TRUE(dialog->grab().save(capture + "/reslice-options.png"));
+                avoid->setChecked(false); EXPECT_DOUBLE_EQ(spacing->value(), 2.5);
+                spacing->setValue(9); start->setCurrentIndex(0); flip->setChecked(false); rotate->setChecked(false); dialog->reject();
+            }
+        });
+        window.executeCommand("stacks.reslice"); EXPECT_TRUE(prompted); ASSERT_TRUE(finishJobs(window));
+        EXPECT_EQ(window.documents().size(), attempt == 0 ? 2 : 1); EXPECT_FALSE(source->modified);
+    }
+    settings.remove("reslice");
 }
 
 TEST(Desktop, GeneratedFilterFormRunsThroughRegistryAndPreservesUndo)

@@ -57,6 +57,26 @@ struct ResliceGeometry {
 ResliceGeometry resliceGeometry(const Image &image, const ResliceOptions &options);
 Image reslice(const Image &image, const ResliceOptions &options,
               std::stop_token stop = {}, Progress progress = {});
+
+enum class ProjectionMethod { NearestPoint, BrightestPoint, MeanValue };
+struct ProjectionOptions {
+    ProjectionMethod method = ProjectionMethod::BrightestPoint;
+    int rotationAxis = 1;
+    double sliceSpacing = 1;
+    int initialAngle = 0, totalRotation = 360, angleIncrement = 10;
+    double lower = 1, upper = 255;
+    int opacity = 0, surfaceDepthCue = 100, interiorDepthCue = 50;
+    bool interpolate = false;
+};
+struct ProjectionGeometry {
+    std::vector<std::size_t> shape;
+    std::size_t byteCount = 0, requiredMemoryBytes = 0;
+};
+// Rotating projections use pixel coordinates and raw intensity bounds. The third
+// output axis contains angles, with channels and time points kept separately.
+ProjectionGeometry projectionGeometry(const Image &image, const ProjectionOptions &options);
+Image project3D(const Image &image, const ProjectionOptions &options,
+                std::stop_token stop = {}, Progress progress = {});
 Measurement measure(const Image &slice, const std::optional<Roi> &roi = {},
                     bool calibrated = true, std::stop_token stop = {});
 Histogram histogram(const Image &slice, std::size_t bins = 256,
