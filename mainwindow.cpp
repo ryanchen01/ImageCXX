@@ -1093,7 +1093,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     settings.beginGroup("windowWorkflow/v1");
     if (!settings.value("launcherGeometry").toByteArray().isEmpty())
         restoreGeometry(settings.value("launcherGeometry").toByteArray());
-    resize(std::clamp(width(), 560, 900), std::clamp(height(), 70, 120));
+    resize(std::clamp(width(), 560, 900), minimumSizeHint().height());
     restorePanelLayout(settings.value("panels").toByteArray());
     recentMenu_ = menus["File"]->addMenu(tr("Recent files"));
     updateRecentFiles();
