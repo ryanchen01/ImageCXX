@@ -217,6 +217,130 @@ TEST(Reslice, ColorInterpolationKeepsComponentsAndExactSamplesIgnoreAdjacentNan)
     EXPECT_EQ(floats.sample(0, 0, 0), data[0]); EXPECT_TRUE(std::isnan(floats.sample(0, 0, 1)));
 }
 
+TEST(Reslice, ItkIntegerInterpolationRoundsHalfAwayFromZeroAndKeepsTypeLimits) {
+    for (auto type : {PixelType::UInt8, PixelType::UInt16, PixelType::Int16, PixelType::RGB8, PixelType::RGBA8}) {
+        auto source = Image::allocate(type, {3, 3, 2});
+        const double low = type == PixelType::Int16 ? -32768 : 0;
+        const double high = type == PixelType::UInt16 ? 65535 : type == PixelType::Int16 ? 32767 : 255;
+        for (std::size_t z = 0; z < 2; ++z) for (std::size_t y = 0; y < 3; ++y)
+            for (std::size_t x = 0; x < 3; ++x) for (std::size_t c = 0; c < componentCount(type); ++c) {
+                const double value = x == 0 ? low : x == 2 ? high : y == 0 ? (low < 0 ? -1 : 0) : (low < 0 ? 0 : 1);
+                source.setValue(std::array<std::size_t, 3>{x,y,z}, value, c);
+            }
+        ResliceOptions options; options.outputSpacing = .5;
+        const auto result = reslice(source, options);
+        EXPECT_EQ(result.pixelType(), type);
+        for (std::size_t c = 0; c < componentCount(type); ++c) {
+            EXPECT_EQ(result.sample(0,0,1,0,0,c), low);
+            EXPECT_EQ(result.sample(2,0,1,0,0,c), high);
+            EXPECT_EQ(result.sample(1,0,1,0,0,c), low < 0 ? -1 : 1);
+        }
+        for (std::size_t z = 0; z < 2; ++z) {
+            source.setValue(std::array<std::size_t, 3>{1,0,z}, low);
+            source.setValue(std::array<std::size_t, 3>{1,1,z}, high);
+        }
+        EXPECT_EQ(reslice(source, options).sample(1,0,1), std::round((low+high)/2));
+    }
+}
+
+TEST(Reslice, ItkInterpolationPreservesObliqueWorldCoordinatesAcrossAllOrientations) {
+    ImageMetadata metadata;
+    metadata.axes = {{"X", .25, 10, "mm"}, {"Y", .5, 20, "mm"}, {"Z", 1.25, 30, "mm"}};
+    metadata.direction = {.36,-.48,.8, .8,.6,0, -.48,.64,.6};
+    auto source = Image::allocate(PixelType::Float64, {5,4,3}, metadata);
+    for (std::size_t z = 0; z < 3; ++z) for (std::size_t y = 0; y < 4; ++y) for (std::size_t x = 0; x < 5; ++x)
+        source.setValue(std::array<std::size_t, 3>{x,y,z}, x+10*y+100*z+.00000003);
+    for (auto start : {ResliceStart::Top, ResliceStart::Left, ResliceStart::Bottom, ResliceStart::Right})
+        for (bool flip : {false,true}) for (bool rotate : {false,true}) {
+            ResliceOptions options; options.outputSpacing = .25; options.start = start;
+            options.flipVertically = flip; options.rotate90 = rotate;
+            const auto result = reslice(source, options);
+            const bool horizontal = start == ResliceStart::Top || start == ResliceStart::Bottom;
+            const bool reverse = start == ResliceStart::Bottom || start == ResliceStart::Right;
+            const std::size_t profile = horizontal ? 0 : 1, sweep = horizontal ? 1 : 0;
+            for (std::size_t z = 0; z < result.depth(); ++z) for (std::size_t y = 0; y < result.height(); ++y)
+                for (std::size_t x = 0; x < result.width(); ++x) {
+                    const double p = double(rotate ? y : x);
+                    double d = double(rotate ? x : y)*metadata.axes[profile].spacing/metadata.axes[2].spacing;
+                    double s = z*options.outputSpacing/metadata.axes[sweep].spacing;
+                    if (flip) d = source.depth()-1-d;
+                    if (reverse) s = source.dimension(sweep)-1-s;
+                    const std::array<double,3> input{horizontal?p:s, horizontal?s:p, d};
+                    EXPECT_NEAR(result.sample(x,y,z), input[0]+10*input[1]+100*input[2]+.00000003, 2e-12);
+                    const std::array<std::size_t,3> output{x,y,z};
+                    for (std::size_t row = 0; row < 3; ++row) {
+                        double before = metadata.axes[row].origin, after = result.metadata().axes[row].origin;
+                        for (std::size_t col = 0; col < 3; ++col) {
+                            before += metadata.direction[row*3+col]*input[col]*metadata.axes[col].spacing;
+                            after += result.metadata().direction[row*3+col]*output[col]*result.metadata().axes[col].spacing;
+                        }
+                        EXPECT_NEAR(before, after, 1e-12);
+                    }
+                }
+        }
+}
+
+TEST(Reslice, ItkSamplingKeepsVoxelCenterBoundariesAndIgnoresLargeWorldOriginInSampling) {
+    ImageMetadata metadata;
+    metadata.axes = {{"X",1,1e16,"mm"}, {"Y",1,-2e16,"mm"}, {"Z",.8,3e16,"mm"}};
+    auto source = Image::allocate(PixelType::Float64, {3,7,3}, metadata);
+    for (std::size_t z = 0; z < 3; ++z) for (std::size_t y = 0; y < 7; ++y) for (std::size_t x = 0; x < 3; ++x)
+        source.setValue(std::array<std::size_t,3>{x,y,z}, 7+x+10*y+100*z);
+    for (double spacing : {.6,.7}) {
+        ResliceOptions options; options.outputSpacing = spacing;
+        const auto result = reslice(source, options);
+        EXPECT_EQ(result.depth(), spacing == .6 ? 11u : 9u);
+        for (std::size_t z = 0; z < result.depth(); ++z) for (std::size_t y = 0; y < result.height(); ++y)
+            for (std::size_t x = 0; x < result.width(); ++x)
+                EXPECT_NEAR(result.sample(x,y,z), 7+x+10*z*spacing+125*y, 2e-12);
+    }
+}
+
+TEST(Reslice, ItkNearestRetainsDoubleSignedZeroAndNonFiniteSamples) {
+    auto source = Image::allocate(PixelType::Float64, {2,2,2});
+    const std::array<std::uint64_t,8> values{0x8000000000000000ULL,0x7ff8000000000055ULL,
+        0x7ff0000000000000ULL,0xfff0000000000000ULL,1,0x8000000000000001ULL,
+        0x7fefffffffffffffULL,0xffefffffffffffffULL};
+    std::memcpy(source.mutableData(), values.data(), source.byteCount());
+    ResliceOptions options; options.avoidInterpolation = true; options.flipVertically = true;
+    const auto result = reslice(source, options);
+    for (std::size_t z = 0; z < 2; ++z) for (std::size_t y = 0; y < 2; ++y) for (std::size_t x = 0; x < 2; ++x) {
+        std::uint64_t actual;
+        std::memcpy(&actual, result.data()+((z*2+y)*2+x)*sizeof(double), sizeof(double));
+        EXPECT_EQ(actual, values[((1-y)*2+z)*2+x]);
+    }
+}
+
+TEST(Reslice, ItkMemoryEstimateIncludesPackedInputAndDoubleOutputVolume) {
+    auto scalar = Image::allocate(PixelType::UInt8, {8,7,6});
+    const auto geometry = resliceGeometry(scalar, {});
+    const auto planePixels = geometry.shape[0]*geometry.shape[1];
+    const auto expectedDisplay = planePixels*4*4 + scalar.pixelCount()*4;
+    EXPECT_EQ(geometry.requiredMemoryBytes, geometry.byteCount + expectedDisplay + scalar.pixelCount()*sizeof(double));
+    auto color = Image::allocate(PixelType::RGB8, {8,7,6});
+    const auto colorGeometry = resliceGeometry(color, {});
+    EXPECT_EQ(colorGeometry.requiredMemoryBytes, colorGeometry.byteCount + expectedDisplay
+        + scalar.pixelCount() + scalar.pixelCount()*sizeof(double));
+}
+
+TEST(Reslice, ItkCancellationDuringResamplingKeepsSourceUnchanged) {
+    auto source = Image::allocate(PixelType::UInt16, {64,64,64});
+    std::iota(reinterpret_cast<std::uint16_t *>(source.mutableData()),
+              reinterpret_cast<std::uint16_t *>(source.mutableData()) + source.pixelCount(), 0);
+    const auto snapshot = source.clone();
+    std::stop_source cancellation;
+    ResliceOptions options; options.outputSpacing = .5;
+    bool cancelledInFilter = false;
+    EXPECT_THROW(reslice(source, options, cancellation.get_token(), [&](double progress) {
+        if (progress > .1 && progress < .9) {
+            cancelledInFilter = true;
+            cancellation.request_stop();
+        }
+    }), std::runtime_error);
+    EXPECT_TRUE(cancelledInFilter);
+    EXPECT_EQ(std::memcmp(source.data(), snapshot.data(), source.byteCount()), 0);
+}
+
 TEST(Analysis, MeasuresCalibratedRoiAndPopulationDeviation) {
     auto image = Image::allocate(PixelType::UInt16, {3, 2});
     auto *pixels = reinterpret_cast<std::uint16_t *>(image.mutableData());

@@ -9,7 +9,7 @@ Register new commands through the existing `CommandRegistry`, with Qt actions, m
 - [ ] Add a color picker.
 - [ ] Add selection properties beyond the existing ROI rename and drag/resize controls.
 - [ ] Add the overlay-add command. Use separate project-owned ROI/annotation models and the viewer's overlay layer.
-- [ ] Add reslice. Use ITK for resampling and spatial transformations, preserve geometry and numeric types, and declare the operation's scope.
+- [x] Add reslice. Use ITK for resampling and spatial transformations, preserve geometry and numeric types, and declare the operation's scope.
 - [ ] Add orthogonal views. Use `QSplitter` for synchronized views and keep image ownership in the model.
 - [ ] Add gel-lane analysis commands.
 - [ ] Add the ImageJ control panel command.

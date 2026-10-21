@@ -51,11 +51,17 @@ Top/Bottom sweep Y and Left/Right sweep X. Output spacing is in the swept axis's
 Z is interpolated at the profile axis's spacing. **Avoid interpolation** instead copies
 one source voxel per output voxel and keeps the original spacing. Flip reverses Z;
 Rotate exchanges the two output plane axes as in ImageJ. Reslice processes the full
-Z stack and keeps channels and time points separate. Spatial axes must use matching units.
+Z stack and keeps channels and time points separate. ITK's `AffineTransform` and
+`ResampleImageFilter` perform the spatial mapping and linear or nearest-neighbor
+resampling. Each component/channel/time volume uses ITK's normal multithreading;
+contiguous scalar input is imported without copying. Integer output is rounded
+and clamped to its original type; floating output retains Float32 or Float64.
+Spatial axes must use matching units.
 The X/Y/Z unit labels must be identical; convertible units and spelling aliases are
 not normalized. Identical pixel or unknown labels are treated as a common scale.
 Memory is checked against currently available RAM and visible process/container limits,
-including output and working buffers, with 10% left free for the OS and UI.
+including the final output, ITK's temporary double-precision output volume,
+any packed input component volume, and display buffers, with 10% left free for the OS and UI.
 The worker rechecks before allocating; allocation failures leave the source unchanged.
 Reslice supports cancellation from the toolbar.
 

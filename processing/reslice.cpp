@@ -1,6 +1,11 @@
 #include "memory.h"
 #include "processing/processing.h"
+#include "processing_detail.h"
 
+#include <itkAffineTransform.h>
+#include <itkLinearInterpolateImageFunction.h>
+#include <itkNearestNeighborInterpolateImageFunction.h>
+#include <itkResampleImageFilter.h>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -11,86 +16,120 @@
 
 namespace imagecxx {
 namespace {
+using ResliceTransform = itk::AffineTransform<double, 3>;
+
+ResliceTransform::Pointer indexTransform(const ResliceGeometry &geometry) {
+    auto transform = ResliceTransform::New();
+    ResliceTransform::MatrixType matrix;
+    ResliceTransform::OutputVectorType offset;
+    matrix.Fill(0);
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        matrix[geometry.sourceAxes[axis]][axis] = geometry.step[axis];
+        offset[geometry.sourceAxes[axis]] = geometry.start[axis];
+    }
+    transform->SetMatrix(matrix);
+    transform->SetOffset(offset);
+    return transform;
+}
+
 template <typename T>
-Image sampleReslice(const Image &source, const ResliceGeometry &geometry, std::stop_token stop,
-                    const Progress &progress) {
-    if (stop.stop_requested())
-        throw std::runtime_error("Reslice cancelled");
+Image sampleReslice(const Image &source, const ResliceGeometry &geometry, const ResliceOptions &options,
+                    std::stop_token stop, const Progress &progress) {
+    using Input = itk::Image<T, 3>;
+    using Output = itk::Image<double, 3>;
+    using Filter = itk::ResampleImageFilter<Input, Output>;
+    double reported = 0;
+    std::mutex progressMutex;
+    const auto report = [&](double fraction) {
+        const std::lock_guard lock(progressMutex);
+        reported = std::max(reported, std::clamp(fraction, 0.0, 1.0));
+        if (progress) progress(reported);
+    };
+    report(0);
+    if (stop.stop_requested()) throw std::runtime_error("Reslice cancelled");
     auto result = Image::allocate(source.pixelType(), geometry.shape, geometry.metadata);
     auto *destination = result.mutableData();
     const auto *buffer = source.data();
     const auto components = componentCount(source.pixelType());
     const auto pixelBytes = bytesPerPixel(source.pixelType());
-    std::vector<std::size_t> outputIndex(geometry.shape.size(), 0);
-    std::vector<std::size_t> inputIndex(source.shape().size(), 0);
-    const auto count = result.pixelCount();
-    for (std::size_t pixel = 0; pixel < count; ++pixel) {
-        if ((pixel & 4095) == 0) {
-            if (stop.stop_requested())
-                throw std::runtime_error("Reslice cancelled");
-            if (progress)
-                progress(double(pixel) / double(count));
+    const auto inputPixels = source.width() * source.height() * source.depth();
+    const auto outputPixels = geometry.shape[0] * geometry.shape[1] * geometry.shape[2];
+    const auto volumes = source.pixelCount() / inputPixels;
+    const double units = double(volumes) * double(components);
+    typename Input::SizeType inputSize;
+    for (std::size_t axis = 0; axis < 3; ++axis) inputSize[axis] = source.dimension(axis);
+    typename Output::SizeType outputSize;
+    for (std::size_t axis = 0; axis < 3; ++axis) outputSize[axis] = geometry.shape[axis];
+    const auto transform = indexTransform(geometry);
+    std::vector<std::size_t> index(source.shape().size(), 0);
+    for (std::size_t volume = 0; volume < volumes; ++volume) {
+        auto remainder = volume;
+        for (std::size_t axis = 3; axis < index.size(); ++axis) {
+            index[axis] = remainder % source.dimension(axis);
+            remainder /= source.dimension(axis);
         }
-        for (std::size_t axis = 3; axis < inputIndex.size(); ++axis)
-            inputIndex[axis] = outputIndex[axis];
-        std::array<double, 3> fraction{};
-        for (std::size_t axis = 0; axis < 3; ++axis) {
-            const auto inputAxis = geometry.sourceAxes[axis];
-            const double position = std::clamp(geometry.start[axis] + outputIndex[axis] * geometry.step[axis],
-                                               0.0, double(source.dimension(inputAxis) - 1));
-            inputIndex[inputAxis] = std::size_t(std::floor(position));
-            fraction[inputAxis] = position - double(inputIndex[inputAxis]);
-        }
-        std::size_t offset = 0;
-        for (std::size_t axis = 0; axis < inputIndex.size(); ++axis)
-            offset += inputIndex[axis] * source.strides()[axis];
-        // Preserve all bits at exact samples, including floating NaNs and RGBA alpha.
-        if (buffer && fraction == std::array<double, 3>{}) {
-            std::memcpy(destination + pixel * pixelBytes, buffer + offset, pixelBytes);
-        } else {
-            for (std::size_t component = 0; component < components; ++component) {
-                long double value = 0;
-                for (unsigned corner = 0; corner < 8; ++corner) {
-                    long double weight = 1;
-                    auto index = inputIndex;
-                    for (std::size_t axis = 0; axis < 3; ++axis) {
-                        const bool upper = (corner & (1u << axis)) != 0;
-                        weight *= upper ? fraction[axis] : 1 - fraction[axis];
-                        if (upper)
-                            ++index[axis];
+        for (std::size_t component = 0; component < components; ++component) {
+            if (stop.stop_requested()) throw std::runtime_error("Reslice cancelled");
+            const double unit = double(volume * components + component);
+            const T *inputBuffer = buffer && source.contiguous() && components == 1
+                && reinterpret_cast<std::uintptr_t>(buffer) % alignof(T) == 0
+                ? reinterpret_cast<const T *>(buffer) + volume * inputPixels : nullptr;
+            std::vector<T> packed;
+            if (!inputBuffer) {
+                packed.resize(inputPixels);
+                for (std::size_t pixel = 0; pixel < inputPixels; ++pixel) {
+                    if ((pixel & 4095) == 0) {
+                        if (stop.stop_requested()) throw std::runtime_error("Reslice cancelled");
+                        report((unit + .1 * double(pixel) / double(inputPixels)) / units);
                     }
-                    if (weight == 0)
-                        continue; // Do not contaminate exact samples with adjacent NaNs.
-                    double sample;
+                    index[0] = pixel % source.width(); index[1] = pixel / source.width() % source.height();
+                    index[2] = pixel / (source.width() * source.height());
                     if (buffer) {
-                        std::size_t at = component * sizeof(T);
-                        for (std::size_t axis = 0; axis < index.size(); ++axis)
-                            at += index[axis] * source.strides()[axis];
-                        T stored;
-                        std::memcpy(&stored, buffer + at, sizeof(T));
-                        sample = double(stored);
-                    } else
-                        sample = source.value(index, component);
-                    value += weight * sample;
+                        std::size_t offset = component * sizeof(T);
+                        for (std::size_t axis = 0; axis < index.size(); ++axis) offset += index[axis] * source.strides()[axis];
+                        std::memcpy(&packed[pixel], buffer + offset, sizeof(T));
+                    } else packed[pixel] = static_cast<T>(source.value(index, component));
                 }
-                if constexpr (std::is_integral_v<T>)
-                    value = std::round(std::clamp(value,
-                                                  static_cast<long double>(std::numeric_limits<T>::lowest()),
-                                                  static_cast<long double>(std::numeric_limits<T>::max())));
-                const T converted = static_cast<T>(value);
-                std::memcpy(destination + pixel * pixelBytes + component * sizeof(T), &converted, sizeof(T));
+                inputBuffer = packed.data();
             }
-        }
-        for (std::size_t axis = 0; axis < outputIndex.size(); ++axis) {
-            if (++outputIndex[axis] < geometry.shape[axis])
-                break;
-            outputIndex[axis] = 0;
+            auto input = Input::New();
+            input->SetRegions(inputSize);
+            input->GetPixelContainer()->SetImportPointer(const_cast<T *>(inputBuffer), inputPixels, false);
+            auto filter = Filter::New();
+            // A unit voxel basis avoids cancellation from large world origins or
+            // oblique direction inverses. ITK owns the output-to-input affine map;
+            // the corresponding calibrated world transform is retained in metadata.
+            filter->SetInput(input);
+            filter->SetTransform(transform); filter->SetSize(outputSize);
+            if (options.avoidInterpolation)
+                filter->SetInterpolator(itk::NearestNeighborInterpolateImageFunction<Input, double>::New());
+            else filter->SetInterpolator(itk::LinearInterpolateImageFunction<Input, double>::New());
+            auto observer = detail::ProgressObserver::New(); observer->stop = stop;
+            filter->AddObserver(itk::ProgressEvent(), observer);
+            observer->progress = [&](double fraction) {
+                report((unit + .1 + .8 * fraction) / units);
+            };
+            filter->UpdateLargestPossibleRegion();
+            if (stop.stop_requested()) throw std::runtime_error("Reslice cancelled");
+            const auto *resampled = filter->GetOutput()->GetBufferPointer();
+            for (std::size_t pixel = 0; pixel < outputPixels; ++pixel) {
+                if ((pixel & 4095) == 0) {
+                    if (stop.stop_requested()) throw std::runtime_error("Reslice cancelled");
+                    report((unit + .9 + .1 * double(pixel) / double(outputPixels)) / units);
+                }
+                double value = resampled[pixel];
+                if constexpr (std::is_integral_v<T>)
+                    value = std::round(std::clamp(value, double(std::numeric_limits<T>::lowest()),
+                                                  double(std::numeric_limits<T>::max())));
+                const T converted = static_cast<T>(value);
+                const auto at = (volume * outputPixels + pixel) * pixelBytes + component * sizeof(T);
+                std::memcpy(destination + at, &converted, sizeof(T));
+            }
+            report((unit + 1) / units);
         }
     }
-    if (stop.stop_requested())
-        throw std::runtime_error("Reslice cancelled");
-    if (progress)
-        progress(1);
+    if (stop.stop_requested()) throw std::runtime_error("Reslice cancelled");
+    report(1);
     return result;
 }
 } // namespace
@@ -161,16 +200,23 @@ ResliceGeometry resliceGeometry(const Image &image, const ResliceOptions &option
             geometry.metadata.direction[row * 3 + axis] =
                 direction[row * 3 + sourceAxis] * (geometry.step[axis] < 0 ? -1 : 1);
     }
-    // Origins are world-coordinate components, not permuted voxel-axis offsets.
+    // Transform the output origin through the same ITK affine map used by the
+    // resampler, then through the source's calibrated voxel-to-world transform.
+    auto world = ResliceTransform::New();
+    ResliceTransform::MatrixType worldMatrix;
+    ResliceTransform::OutputVectorType worldOffset;
     for (std::size_t row = 0; row < 3; ++row) {
-        double origin = axes[row].origin;
-        for (std::size_t axis = 0; axis < 3; ++axis) {
-            const auto sourceAxis = geometry.sourceAxes[axis];
-            origin += direction[row * 3 + sourceAxis] * geometry.start[axis] * axes[sourceAxis].spacing;
-        }
-        if (!std::isfinite(origin))
+        worldOffset[row] = axes[row].origin;
+        for (std::size_t col = 0; col < 3; ++col)
+            worldMatrix[row][col] = direction[row * 3 + col] * axes[col].spacing;
+    }
+    world->SetMatrix(worldMatrix); world->SetOffset(worldOffset);
+    ResliceTransform::InputPointType zero; zero.Fill(0);
+    const auto origin = world->TransformPoint(indexTransform(geometry)->TransformPoint(zero));
+    for (std::size_t row = 0; row < 3; ++row) {
+        if (!std::isfinite(origin[row]))
             throw std::overflow_error("Resliced spatial origin is not finite");
-        geometry.metadata.axes[row].origin = origin;
+        geometry.metadata.axes[row].origin = origin[row];
     }
     geometry.byteCount = bytesPerPixel(image.pixelType());
     for (const auto size : geometry.shape) {
@@ -178,8 +224,16 @@ ResliceGeometry resliceGeometry(const Image &image, const ResliceOptions &option
             throw std::overflow_error("Resliced image exceeds the addressable buffer size");
         geometry.byteCount *= size;
     }
-    // The sampler allocates no full-volume intermediate. Reserve the result
-    // window's decoded cache (its current 128 MiB default), plus four plane
+    // ITK imports contiguous scalar volumes without copying. Other storage and
+    // color components need one packed input component volume. Its resampler
+    // produces a complete double-precision spatial volume before typed export.
+    const auto volumePixels = image.width() * image.height() * image.depth();
+    const auto componentBytes = bytesPerPixel(image.pixelType()) / componentCount(image.pixelType());
+    const auto *buffer = image.data();
+    const bool packInput = componentCount(image.pixelType()) > 1 || !image.contiguous() || !buffer ||
+                           reinterpret_cast<std::uintptr_t>(buffer) % componentBytes != 0;
+    const auto packedBytes = packInput ? volumePixels * componentBytes : 0;
+    // Reserve the result window's decoded cache (its current 128 MiB default), plus four plane
     // buffers for decoding/encoding, upload and texture staging. Non-RAM inputs
     // may also fault their entire source into memory while being read.
     const auto planePixels = geometry.shape[0] * geometry.shape[1];
@@ -194,8 +248,12 @@ ResliceGeometry resliceGeometry(const Image &image, const ResliceOptions &option
     const auto cacheBytes =
         std::min(cachePixels, std::size_t{128} * 1024 * 1024 / decodedBytes) * decodedBytes;
     geometry.requiredMemoryBytes = geometry.byteCount;
+    const auto outputVolumePixels = planePixels * geometry.shape[2];
+    if (outputVolumePixels > std::numeric_limits<std::size_t>::max() / sizeof(double))
+        throw std::overflow_error("ITK output volume exceeds the addressable size");
     for (const auto extra :
-         {planeBytes * 4, cacheBytes, image.storageKind() == "RAM" ? std::size_t{0} : image.byteCount()}) {
+         {planeBytes * 4, cacheBytes, packedBytes, outputVolumePixels * sizeof(double),
+          image.storageKind() == "RAM" ? std::size_t{0} : image.byteCount()}) {
         if (extra > std::numeric_limits<std::size_t>::max() - geometry.requiredMemoryBytes)
             throw std::overflow_error("Reslice memory requirement exceeds the addressable size");
         geometry.requiredMemoryBytes += extra;
@@ -220,19 +278,24 @@ Image reslice(const Image &image, const ResliceOptions &options, std::stop_token
         case PixelType::UInt8:
         case PixelType::RGB8:
         case PixelType::RGBA8:
-            return sampleReslice<std::uint8_t>(image, geometry, stop, progress);
+            return sampleReslice<std::uint8_t>(image, geometry, options, stop, progress);
         case PixelType::UInt16:
-            return sampleReslice<std::uint16_t>(image, geometry, stop, progress);
+            return sampleReslice<std::uint16_t>(image, geometry, options, stop, progress);
         case PixelType::Int16:
-            return sampleReslice<std::int16_t>(image, geometry, stop, progress);
+            return sampleReslice<std::int16_t>(image, geometry, options, stop, progress);
         case PixelType::Float32:
-            return sampleReslice<float>(image, geometry, stop, progress);
+            return sampleReslice<float>(image, geometry, options, stop, progress);
         case PixelType::Float64:
-            return sampleReslice<double>(image, geometry, stop, progress);
+            return sampleReslice<double>(image, geometry, options, stop, progress);
         }
         throw std::invalid_argument("Unsupported reslice pixel type");
     } catch (const std::bad_alloc &) {
         throw std::runtime_error("Memory allocation failed while reslicing. The source image is unchanged.");
+    } catch (const itk::MemoryAllocationError &) {
+        throw std::runtime_error("ITK could not allocate reslice buffers. The source image is unchanged.");
+    } catch (const itk::ExceptionObject &) {
+        if (stop.stop_requested()) throw std::runtime_error("Reslice cancelled");
+        throw;
     }
 }
 } // namespace imagecxx
