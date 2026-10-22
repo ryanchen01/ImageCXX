@@ -462,15 +462,18 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         const auto *document = activeDocument(); if (!document) return;
         const Image input = document->image;
         QSettings settings; settings.beginGroup("projection3d/v1");
+        settings.remove("lower"); settings.remove("upper");
         ProjectionOptions options;
         QDialog dialog(this); dialog.setObjectName("projection3dDialog"); dialog.setWindowTitle(tr("3D Projection"));
         auto *layout = new QFormLayout(&dialog);
         layout->setContentsMargins(20, 20, 20, 20); layout->setVerticalSpacing(10);
         auto *method = new QComboBox(&dialog); method->setObjectName("projectionMethod");
+        method->setFixedWidth(165);
         method->addItems({tr("Nearest Point"), tr("Brightest Point"), tr("Mean Value")});
         method->setCurrentIndex(std::clamp(settings.value("method", 1).toInt(), 0, 2));
         layout->addRow(tr("Projection method:"), method);
         auto *axis = new QComboBox(&dialog); axis->setObjectName("projectionAxis");
+        axis->setFixedWidth(165);
         axis->addItems({tr("X-Axis"), tr("Y-Axis"), tr("Z-Axis")});
         axis->setCurrentIndex(std::clamp(settings.value("axis", 1).toInt(), 0, 2));
         layout->addRow(tr("Axis of rotation:"), axis);
@@ -478,6 +481,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         const auto number = [&](const QString &key, const QString &label, double value, double low, double high, int decimals = 0) {
             auto *spin = new QDoubleSpinBox(&dialog); spin->setObjectName(key);
             spin->setDecimals(decimals); spin->setRange(low, high); spin->setFixedWidth(165);
+            spin->findChild<QLineEdit *>()->setTextMargins(6, 0, 0, 0);
             spin->setValue(settings.value(key, value).toDouble()); layout->addRow(label, spin); numbers.insert(key, spin);
             return spin;
         };
@@ -486,10 +490,23 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         auto *initial = number("initialAngle", tr("Initial angle (0-359 degrees):"), 0, 0, 359);
         auto *total = number("totalRotation", tr("Total rotation (0-360 degrees):"), 360, 0, 360);
         auto *increment = number("angleIncrement", tr("Rotation angle increment:"), 10, 1, 360);
-        auto *lower = number("lower", tr("Lower transparency bound:"), input.pixelType() == PixelType::Int16 ? -32768 : 1, -1e300, 1e300, 6);
-        const double defaultUpper = input.pixelType() == PixelType::UInt16 ? 65535 : input.pixelType() == PixelType::Int16 ? 32767
-            : std::max(255., document->viewer->windowMaximum());
-        auto *upper = number("upper", tr("Upper transparency bound:"), defaultUpper, -1e300, 1e300, 6);
+        const auto range = std::make_shared<std::array<double, 2>>(std::array{
+            std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()});
+        auto *lower = new QLineEdit(&dialog); lower->setObjectName("lower");
+        auto *upper = new QLineEdit(&dialog); upper->setObjectName("upper");
+        for (auto *bound : {lower, upper}) { bound->setFixedWidth(165); bound->setEnabled(false); }
+        auto *lowerSlider = new QSlider(Qt::Horizontal, &dialog); lowerSlider->setObjectName("projectionLowerSlider");
+        auto *upperSlider = new QSlider(Qt::Horizontal, &dialog); upperSlider->setObjectName("projectionUpperSlider");
+        for (const auto &[label, slider, bound] : {
+                 std::tuple{tr("Lower transparency bound:"), lowerSlider, lower},
+                 std::tuple{tr("Upper transparency bound:"), upperSlider, upper}}) {
+            slider->setAccessibleName(label); slider->setRange(0, 1000); slider->setFixedWidth(165); slider->setEnabled(false);
+            layout->addRow(label, bound); layout->addRow(QString{}, slider);
+            connect(slider, &QSlider::valueChanged, &dialog, [range, bound](int value) {
+                bound->setText(QString::number(std::lerp((*range)[0], (*range)[1], value / 1000.),
+                    'g', std::numeric_limits<double>::max_digits10));
+            });
+        }
         lower->setToolTip(tr("Inclusive bounds in raw pixel values. Values outside this range are transparent."));
         upper->setToolTip(lower->toolTip());
         auto *opacity = number("opacity", tr("Opacity (0-100%):"), 0, 0, 100);
@@ -498,17 +515,37 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         auto *interpolate = new QCheckBox(tr("Interpolate"), &dialog); interpolate->setObjectName("projectionInterpolate");
         interpolate->setChecked(settings.value("interpolate", false).toBool()); layout->addRow(interpolate);
         auto *size = new QLabel(&dialog); size->setObjectName("projectionOutputSize"); size->setWordWrap(true); layout->addRow(size);
+        size->setText(tr("Reading image intensity range..."));
         auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel | QDialogButtonBox::Help, &dialog);
         for (auto *button : buttons->buttons()) button->setIcon(QIcon{});
         layout->addRow(buttons);
         const auto update = [&] {
+            if (!lower->isEnabled()) {
+                buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
+                return;
+            }
             options.method = static_cast<ProjectionMethod>(method->currentIndex()); options.rotationAxis = axis->currentIndex();
             options.sliceSpacing = spacing->value(); options.initialAngle = int(initial->value());
             options.totalRotation = int(total->value()); options.angleIncrement = int(increment->value());
-            options.lower = lower->value(); options.upper = upper->value(); options.opacity = int(opacity->value());
+            bool lowerValid = false, upperValid = false;
+            options.lower = lower->text().toDouble(&lowerValid); options.upper = upper->text().toDouble(&upperValid);
+            for (const auto &[slider, value, valid] : {
+                     std::tuple{lowerSlider, options.lower, lowerValid}, std::tuple{upperSlider, options.upper, upperValid}}) {
+                const QSignalBlocker blocker(slider);
+                const bool hasRange = (*range)[1] > (*range)[0];
+                slider->setEnabled(hasRange);
+                if (!valid || !std::isfinite(value)) continue;
+                const double clamped = std::clamp(value, (*range)[0], (*range)[1]);
+                const double span = (*range)[1] - (*range)[0];
+                const double fraction = !hasRange ? 0 : std::isfinite(span) ? (clamped - (*range)[0]) / span
+                    : (clamped / 2 - (*range)[0] / 2) / ((*range)[1] / 2 - (*range)[0] / 2);
+                slider->setValue(int(std::lround(fraction * 1000)));
+            }
+            options.opacity = int(opacity->value());
             options.surfaceDepthCue = int(surface->value()); options.interiorDepthCue = int(interior->value());
             options.interpolate = interpolate->isChecked();
             try {
+                if (!lowerValid || !upperValid) throw std::invalid_argument("Enter numeric transparency bounds");
                 const auto geometry = projectionGeometry(input, options);
                 detail::checkMemoryBudget(geometry.requiredMemoryBytes, detail::availableMemoryBytes());
                 size->setText(tr("Output: %1 × %2 × %3 angles, %4 MiB").arg(geometry.shape[0]).arg(geometry.shape[1])
@@ -518,6 +555,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                 size->setText(QString::fromUtf8(error.what())); buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
             }
         };
+        connect(lower, &QLineEdit::textChanged, &dialog, update);
+        connect(upper, &QLineEdit::textChanged, &dialog, update);
         for (auto *spin : numbers) connect(spin, &QDoubleSpinBox::valueChanged, &dialog, update);
         connect(method, &QComboBox::currentIndexChanged, &dialog, update);
         connect(axis, &QComboBox::currentIndexChanged, &dialog, update);
@@ -530,10 +569,41 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                    "Nearest Point shows the front surface; Brightest Point selects the highest raw value; Mean Value averages visible samples. "
                    "Opacity blends the front surface with the selected projection. Depth cueing darkens more distant points. "
                    "Interpolate uses linear sampling between voxels; otherwise sampling uses the nearest voxel.\n\n"
-                   "Bounds use raw pixel values. Output keeps the pixel type, channels and time points, with pixel coordinates and an angle axis. "
+                   "Bounds start at the image's minimum and maximum finite raw values and are reset each time this dialog opens. "
+                   "Output keeps the pixel type, channels and time points, with pixel coordinates and an angle axis. "
                    "The result opens in a new image window."));
         });
         update();
+        const std::stop_source rangeCancellation;
+        connect(&dialog, &QDialog::finished, &dialog, [rangeCancellation] { rangeCancellation.request_stop(); });
+        jobs_.submit(tr("Reading projection intensity range"), [input, range, rangeCancellation](auto stop, auto progress) {
+            std::size_t rows = 0;
+            const auto totalRows = input.height() * input.depth() * input.channels() * input.frames();
+            for (std::size_t t = 0; t < input.frames(); ++t) for (std::size_t c = 0; c < input.channels(); ++c)
+                for (std::size_t z = 0; z < input.depth(); ++z) for (std::size_t y = 0; y < input.height(); ++y) {
+                    if (stop.stop_requested() || rangeCancellation.stop_requested())
+                        throw std::runtime_error("Intensity range calculation cancelled");
+                    for (std::size_t x = 0; x < input.width(); ++x)
+                        for (std::size_t k = 0; k < componentCount(input.pixelType()); ++k) {
+                            const double value = input.sample(x, y, z, c, t, k);
+                            if (!std::isfinite(value)) continue;
+                            (*range)[0] = std::min((*range)[0], value); (*range)[1] = std::max((*range)[1], value);
+                        }
+                    progress(double(++rows) / totalRows);
+                }
+            if (!std::isfinite((*range)[0])) throw std::invalid_argument("The image has no finite intensity values");
+        }, [guard = QPointer<QDialog>(&dialog), range, lower, upper, size, update](auto error) {
+            if (!guard) return;
+            if (error) {
+                try { std::rethrow_exception(error); }
+                catch (const std::exception &exception) { size->setText(QString::fromUtf8(exception.what())); }
+                return;
+            }
+            const QSignalBlocker blockLower(lower), blockUpper(upper);
+            lower->setText(QString::number((*range)[0], 'g', std::numeric_limits<double>::max_digits10));
+            upper->setText(QString::number((*range)[1], 'g', std::numeric_limits<double>::max_digits10));
+            lower->setEnabled(true); upper->setEnabled(true); update();
+        });
         if (dialog.exec() != QDialog::Accepted) return;
         for (auto it = numbers.cbegin(); it != numbers.cend(); ++it) settings.setValue(it.key(), it.value()->value());
         settings.setValue("method", method->currentIndex()); settings.setValue("axis", axis->currentIndex());

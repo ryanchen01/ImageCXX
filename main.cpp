@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 #include "app/batch.h"
 #include "app/processing_commands.h"
+#include "ui/theme.h"
 #ifdef IMAGECXX_ENABLE_UPDATES
 #include "app/update_checker.h"
 #include <QMessageBox>
@@ -11,8 +12,6 @@
 #include <QCoreApplication>
 #include <QIcon>
 #include <QJsonDocument>
-#include <QPalette>
-#include <QStyleFactory>
 #include <cstdio>
 #include <memory>
 
@@ -47,27 +46,8 @@ int main(int argc, char *argv[])
             return result.errors.empty() ? 0 : 1;
         } catch (const std::exception &error) { std::fprintf(stderr, "%s\n", error.what()); return 2; }
     }
-    QApplication::setStyle(QStyleFactory::create("Fusion"));
+    imagecxx::applyTheme();
     QApplication::setWindowIcon(QIcon(":/icons/imagecxx.svg"));
-    QPalette palette;
-    const QColor background("#FAF7F2");
-    const QColor foreground("#1A1C1F");
-    palette.setColor(QPalette::Window, background);
-    palette.setColor(QPalette::WindowText, foreground);
-    palette.setColor(QPalette::Base, background);
-    palette.setColor(QPalette::AlternateBase, QColor("#F0ECE6"));
-    palette.setColor(QPalette::Text, foreground);
-    palette.setColor(QPalette::Button, background);
-    palette.setColor(QPalette::ButtonText, foreground);
-    palette.setColor(QPalette::ToolTipBase, background);
-    palette.setColor(QPalette::ToolTipText, foreground);
-    palette.setColor(QPalette::Highlight, QColor("#DED8CF"));
-    palette.setColor(QPalette::HighlightedText, foreground);
-    palette.setColor(QPalette::Link, foreground);
-    palette.setColor(QPalette::Accent, foreground);
-    for (auto role : {QPalette::WindowText, QPalette::Text, QPalette::ButtonText})
-        palette.setColor(QPalette::Disabled, role, QColor("#8B8883"));
-    QApplication::setPalette(palette);
     MainWindow window;
     window.show();
     window.openPaths(parser.positionalArguments());

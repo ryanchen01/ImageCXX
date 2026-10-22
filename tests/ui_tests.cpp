@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include "io/image_io.h"
+#include "ui/theme.h"
 #include <dcmtk/dcmdata/dctk.h>
 #include <gtest/gtest.h>
 #include <limits>
@@ -1172,7 +1173,7 @@ TEST(Desktop, ProjectionOpensNewWindowAndRemembersAcceptedOptionsAcrossWindowsAn
             image.setValue(std::array<std::size_t, 3>{x, y, z}, value);
         }
     const QMap<QString, double> saved{{"sliceSpacing", 2.5}, {"initialAngle", 30}, {"totalRotation", 180},
-        {"angleIncrement", 45}, {"lower", 2}, {"upper", 240}, {"opacity", 25}, {"surfaceDepthCue", 75}, {"interiorDepthCue", 30}};
+        {"angleIncrement", 45}, {"opacity", 25}, {"surfaceDepthCue", 75}, {"interiorDepthCue", 30}};
     const auto capture = qEnvironmentVariable("IMAGECXX_STACK_CAPTURE_DIR");
     for (int attempt = 0; attempt < 3; ++attempt) {
         MainWindow window; window.show(); window.move(30, 30);
@@ -1187,14 +1188,17 @@ TEST(Desktop, ProjectionOpensNewWindowAndRemembersAcceptedOptionsAcrossWindowsAn
             auto *dialog = window.findChild<QDialog *>("projection3dDialog"); EXPECT_NE(dialog, nullptr);
             if (!dialog) return;
             prompted = true;
+            EXPECT_TRUE(finishJobs(window));
             auto *method = dialog->findChild<QComboBox *>("projectionMethod");
             auto *axis = dialog->findChild<QComboBox *>("projectionAxis");
             auto *interpolate = dialog->findChild<QCheckBox *>("projectionInterpolate");
             auto *ok = dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok);
             if (attempt == 0) {
                 if (!capture.isEmpty()) EXPECT_TRUE(dialog->grab().save(capture + "/3d-project-options.png"));
-                dialog->findChild<QDoubleSpinBox *>("lower")->setValue(300);
+                dialog->findChild<QLineEdit *>("lower")->setText("300");
                 EXPECT_FALSE(ok->isEnabled());
+                dialog->findChild<QLineEdit *>("lower")->setText("2");
+                dialog->findChild<QLineEdit *>("upper")->setText("240");
                 method->setCurrentIndex(2); axis->setCurrentIndex(0); interpolate->setChecked(true);
                 for (auto it = saved.cbegin(); it != saved.cend(); ++it) dialog->findChild<QDoubleSpinBox *>(it.key())->setValue(it.value());
                 EXPECT_TRUE(ok->isEnabled()); ok->click();
@@ -1228,6 +1232,93 @@ TEST(Desktop, ProjectionOpensNewWindowAndRemembersAcceptedOptionsAcrossWindowsAn
                 menu->hide();
             }
         }
+    }
+    settings.remove("projection3d");
+}
+
+TEST(Desktop, ProjectionBoundsUseTheWholeImageRangeAndNeverPersist)
+{
+    QSettings settings; settings.remove("projection3d");
+    settings.setValue("projection3d/v1/lower", 2); settings.setValue("projection3d/v1/upper", 240);
+    MainWindow window;
+    const std::array<std::array<double, 2>, 5> ranges{{
+        {1e-12, .875}, {-2048, 8192}, {7, 7},
+        {-std::numeric_limits<double>::max(), std::numeric_limits<double>::max()}, {-.25, .75}
+    }};
+    for (std::size_t attempt = 0; attempt < ranges.size(); ++attempt) {
+        const auto [minimum, maximum] = ranges[attempt];
+        auto image = Image::allocate(attempt == 3 ? PixelType::Float64 : PixelType::Float32, {1, 1, 3, 2, 2});
+        image.metadata().intensityScale = 100; image.metadata().intensityOffset = 50;
+        for (std::size_t t = 0; t < 2; ++t) for (std::size_t c = 0; c < 2; ++c)
+            for (std::size_t z = 0; z < 3; ++z)
+                image.setValue(std::array<std::size_t, 5>{0, 0, z, c, t}, maximum);
+        image.setValue(std::array<std::size_t, 5>{0, 0, 1, 1, 1}, minimum);
+        image.setValue(std::array<std::size_t, 5>{0, 0, 0, 0, 0}, std::numeric_limits<double>::quiet_NaN());
+        image.setValue(std::array<std::size_t, 5>{0, 0, 2, 0, 0}, std::numeric_limits<double>::infinity());
+        auto *source = window.addDocument(image);
+        bool prompted = false;
+        QTimer::singleShot(0, &window, [&] {
+            auto *dialog = window.findChild<QDialog *>("projection3dDialog"); EXPECT_NE(dialog, nullptr);
+            if (!dialog) return;
+            prompted = true;
+            EXPECT_TRUE(finishJobs(window));
+            auto *lower = dialog->findChild<QLineEdit *>("lower");
+            auto *upper = dialog->findChild<QLineEdit *>("upper");
+            const double imageMinimum = image.sample(0, 0, 1, 1, 1), imageMaximum = image.sample(0, 0, 1);
+            EXPECT_DOUBLE_EQ(lower->text().toDouble(), imageMinimum);
+            EXPECT_DOUBLE_EQ(upper->text().toDouble(), imageMaximum);
+            auto *lowerSlider = dialog->findChild<QSlider *>("projectionLowerSlider");
+            auto *upperSlider = dialog->findChild<QSlider *>("projectionUpperSlider");
+            EXPECT_EQ(lowerSlider->value(), 0);
+            EXPECT_EQ(upperSlider->value(), minimum < maximum ? 1000 : 0);
+            EXPECT_EQ(lowerSlider->isEnabled(), minimum < maximum);
+            EXPECT_EQ(upperSlider->isEnabled(), minimum < maximum);
+            auto *ok = dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok);
+            EXPECT_TRUE(ok->isEnabled());
+            lower->setText("invalid"); EXPECT_FALSE(ok->isEnabled());
+            lower->setText(QString::number(maximum, 'g', 17)); EXPECT_TRUE(ok->isEnabled());
+            EXPECT_EQ(lowerSlider->value(), minimum < maximum ? 1000 : 0);
+            if (minimum < maximum) {
+                lowerSlider->setValue(250);
+                EXPECT_DOUBLE_EQ(lower->text().toDouble(), std::lerp(imageMinimum, imageMaximum, .25));
+                upperSlider->setValue(750);
+                EXPECT_DOUBLE_EQ(upper->text().toDouble(), std::lerp(imageMinimum, imageMaximum, .75));
+                lower->setText(QString::number(imageMinimum, 'g', 17));
+                upper->setText(QString::number(imageMaximum, 'g', 17));
+                EXPECT_EQ(lowerSlider->value(), 0); EXPECT_EQ(upperSlider->value(), 1000);
+            }
+            dialog->findChild<QComboBox *>("projectionAxis")->setCurrentIndex(2);
+            dialog->findChild<QDoubleSpinBox *>("totalRotation")->setValue(0);
+            dialog->findChild<QDoubleSpinBox *>("interiorDepthCue")->setValue(0);
+            if (attempt == 1) dialog->reject(); else ok->click();
+        });
+        window.commands().execute("stacks.project3d");
+        EXPECT_TRUE(prompted); ASSERT_TRUE(finishJobs(window));
+        EXPECT_FALSE(settings.contains("projection3d/v1/lower"));
+        EXPECT_FALSE(settings.contains("projection3d/v1/upper"));
+        if (attempt != 1) {
+            ASSERT_NE(window.activeDocument(), source);
+            EXPECT_EQ(window.activeDocument()->image.pixelType(), image.pixelType());
+            EXPECT_DOUBLE_EQ(window.activeDocument()->image.sample(1, 1, 0, 1, 1), image.sample(0, 0, 1));
+        }
+    }
+    auto nonfinite = Image::allocate(PixelType::Float32, {1, 1, 2});
+    nonfinite.setValue(std::array<std::size_t, 3>{0, 0, 0}, std::numeric_limits<double>::quiet_NaN());
+    nonfinite.setValue(std::array<std::size_t, 3>{0, 0, 1}, std::numeric_limits<double>::infinity());
+    window.addDocument(nonfinite);
+    for (bool waitForRange : {true, false}) {
+        QTimer::singleShot(0, &window, [&] {
+            auto *dialog = window.findChild<QDialog *>("projection3dDialog"); EXPECT_NE(dialog, nullptr);
+            if (!dialog) return;
+            if (waitForRange) {
+                EXPECT_TRUE(finishJobs(window));
+                EXPECT_FALSE(dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok)->isEnabled());
+                EXPECT_TRUE(dialog->findChild<QLabel *>("projectionOutputSize")->text().contains("no finite"));
+            }
+            dialog->reject();
+        });
+        window.commands().execute("stacks.project3d");
+        ASSERT_TRUE(finishJobs(window));
     }
     settings.remove("projection3d");
 }
@@ -1582,6 +1673,7 @@ int main(int argc, char **argv)
 {
     QCoreApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QApplication application(argc, argv);
+    applyTheme();
     QCoreApplication::setOrganizationName("ImageCXXTests");
     QCoreApplication::setApplicationName("ImageCXXTests");
     testing::InitGoogleTest(&argc, argv);
