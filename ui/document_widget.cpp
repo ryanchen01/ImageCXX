@@ -1,9 +1,6 @@
 #include "document_widget.h"
 #include <QHBoxLayout>
-#include <QComboBox>
 #include <QScopedValueRollback>
-#include <QStandardItemModel>
-#include <QScreen>
 #include <cmath>
 #include <QLabel>
 #include <QSlider>
@@ -53,14 +50,6 @@ void DocumentWidget::addNavigationControls(ImageViewer *view, int index, QVBoxLa
     auto *window = view->window();
     auto *bar = new QHBoxLayout;
     bar->setContentsMargins(14, 10, 14, 10);
-    if (index == 0) {
-        modeChoice_ = new QComboBox(window);
-        modeChoice_->setObjectName("viewMode");
-        modeChoice_->setAccessibleName(tr("Views"));
-        modeChoice_->addItems({tr("Single view"), tr("Linked view"), tr("Orthogonal views")});
-        connect(modeChoice_, &QComboBox::activated, this, [this](int mode) { setViewMode(ViewMode(mode)); });
-        bar->addWidget(modeChoice_);
-    }
     NavigationControls controls{};
     controls.axis = new QLabel(window);
     controls.axis->setObjectName("sliceAxisLabel");
@@ -214,8 +203,6 @@ void DocumentWidget::setViewMode(ViewMode mode)
                 if (isVisible()) window->show();
             }, Qt::SingleShotConnection);
         }
-        const QSignalBlocker blocker(modeChoice_);
-        modeChoice_->setCurrentIndex(int(mode));
         for (int i = 0; i < views_.size(); ++i) {
             const auto axes = viewAxes(i);
             const auto &metadata = image.metadata().axes;
@@ -380,8 +367,6 @@ void DocumentWidget::refresh()
                 && metadata[axes[0]].unit == metadata[axes[1]].unit
                 ? metadata[axes[1]].spacing / metadata[axes[0]].spacing : 1.0);
         }
-        auto *choices = qobject_cast<QStandardItemModel *>(modeChoice_->model());
-        choices->item(int(ViewMode::Orthogonal))->setEnabled(image.depth() > 1);
         updateNavigation(std::min(oldC, image.channels() - 1), std::min(oldT, image.frames() - 1));
     }
     synchronizeDisplay(viewer);

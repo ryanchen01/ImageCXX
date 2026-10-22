@@ -2,7 +2,7 @@
 
 ImageCXX is a C++20 and Qt Widgets image viewer and analysis application with a compact launcher and separate image and tool windows. It keeps scientific pixel values separate from display settings and provides stack browsing, ROIs, measurements, plots and ITK processing.
 
-Use the view selector below an image, or the View menu, to open a linked XY window or orthogonal XY/XZ/YZ windows. Each linked view opens in a separate window and shares slice/channel/time navigation, display settings and pan/zoom with its document. Move and resize the windows however you prefer; unrelated image documents remain independent.
+Use the View menu to open a linked XY window or orthogonal XY/XZ/YZ windows. The Ortho button on the main toolbar also opens orthogonal views. Each linked view opens in a separate window and shares slice/channel/time navigation, display settings and pan/zoom with its document. Move and resize the windows however you prefer; unrelated image documents remain independent.
 
 Orthogonal views require a Z stack and follow the stored image axes, with calibrated pixel proportions when the axes use the same unit. Each window has its own slice slider: Z in XY, Y in XZ, and X in YZ. Channel and time selection is available in the Display panel. With the Pan tool, click or drag to move the shared intersection. The wheel browses the hovered plane; Ctrl or Command plus the wheel zooms, and middle-button or Space plus dragging pans. Selection editing, measurements and pixel commands use XY. Every window reads the document's shared image storage, and edits and undo refresh all linked windows.
 

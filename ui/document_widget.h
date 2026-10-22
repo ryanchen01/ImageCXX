@@ -9,7 +9,6 @@ class QSlider;
 class QCloseEvent;
 class QEvent;
 class QLabel;
-class QComboBox;
 class QVBoxLayout;
 namespace imagecxx {
 class DocumentWidget : public QWidget {
@@ -56,7 +55,6 @@ protected:
     void dropEvent(QDropEvent *event) override;
 private:
     ViewMode viewMode_ = ViewMode::Single;
-    QComboBox *modeChoice_;
     QList<ImageViewer *> views_;
     struct NavigationControls {
         QSlider *slice;

@@ -1100,6 +1100,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         action->setCheckable(true); action->setData(name); luts->addAction(action);
     }
     toolbar->addAction(stacksMenu->menuAction());
+    auto *orthogonal = findChild<QAction *>("view.orthogonal");
+    orthogonal->setIconText(tr("Ortho"));
+    toolbar->addAction(orthogonal);
+    auto *orthogonalButton = qobject_cast<QToolButton *>(toolbar->widgetForAction(orthogonal));
+    orthogonalButton->setObjectName("orthogonalViewsButton");
+    orthogonalButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    orthogonalButton->setAccessibleName(orthogonal->text());
+    orthogonalButton->setToolTip(orthogonal->text());
     toolbar->addAction(lutMenu_->menuAction());
     auto *lutButton = qobject_cast<QToolButton *>(toolbar->widgetForAction(lutMenu_->menuAction()));
     lutButton->setObjectName("lutButton");

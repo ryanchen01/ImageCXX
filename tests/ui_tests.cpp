@@ -548,6 +548,15 @@ TEST(Desktop, StartsCompactAndOpensIndependentImageAndToolWindows)
 TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
 {
     MainWindow window;
+    auto *toolbar = window.findChild<QToolBar *>("imageTools");
+    auto *orthogonal = window.findChild<QAction *>("view.orthogonal");
+    ASSERT_NE(toolbar, nullptr); ASSERT_NE(orthogonal, nullptr);
+    auto *orthogonalButton = qobject_cast<QToolButton *>(toolbar->widgetForAction(orthogonal));
+    ASSERT_NE(orthogonalButton, nullptr);
+    EXPECT_FALSE(orthogonalButton->isEnabled());
+    bool inMenu = false;
+    for (auto *menu : window.findChildren<QMenu *>()) if (menu->actions().contains(orthogonal)) inMenu = true;
+    EXPECT_TRUE(inMenu);
     ImageMetadata metadata;
     metadata.name = "Calibration phantom";
     metadata.axes = {{"X", .6, 0, "mm"}, {"Y", .6, 0, "mm"}, {"Z", 1.2, 0, "mm"}, {"C"}, {"T"}};
@@ -570,9 +579,13 @@ TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
     auto *other = window.addDocument(Image::allocate(PixelType::UInt8, {8, 8}));
     auto *document = window.addDocument(image);
     EXPECT_TRUE(window.findChild<QAction *>("view.orthogonal")->isEnabled());
-    window.commands().execute("view.orthogonal");
+    orthogonalButton->click();
     EXPECT_EQ(document->viewMode(), DocumentWidget::ViewMode::Orthogonal);
     EXPECT_TRUE(window.findChild<QAction *>("view.orthogonal")->isChecked());
+    EXPECT_TRUE(orthogonalButton->isChecked());
+    EXPECT_EQ(orthogonalButton->text(), "Ortho");
+    for (auto *view : document->views())
+        EXPECT_TRUE(view->window()->findChildren<QComboBox *>(QString{}, Qt::FindDirectChildrenOnly).isEmpty());
     EXPECT_EQ(window.documents().size(), 2);
     EXPECT_EQ(other->viewMode(), DocumentWidget::ViewMode::Single);
     document->setPosition(64, 56, 32, 0, 0);
@@ -580,9 +593,9 @@ TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
     document->viewer->setScaleBarVisible(true);
     document->viewer->setLinearInterpolation(true);
     // Place windows for review captures only. The application leaves placement to the user.
-    document->resize(600, 650); document->move(16, 32);
-    document->views()[1]->window()->resize(480, 340); document->views()[1]->window()->move(660, 32);
-    document->views()[2]->window()->resize(480, 340); document->views()[2]->window()->move(660, 420);
+    document->resize(600, 650); document->move(16, 160);
+    document->views()[1]->window()->resize(480, 300); document->views()[1]->window()->move(660, 160);
+    document->views()[2]->window()->resize(480, 300); document->views()[2]->window()->move(660, 520);
 
     const auto capture = qEnvironmentVariable("IMAGECXX_VIEWS_CAPTURE_DIR");
     const auto settle = [] {
@@ -594,10 +607,12 @@ TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
         ASSERT_NE(QApplication::platformName(), "offscreen");
         QDir().mkpath(capture);
         other->hide();
+        window.move(16, 16); window.show(); window.raise();
         document->showViews();
         for (auto *view : document->views()) view->window()->raise();
         document->activateWindow(); settle();
-        auto frame = document->frameGeometry();
+        window.repaint(); QCoreApplication::processEvents();
+        auto frame = window.frameGeometry().united(document->frameGeometry());
         for (auto *view : document->views()) frame = frame.united(view->window()->frameGeometry());
         EXPECT_TRUE(document->screen()->grabWindow(0, frame.x(), frame.y(), frame.width(), frame.height()).save(capture + "/" + name));
     };
@@ -620,31 +635,32 @@ TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
     EXPECT_TRUE(window.findChild<QAction *>("view.orthogonal")->isChecked());
     EXPECT_EQ(document->views()[1]->window(), xzWindow);
     EXPECT_TRUE(xzWindow->isVisible());
-    screenshot("orthogonal-one-slider.png");
+    screenshot("orthogonal-toolbar.png");
     document->viewer->window()->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly)->setValue(25);
     xzWindow->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly)->setValue(50);
     yzWindow->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly)->setValue(80);
     EXPECT_EQ(document->views()[1]->slice(), 50u);
     EXPECT_EQ(document->viewer->slice(), 25u);
     EXPECT_EQ(document->views()[2]->slice(), 80u);
-    screenshot("orthogonal-one-slider-navigation.png");
+    screenshot("orthogonal-toolbar-navigation.png");
     QCoreApplication::sendEvent(document, &activated);
     window.commands().execute("view.linked"); settle();
     EXPECT_EQ(document->views().size(), 2);
     EXPECT_NE(document->viewer->window(), document->views()[1]->window());
     document->views()[1]->window()->resize(480, 420);
-    document->views()[1]->window()->move(660, 32);
+    document->views()[1]->window()->move(660, 160);
     auto *linkedWindow = document->views()[1]->window();
     linkedWindow->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly)->setValue(28);
     window.panel("display")->findChild<QSpinBox *>("displayChannel")->setValue(2);
     window.panel("display")->findChild<QSpinBox *>("displayTime")->setValue(2);
     EXPECT_EQ(document->viewer->slice(), 28u);
     EXPECT_EQ(other->viewer->slice(), 0u); EXPECT_DOUBLE_EQ(other->viewer->gamma(), 1);
-    screenshot("linked-one-slider.png");
+    screenshot("linked-view-menu.png");
     window.commands().execute("view.single");
     EXPECT_EQ(document->views().size(), 1);
     auto *flat = window.addDocument(Image::allocate(PixelType::UInt8, {8, 8}));
     EXPECT_FALSE(window.findChild<QAction *>("view.orthogonal")->isEnabled());
+    EXPECT_FALSE(orthogonalButton->isEnabled());
     EXPECT_EQ(flat->viewMode(), DocumentWidget::ViewMode::Single);
     document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
     QPointer<QWidget> retiredWindow(document->views()[1]->window());
