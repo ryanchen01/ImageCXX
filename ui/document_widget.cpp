@@ -24,9 +24,7 @@ namespace imagecxx {
 // child first and reparenting afterward can leave the launcher's backing store
 // registered for graphics composition, including unrelated raster dialogs.
 DocumentWidget::DocumentWidget(Image source, QWidget *parent) : QWidget(parent, Qt::Window),
-    image(std::move(source)), viewer(nullptr), z_(new QSlider(Qt::Horizontal, this)),
-    channel_(new QSlider(Qt::Horizontal, this)), time_(new QSlider(Qt::Horizontal, this)),
-    position_(new QLabel(this))
+    image(std::move(source)), viewer(nullptr)
 {
     setAcceptDrops(true);
     auto *layout = new QVBoxLayout(this);
@@ -39,26 +37,7 @@ DocumentWidget::DocumentWidget(Image source, QWidget *parent) : QWidget(parent, 
     connectViewer(viewer, 0);
     spatial_ = {image.width() / 2, image.height() / 2, 0};
     center_ = {double(image.width()) / 2, double(image.height()) / 2, double(image.depth()) / 2};
-    auto *bar = new QHBoxLayout;
-    bar->setContentsMargins(14, 10, 14, 10);
-    modeChoice_ = new QComboBox(this);
-    modeChoice_->setObjectName("viewMode");
-    modeChoice_->setAccessibleName(tr("Views"));
-    modeChoice_->addItems({tr("Single view"), tr("Linked view"), tr("Orthogonal views")});
-    connect(modeChoice_, &QComboBox::activated, this, [this](int index) { setViewMode(ViewMode(index)); });
-    bar->addWidget(modeChoice_);
-    std::size_t axisIndex = 0;
-    for (auto pair : {std::pair{tr("Z"), z_}, {tr("C"), channel_}, {tr("T"), time_}}) {
-        auto *label = new QLabel(pair.first, this);
-        axisLabels_[axisIndex++] = label;
-        bar->addWidget(label);
-        bar->addWidget(pair.second, 1);
-        connect(pair.second, &QSlider::valueChanged, this, [this] {
-            setPosition(spatial_[0], spatial_[1], z_->value(), channel_->value(), time_->value());
-        });
-    }
-    bar->addWidget(position_);
-    layout->addLayout(bar);
+    addNavigationControls(viewer, 0, layout);
     connect(this, &DocumentWidget::changed, this, [this] {
         setWindowTitle(title());
         for (int i = 1; i < views_.size(); ++i) {
@@ -67,6 +46,45 @@ DocumentWidget::DocumentWidget(Image source, QWidget *parent) : QWidget(parent, 
         }
     });
     refresh();
+}
+
+void DocumentWidget::addNavigationControls(ImageViewer *view, int index, QVBoxLayout *layout)
+{
+    auto *window = view->window();
+    auto *bar = new QHBoxLayout;
+    bar->setContentsMargins(14, 10, 14, 10);
+    if (index == 0) {
+        modeChoice_ = new QComboBox(window);
+        modeChoice_->setObjectName("viewMode");
+        modeChoice_->setAccessibleName(tr("Views"));
+        modeChoice_->addItems({tr("Single view"), tr("Linked view"), tr("Orthogonal views")});
+        connect(modeChoice_, &QComboBox::activated, this, [this](int mode) { setViewMode(ViewMode(mode)); });
+        bar->addWidget(modeChoice_);
+    }
+    NavigationControls controls{};
+    const std::array<QString, 3> names{QStringLiteral("slice"), QStringLiteral("channel"), QStringLiteral("time")};
+    for (std::size_t axis = 0; axis < controls.sliders.size(); ++axis) {
+        auto *label = new QLabel(window);
+        label->setObjectName(names[axis] + "AxisLabel");
+        auto *slider = new QSlider(Qt::Horizontal, window);
+        slider->setObjectName(names[axis] + "Slider");
+        label->setBuddy(slider);
+        controls.labels[axis] = label;
+        controls.sliders[axis] = slider;
+        bar->addWidget(label);
+        bar->addWidget(slider, 1);
+        connect(slider, &QSlider::valueChanged, this, [this, index] {
+            const auto &sliders = navigation_[index].sliders;
+            auto position = spatial_;
+            position[viewAxes(index)[2]] = std::size_t(sliders[0]->value());
+            setPosition(position[0], position[1], position[2], sliders[1]->value(), sliders[2]->value());
+        });
+    }
+    controls.position = new QLabel(window);
+    controls.position->setObjectName("slicePosition");
+    bar->addWidget(controls.position);
+    navigation_.append(controls);
+    layout->addLayout(bar);
 }
 
 std::array<std::size_t, 3> DocumentWidget::viewAxes(int index) const
@@ -169,7 +187,10 @@ void DocumentWidget::setViewMode(ViewMode mode)
     }
     {
         QScopedValueRollback guard(synchronizing_, true);
-        while (views_.size() > 1) delete views_.takeLast()->window();
+        while (views_.size() > 1) {
+            navigation_.removeLast();
+            delete views_.takeLast()->window();
+        }
         viewMode_ = mode;
         const int count = mode == ViewMode::Single ? 1 : mode == ViewMode::Orthogonal ? 3 : 2;
         for (int i = 1; i < count; ++i) {
@@ -182,8 +203,10 @@ void DocumentWidget::setViewMode(ViewMode mode)
             window->installEventFilter(this);
             auto *contents = new QVBoxLayout(window);
             contents->setContentsMargins(0, 0, 0, 0);
+            contents->setSpacing(0);
             auto *view = new ImageViewer(window);
-            contents->addWidget(view);
+            contents->addWidget(view, 1);
+            addNavigationControls(view, i, contents);
             view->setObjectName(mode == ViewMode::Orthogonal ? (i == 1 ? "xzView" : "yzView") : "linkedView");
             const auto axes = viewAxes(i);
             view->setImage(mode == ViewMode::Orthogonal ? image.permutedSpatialAxes(axes) : image);
@@ -253,11 +276,26 @@ void DocumentWidget::updateNavigation(std::size_t channel, std::size_t time)
             views_[i]->window()->setWindowTitle(title() + " · " + label);
         }
 
+        auto &controls = navigation_[i];
+        const std::array<std::size_t, 3> lengths{image.dimension(axes[2]), image.channels(), image.frames()};
+        const std::array<std::size_t, 3> positions{spatial_[axes[2]], channel, time};
+        const std::array<QString, 3> labels{names[int(axes[2])], tr("C"), tr("T")};
+        const std::array<QString, 3> accessibleNames{tr("%1 slice").arg(labels[0]), tr("Channel"), tr("Time")};
+        for (std::size_t axis = 0; axis < controls.sliders.size(); ++axis) {
+            auto *slider = controls.sliders[axis];
+            const QSignalBlocker blocker(slider);
+            const auto maximum = std::min<std::size_t>(lengths[axis] - 1, std::numeric_limits<int>::max());
+            slider->setRange(0, int(maximum));
+            slider->setValue(int(std::min(positions[axis], maximum)));
+            slider->setEnabled(lengths[axis] > 1);
+            slider->setVisible(lengths[axis] > 1);
+            slider->setAccessibleName(accessibleNames[axis]);
+            controls.labels[axis]->setText(labels[axis]);
+            controls.labels[axis]->setVisible(lengths[axis] > 1);
+        }
+        controls.position->setText(tr("%1 %2/%3  C %4/%5  T %6/%7").arg(labels[0])
+            .arg(positions[0] + 1).arg(lengths[0]).arg(channel + 1).arg(image.channels()).arg(time + 1).arg(image.frames()));
     }
-    const QSignalBlocker bz(z_), bc(channel_), bt(time_);
-    z_->setValue(int(spatial_[2])); channel_->setValue(int(channel)); time_->setValue(int(time));
-    position_->setText(tr("Z %1/%2  C %3/%4  T %5/%6").arg(spatial_[2] + 1).arg(image.depth())
-        .arg(channel + 1).arg(image.channels()).arg(time + 1).arg(image.frames()));
 }
 
 void DocumentWidget::dragEnterEvent(QDragEnterEvent *event)
@@ -354,15 +392,6 @@ void DocumentWidget::refresh()
             view->setPixelAspectRatio(viewMode_ == ViewMode::Orthogonal
                 && metadata[axes[0]].unit == metadata[axes[1]].unit
                 ? metadata[axes[1]].spacing / metadata[axes[0]].spacing : 1.0);
-        }
-        const std::array<QSlider *, 3> controls{z_, channel_, time_};
-        const std::array<std::size_t, 3> lengths{image.depth(), image.channels(), image.frames()};
-        for (std::size_t axis = 0; axis < controls.size(); ++axis) {
-            const QSignalBlocker blocker(controls[axis]);
-            controls[axis]->setRange(0, int(std::min<std::size_t>(lengths[axis] - 1, std::numeric_limits<int>::max())));
-            controls[axis]->setEnabled(lengths[axis] > 1);
-            controls[axis]->setVisible(lengths[axis] > 1);
-            axisLabels_[axis]->setVisible(lengths[axis] > 1);
         }
         auto *choices = qobject_cast<QStandardItemModel *>(modeChoice_->model());
         choices->item(int(ViewMode::Orthogonal))->setEnabled(image.depth() > 1);

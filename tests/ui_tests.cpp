@@ -620,31 +620,37 @@ TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
     EXPECT_TRUE(window.findChild<QAction *>("view.orthogonal")->isChecked());
     EXPECT_EQ(document->views()[1]->window(), xzWindow);
     EXPECT_TRUE(xzWindow->isVisible());
-    screenshot("orthogonal-windows.png");
-    document->views()[1]->positionPicked({80.5, 25.5});
+    screenshot("orthogonal-window-sliders.png");
+    document->viewer->window()->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly)->setValue(25);
+    xzWindow->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly)->setValue(50);
+    yzWindow->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly)->setValue(80);
+    EXPECT_EQ(document->views()[1]->slice(), 50u);
     EXPECT_EQ(document->viewer->slice(), 25u);
     EXPECT_EQ(document->views()[2]->slice(), 80u);
-    screenshot("orthogonal-linked-position.png");
+    screenshot("orthogonal-slider-navigation.png");
     QCoreApplication::sendEvent(document, &activated);
     window.commands().execute("view.linked"); settle();
     EXPECT_EQ(document->views().size(), 2);
     EXPECT_NE(document->viewer->window(), document->views()[1]->window());
     document->views()[1]->window()->resize(480, 420);
     document->views()[1]->window()->move(660, 32);
-    document->views()[1]->setSlice(28, 1, 1);
+    auto *linkedWindow = document->views()[1]->window();
+    linkedWindow->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly)->setValue(28);
+    linkedWindow->findChild<QSlider *>("channelSlider", Qt::FindDirectChildrenOnly)->setValue(1);
+    linkedWindow->findChild<QSlider *>("timeSlider", Qt::FindDirectChildrenOnly)->setValue(1);
     EXPECT_EQ(document->viewer->slice(), 28u);
     EXPECT_EQ(other->viewer->slice(), 0u); EXPECT_DOUBLE_EQ(other->viewer->gamma(), 1);
-    screenshot("synchronized-windows.png");
+    screenshot("linked-window-sliders.png");
     window.commands().execute("view.single");
     EXPECT_EQ(document->views().size(), 1);
     auto *flat = window.addDocument(Image::allocate(PixelType::UInt8, {8, 8}));
     EXPECT_FALSE(window.findChild<QAction *>("view.orthogonal")->isEnabled());
     EXPECT_EQ(flat->viewMode(), DocumentWidget::ViewMode::Single);
     document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
-    QPointer<QWidget> linkedWindow(document->views()[1]->window());
+    QPointer<QWidget> retiredWindow(document->views()[1]->window());
     document->close();
     QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
-    EXPECT_TRUE(linkedWindow.isNull());
+    EXPECT_TRUE(retiredWindow.isNull());
 }
 
 TEST(Desktop, DisplaySlidersTrackValuesAutoRangeAndActiveDocument)

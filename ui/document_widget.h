@@ -10,6 +10,7 @@ class QCloseEvent;
 class QEvent;
 class QLabel;
 class QComboBox;
+class QVBoxLayout;
 namespace imagecxx {
 class DocumentWidget : public QWidget {
     Q_OBJECT
@@ -57,18 +58,20 @@ private:
     ViewMode viewMode_ = ViewMode::Single;
     QComboBox *modeChoice_;
     QList<ImageViewer *> views_;
+    struct NavigationControls {
+        std::array<QSlider *, 3> sliders;
+        std::array<QLabel *, 3> labels;
+        QLabel *position;
+    };
+    QList<NavigationControls> navigation_;
     std::array<std::size_t, 3> spatial_{};
     std::array<double, 3> center_{};
     bool synchronizing_ = false;
     std::array<std::size_t, 3> viewAxes(int index) const;
     void connectViewer(ImageViewer *view, int index);
+    void addNavigationControls(ImageViewer *view, int index, QVBoxLayout *layout);
     void updateNavigation(std::size_t channel, std::size_t time);
     void synchronizeDisplay(ImageViewer *source);
     void synchronizeTransform(ImageViewer *source, int index);
-    QSlider *z_;
-    QSlider *channel_;
-    QSlider *time_;
-    QLabel *position_;
-    std::array<QLabel *, 3> axisLabels_{};
 };
 } // namespace imagecxx
