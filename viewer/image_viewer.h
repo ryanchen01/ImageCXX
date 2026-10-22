@@ -28,6 +28,7 @@ public:
     double windowMinimum() const;
     double windowMaximum() const;
     std::pair<double, double> sliceRange() const;
+    // Fit the current slice once, keeping the range when navigating.
     void autoWindow();
     void setGamma(double gamma);
     double gamma() const;

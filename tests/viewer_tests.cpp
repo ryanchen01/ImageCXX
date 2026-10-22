@@ -6,6 +6,7 @@
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QThread>
+#include <QWheelEvent>
 #include <gtest/gtest.h>
 #include <array>
 #include <atomic>
@@ -153,6 +154,75 @@ TEST(Viewer, UnchangedManualWindowDisablesAutoRangeWithoutNotifying)
     viewer.setWindow(5, 25);
     viewer.setWindow(5, 25);
     EXPECT_EQ(changes, 1);
+}
+
+TEST(Viewer, ScrollingPreservesInitialAndExplicitAutoWindow)
+{
+    ImageViewer viewer;
+    auto image = Image::allocate(PixelType::UInt16, {2, 2, 2});
+    const std::array<std::uint16_t, 8> values{0, 10, 20, 30, 100, 110, 120, 130};
+    std::copy(values.begin(), values.end(), reinterpret_cast<std::uint16_t *>(image.mutableData()));
+    int ready = 0, changes = 0;
+    QObject::connect(&viewer, &ImageViewer::sliceReady, [&] { ++ready; });
+    viewer.setImage(image);
+    ASSERT_TRUE(waitFor([&] { return ready == 1; }));
+    EXPECT_DOUBLE_EQ(viewer.windowMinimum(), 0);
+    EXPECT_DOUBLE_EQ(viewer.windowMaximum(), 30);
+    QObject::connect(&viewer, &ImageViewer::displayRangeChanged, [&](double, double) { ++changes; });
+
+    QWheelEvent forward(QPointF(10, 10), QPointF(10, 10), QPoint(), QPoint(0, -120),
+        Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+    QApplication::sendEvent(&viewer, &forward);
+    ASSERT_TRUE(waitFor([&] { return ready == 2; }));
+    EXPECT_EQ(viewer.slice(), 1u);
+    EXPECT_DOUBLE_EQ(viewer.sliceRange().first, 100);
+    EXPECT_DOUBLE_EQ(viewer.sliceRange().second, 130);
+    EXPECT_DOUBLE_EQ(viewer.windowMinimum(), 0);
+    EXPECT_DOUBLE_EQ(viewer.windowMaximum(), 30);
+    EXPECT_EQ(changes, 0);
+
+    viewer.autoWindow();
+    EXPECT_DOUBLE_EQ(viewer.windowMinimum(), 100);
+    EXPECT_DOUBLE_EQ(viewer.windowMaximum(), 130);
+    EXPECT_EQ(changes, 1);
+    QWheelEvent backward(QPointF(10, 10), QPointF(10, 10), QPoint(), QPoint(0, 120),
+        Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+    QApplication::sendEvent(&viewer, &backward);
+    ASSERT_TRUE(waitFor([&] { return ready == 3; }));
+    EXPECT_EQ(viewer.slice(), 0u);
+    EXPECT_DOUBLE_EQ(viewer.windowMinimum(), 100);
+    EXPECT_DOUBLE_EQ(viewer.windowMaximum(), 130);
+    EXPECT_EQ(changes, 1);
+
+    viewer.setImage(image);
+    ASSERT_TRUE(waitFor([&] { return ready == 4; }));
+    EXPECT_DOUBLE_EQ(viewer.windowMinimum(), 0);
+    EXPECT_DOUBLE_EQ(viewer.windowMaximum(), 30);
+}
+
+TEST(Viewer, AutoWindowDuringLoadingAppliesOnceToRequestedSlice)
+{
+    ImageViewer viewer;
+    auto image = Image::allocate(PixelType::UInt16, {2, 2, 2});
+    const std::array<std::uint16_t, 8> values{0, 10, 20, 30, 100, 110, 120, 130};
+    std::copy(values.begin(), values.end(), reinterpret_cast<std::uint16_t *>(image.mutableData()));
+    int ready = 0;
+    QObject::connect(&viewer, &ImageViewer::sliceReady, [&] { ++ready; });
+    viewer.setImage(image);
+    viewer.setWindow(5, 25);
+    ASSERT_TRUE(waitFor([&] { return ready == 1; }));
+    EXPECT_DOUBLE_EQ(viewer.windowMinimum(), 5);
+    EXPECT_DOUBLE_EQ(viewer.windowMaximum(), 25);
+
+    viewer.setSlice(1);
+    viewer.autoWindow();
+    ASSERT_TRUE(waitFor([&] { return ready == 2; }));
+    EXPECT_DOUBLE_EQ(viewer.windowMinimum(), 100);
+    EXPECT_DOUBLE_EQ(viewer.windowMaximum(), 130);
+    viewer.setSlice(0);
+    ASSERT_TRUE(waitFor([&] { return ready == 3; }));
+    EXPECT_DOUBLE_EQ(viewer.windowMinimum(), 100);
+    EXPECT_DOUBLE_EQ(viewer.windowMaximum(), 130);
 }
 
 TEST(Viewer, InitializesDicomPhotometricInversionWithoutChangingSamples)

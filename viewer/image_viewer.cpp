@@ -359,7 +359,7 @@ public:
     int dragHandle = -1;
     QPointF dragStart;
     bool panning = false, drawing = false, fitted = true, spacePan = false;
-    bool crosshair = false, scaleBar = false, composite = false, autoRange = true;
+    bool crosshair = false, scaleBar = false, composite = false, autoRangePending = true;
     bool loading = false;
     std::mutex mutex;
     std::condition_variable condition;
@@ -583,7 +583,8 @@ ImageViewer::ImageViewer(QWidget *parent) : QWidget(parent), d(std::make_unique<
                             if (serial != d->serial.load()) return;
                             d->canvas->frame = decoded;
                             d->loading = false;
-                            if (d->autoRange) {
+                            if (d->autoRangePending) {
+                                d->autoRangePending = false;
                                 // RGB8 textures are normalized by the sampler.
                                 const double divisor = decoded->mode == 1 ? 255.0 : 1.0;
                                 d->canvas->minimum = decoded->minimum / divisor;
@@ -632,7 +633,7 @@ void ImageViewer::setImage(const Image &image, bool preserveInversion)
     d->image = image;
     ++d->imageRevision;
     d->z = d->channel = d->time = 0;
-    d->autoRange = true;
+    d->autoRangePending = true;
     d->mask = {};
     d->canvas->mask.clear();
     d->canvas->frame.reset();
@@ -700,7 +701,7 @@ void ImageViewer::requestSlice()
 void ImageViewer::setWindow(double minimum, double maximum)
 {
     if (!std::isfinite(minimum) || !std::isfinite(maximum) || maximum <= minimum) return;
-    d->autoRange = false;
+    d->autoRangePending = false;
     const double divisor = componentCount(d->image.pixelType()) > 1 ? 255.0 : 1.0;
     if (d->canvas->minimum == minimum / divisor && d->canvas->maximum == maximum / divisor) return;
     d->canvas->minimum = minimum / divisor;
@@ -723,8 +724,9 @@ std::pair<double, double> ImageViewer::sliceRange() const
 }
 void ImageViewer::autoWindow()
 {
-    d->autoRange = true;
-    if (d->canvas->frame) {
+    d->autoRangePending = true;
+    if (d->canvas->frame && !d->loading) {
+        d->autoRangePending = false;
         const auto [minimum, maximum] = sliceRange();
         const double divisor = d->canvas->frame->mode == 1 ? 255.0 : 1.0;
         d->canvas->minimum = minimum / divisor;
