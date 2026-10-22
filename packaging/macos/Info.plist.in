@@ -11,7 +11,7 @@
     <key>LSMinimumSystemVersion</key><string>${CMAKE_OSX_DEPLOYMENT_TARGET}</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>SUFeedURL</key><string>https://github.com/ryanchen01/ImageCXX/releases/latest/download/appcast.xml</string>
-    <key>SUPublicEDKey</key><string>aOiud96ozKFFArL1VUWYaxEKrxp0ifzx6LK2QNu5aGE=</string>
+    <key>SUPublicEDKey</key><string>QL500Oh7DE5WZIJj5W00iXeAnGHRV65XFwyDwyBtBA8=</string>
     <key>SUEnableAutomaticChecks</key><true/>
     <key>SUAutomaticallyUpdate</key><false/>
     <key>SUVerifyUpdateBeforeExtraction</key><true/>
