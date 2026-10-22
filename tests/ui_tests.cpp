@@ -620,14 +620,14 @@ TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
     EXPECT_TRUE(window.findChild<QAction *>("view.orthogonal")->isChecked());
     EXPECT_EQ(document->views()[1]->window(), xzWindow);
     EXPECT_TRUE(xzWindow->isVisible());
-    screenshot("orthogonal-window-sliders.png");
+    screenshot("orthogonal-one-slider.png");
     document->viewer->window()->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly)->setValue(25);
     xzWindow->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly)->setValue(50);
     yzWindow->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly)->setValue(80);
     EXPECT_EQ(document->views()[1]->slice(), 50u);
     EXPECT_EQ(document->viewer->slice(), 25u);
     EXPECT_EQ(document->views()[2]->slice(), 80u);
-    screenshot("orthogonal-slider-navigation.png");
+    screenshot("orthogonal-one-slider-navigation.png");
     QCoreApplication::sendEvent(document, &activated);
     window.commands().execute("view.linked"); settle();
     EXPECT_EQ(document->views().size(), 2);
@@ -636,11 +636,11 @@ TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
     document->views()[1]->window()->move(660, 32);
     auto *linkedWindow = document->views()[1]->window();
     linkedWindow->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly)->setValue(28);
-    linkedWindow->findChild<QSlider *>("channelSlider", Qt::FindDirectChildrenOnly)->setValue(1);
-    linkedWindow->findChild<QSlider *>("timeSlider", Qt::FindDirectChildrenOnly)->setValue(1);
+    window.panel("display")->findChild<QSpinBox *>("displayChannel")->setValue(2);
+    window.panel("display")->findChild<QSpinBox *>("displayTime")->setValue(2);
     EXPECT_EQ(document->viewer->slice(), 28u);
     EXPECT_EQ(other->viewer->slice(), 0u); EXPECT_DOUBLE_EQ(other->viewer->gamma(), 1);
-    screenshot("linked-window-sliders.png");
+    screenshot("linked-one-slider.png");
     window.commands().execute("view.single");
     EXPECT_EQ(document->views().size(), 1);
     auto *flat = window.addDocument(Image::allocate(PixelType::UInt8, {8, 8}));
@@ -651,6 +651,31 @@ TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
     document->close();
     QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
     EXPECT_TRUE(retiredWindow.isNull());
+}
+
+TEST(Desktop, DisplayChannelTimeSelectorsSynchronizeViewsAndFollowTheActiveDocument)
+{
+    MainWindow window;
+    auto *document = window.addDocument(Image::allocate(PixelType::UInt16, {10, 8, 6, 2, 4}));
+    document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    auto *channel = window.panel("display")->findChild<QSpinBox *>("displayChannel");
+    auto *time = window.panel("display")->findChild<QSpinBox *>("displayTime");
+    ASSERT_NE(channel, nullptr); ASSERT_NE(time, nullptr);
+    EXPECT_EQ(channel->maximum(), 2); EXPECT_EQ(time->maximum(), 4);
+    channel->setValue(2); time->setValue(3);
+    for (auto *view : document->views()) { EXPECT_EQ(view->channel(), 1u); EXPECT_EQ(view->time(), 2u); }
+    document->views()[1]->setSlice(3, 0, 3);
+    EXPECT_EQ(channel->value(), 1); EXPECT_EQ(time->value(), 4);
+    auto *flat = window.addDocument(Image::allocate(PixelType::UInt8, {4, 4}));
+    EXPECT_FALSE(channel->isEnabled()); EXPECT_FALSE(time->isEnabled());
+    EXPECT_EQ(channel->maximum(), 1); EXPECT_EQ(time->maximum(), 1);
+    QEvent activated(QEvent::WindowActivate); QCoreApplication::sendEvent(document, &activated);
+    EXPECT_TRUE(channel->isEnabled()); EXPECT_TRUE(time->isEnabled());
+    EXPECT_EQ(channel->value(), 1); EXPECT_EQ(time->value(), 4);
+    channel->setValue(2);
+    for (auto *view : document->views()) { EXPECT_EQ(view->channel(), 1u); EXPECT_EQ(view->time(), 3u); }
+    EXPECT_EQ(flat->viewer->channel(), 0u); EXPECT_EQ(flat->viewer->time(), 0u);
+    EXPECT_FALSE(document->modified);
 }
 
 TEST(Desktop, DisplaySlidersTrackValuesAutoRangeAndActiveDocument)

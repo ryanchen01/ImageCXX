@@ -134,6 +134,15 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     auto *form = new QFormLayout(displayPanel);
     form->setContentsMargins(12, 12, 12, 12);
     form->setSpacing(10);
+    channelIndex_ = new QSpinBox(displayPanel);
+    timeIndex_ = new QSpinBox(displayPanel);
+    channelIndex_->setObjectName("displayChannel");
+    timeIndex_->setObjectName("displayTime");
+    for (auto *spin : {channelIndex_, timeIndex_}) spin->setRange(1, 1);
+    channelIndex_->setAccessibleName(tr("Channel"));
+    timeIndex_->setAccessibleName(tr("Time"));
+    form->addRow(tr("Channel"), channelIndex_);
+    form->addRow(tr("Time"), timeIndex_);
     minimum_ = new QDoubleSpinBox(displayPanel);
     maximum_ = new QDoubleSpinBox(displayPanel);
     for (auto *spin : {minimum_, maximum_}) { spin->setRange(-1e15, 1e15); spin->setDecimals(5); }
@@ -1119,6 +1128,13 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     connect(measureButton, &QPushButton::clicked, this, [this] { executeCommand("analyze.measure"); });
     connect(autoRange, &QPushButton::clicked, this, [this] { if (auto *doc = activeDocument()) doc->viewer->autoWindow(); });
     connect(fitButton, &QPushButton::clicked, this, [this] { if (auto *doc = activeDocument()) doc->viewer->fitToWindow(); });
+    const auto applyChannelTime = [this] {
+        if (loadingPanels_) return;
+        if (auto *doc = activeDocument())
+            doc->viewer->setSlice(doc->viewer->slice(), channelIndex_->value() - 1, timeIndex_->value() - 1);
+    };
+    connect(channelIndex_, &QSpinBox::valueChanged, this, applyChannelTime);
+    connect(timeIndex_, &QSpinBox::valueChanged, this, applyChannelTime);
     const auto applyDisplay = [this] {
         if (loadingPanels_) return;
         if (auto *doc = activeDocument()) {
@@ -1725,10 +1741,19 @@ void MainWindow::updateDisplayControls()
     if (loadingPanels_) return;
     QScopedValueRollback loading(loadingPanels_, true);
     const auto *doc = activeDocument();
-    for (auto *widget : std::initializer_list<QWidget *>{minimum_, maximum_, gamma_, minimumSlider_, maximumSlider_, gammaSlider_, inverted_, linear_, composite_}) widget->setEnabled(doc != nullptr);
+    for (auto *widget : std::initializer_list<QWidget *>{minimum_, maximum_, gamma_, minimumSlider_, maximumSlider_, gammaSlider_, inverted_, linear_, composite_, channelIndex_, timeIndex_}) widget->setEnabled(doc != nullptr);
     lutMenu_->menuAction()->setEnabled(doc != nullptr);
     for (auto *action : lutMenu_->actions()) action->setChecked(doc && action->data().toString() == doc->viewer->lut());
     if (doc) {
+        for (const auto &[spin, count, value] : {
+                 std::tuple{channelIndex_, doc->image.channels(), doc->viewer->channel()},
+                 std::tuple{timeIndex_, doc->image.frames(), doc->viewer->time()}}) {
+            const QSignalBlocker blocker(spin);
+            spin->setRange(1, int(std::min<std::size_t>(count, std::numeric_limits<int>::max())));
+            spin->setValue(int(std::min<std::size_t>(value + 1, std::numeric_limits<int>::max())));
+            spin->setSuffix(tr(" / %1").arg(count));
+            spin->setEnabled(count > 1);
+        }
         minimum_->setValue(doc->viewer->windowMinimum()); maximum_->setValue(doc->viewer->windowMaximum());
         gamma_->setValue(doc->viewer->gamma());
         const auto [sliceMinimum, sliceMaximum] = doc->viewer->sliceRange();

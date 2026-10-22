@@ -13,6 +13,7 @@ class QListWidget;
 class QTableView;
 class QStandardItemModel;
 class QDoubleSpinBox;
+class QSpinBox;
 class QSlider;
 class QCheckBox;
 class QLabel;
@@ -55,6 +56,8 @@ private:
     QDoubleSpinBox *minimum_;
     QDoubleSpinBox *maximum_;
     QDoubleSpinBox *gamma_;
+    QSpinBox *channelIndex_;
+    QSpinBox *timeIndex_;
     QSlider *minimumSlider_;
     QSlider *maximumSlider_;
     QSlider *gammaSlider_;

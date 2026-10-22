@@ -59,8 +59,8 @@ private:
     QComboBox *modeChoice_;
     QList<ImageViewer *> views_;
     struct NavigationControls {
-        std::array<QSlider *, 3> sliders;
-        std::array<QLabel *, 3> labels;
+        QSlider *slice;
+        QLabel *axis;
         QLabel *position;
     };
     QList<NavigationControls> navigation_;

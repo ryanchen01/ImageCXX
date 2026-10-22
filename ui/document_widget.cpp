@@ -62,24 +62,18 @@ void DocumentWidget::addNavigationControls(ImageViewer *view, int index, QVBoxLa
         bar->addWidget(modeChoice_);
     }
     NavigationControls controls{};
-    const std::array<QString, 3> names{QStringLiteral("slice"), QStringLiteral("channel"), QStringLiteral("time")};
-    for (std::size_t axis = 0; axis < controls.sliders.size(); ++axis) {
-        auto *label = new QLabel(window);
-        label->setObjectName(names[axis] + "AxisLabel");
-        auto *slider = new QSlider(Qt::Horizontal, window);
-        slider->setObjectName(names[axis] + "Slider");
-        label->setBuddy(slider);
-        controls.labels[axis] = label;
-        controls.sliders[axis] = slider;
-        bar->addWidget(label);
-        bar->addWidget(slider, 1);
-        connect(slider, &QSlider::valueChanged, this, [this, index] {
-            const auto &sliders = navigation_[index].sliders;
-            auto position = spatial_;
-            position[viewAxes(index)[2]] = std::size_t(sliders[0]->value());
-            setPosition(position[0], position[1], position[2], sliders[1]->value(), sliders[2]->value());
-        });
-    }
+    controls.axis = new QLabel(window);
+    controls.axis->setObjectName("sliceAxisLabel");
+    controls.slice = new QSlider(Qt::Horizontal, window);
+    controls.slice->setObjectName("sliceSlider");
+    controls.axis->setBuddy(controls.slice);
+    bar->addWidget(controls.axis);
+    bar->addWidget(controls.slice, 1);
+    connect(controls.slice, &QSlider::valueChanged, this, [this, index](int value) {
+        auto position = spatial_;
+        position[viewAxes(index)[2]] = std::size_t(value);
+        setPosition(position[0], position[1], position[2], viewer->channel(), viewer->time());
+    });
     controls.position = new QLabel(window);
     controls.position->setObjectName("slicePosition");
     bar->addWidget(controls.position);
@@ -277,24 +271,17 @@ void DocumentWidget::updateNavigation(std::size_t channel, std::size_t time)
         }
 
         auto &controls = navigation_[i];
-        const std::array<std::size_t, 3> lengths{image.dimension(axes[2]), image.channels(), image.frames()};
-        const std::array<std::size_t, 3> positions{spatial_[axes[2]], channel, time};
-        const std::array<QString, 3> labels{names[int(axes[2])], tr("C"), tr("T")};
-        const std::array<QString, 3> accessibleNames{tr("%1 slice").arg(labels[0]), tr("Channel"), tr("Time")};
-        for (std::size_t axis = 0; axis < controls.sliders.size(); ++axis) {
-            auto *slider = controls.sliders[axis];
-            const QSignalBlocker blocker(slider);
-            const auto maximum = std::min<std::size_t>(lengths[axis] - 1, std::numeric_limits<int>::max());
-            slider->setRange(0, int(maximum));
-            slider->setValue(int(std::min(positions[axis], maximum)));
-            slider->setEnabled(lengths[axis] > 1);
-            slider->setVisible(lengths[axis] > 1);
-            slider->setAccessibleName(accessibleNames[axis]);
-            controls.labels[axis]->setText(labels[axis]);
-            controls.labels[axis]->setVisible(lengths[axis] > 1);
-        }
-        controls.position->setText(tr("%1 %2/%3  C %4/%5  T %6/%7").arg(labels[0])
-            .arg(positions[0] + 1).arg(lengths[0]).arg(channel + 1).arg(image.channels()).arg(time + 1).arg(image.frames()));
+        const auto length = image.dimension(axes[2]);
+        const auto position = spatial_[axes[2]];
+        const auto axis = names[int(axes[2])];
+        const QSignalBlocker blocker(controls.slice);
+        const auto maximum = std::min<std::size_t>(length - 1, std::numeric_limits<int>::max());
+        controls.slice->setRange(0, int(maximum));
+        controls.slice->setValue(int(std::min(position, maximum)));
+        controls.slice->setEnabled(length > 1);
+        controls.slice->setAccessibleName(tr("%1 slice").arg(axis));
+        controls.axis->setText(axis);
+        controls.position->setText(tr("%1/%2").arg(position + 1).arg(length));
     }
 }
 

@@ -181,48 +181,36 @@ TEST(Viewer, OrthogonalViewsNavigateTheSameVoxelAndKeepOriginalModelAndXYSelecti
     EXPECT_DOUBLE_EQ(document.image.sample(7, 3, 4, 1, 2), image.sample(7, 3, 4, 1, 2));
 }
 
-TEST(Viewer, EachWindowHasItsOwnSliceSliderAndSynchronizedChannelTimeControls)
+TEST(Viewer, EachWindowHasExactlyOneSliderForItsPlane)
 {
     DocumentWidget document(Image::allocate(PixelType::UInt16, {10, 8, 6, 2, 3}));
     document.setViewMode(DocumentWidget::ViewMode::Orthogonal);
-    std::array<QSlider *, 3> slices{}, channels{}, times{};
+    std::array<QSlider *, 3> slices{};
     const std::array<QString, 3> axes{"Z", "Y", "X"};
     const std::array<int, 3> maxima{5, 7, 9};
     for (int i = 0; i < document.views().size(); ++i) {
         auto *window = document.views()[i]->window();
-        slices[i] = window->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly);
-        channels[i] = window->findChild<QSlider *>("channelSlider", Qt::FindDirectChildrenOnly);
-        times[i] = window->findChild<QSlider *>("timeSlider", Qt::FindDirectChildrenOnly);
-        ASSERT_NE(slices[i], nullptr); ASSERT_NE(channels[i], nullptr); ASSERT_NE(times[i], nullptr);
+        const auto sliders = window->findChildren<QSlider *>(QString{}, Qt::FindDirectChildrenOnly);
+        ASSERT_EQ(sliders.size(), 1);
+        slices[i] = sliders.front();
         EXPECT_EQ(slices[i]->parentWidget(), window);
         EXPECT_EQ(slices[i]->maximum(), maxima[i]);
         EXPECT_EQ(slices[i]->accessibleName(), axes[i] + " slice");
         EXPECT_EQ(window->findChild<QLabel *>("sliceAxisLabel", Qt::FindDirectChildrenOnly)->text(), axes[i]);
     }
-    EXPECT_NE(slices[0], slices[1]); EXPECT_NE(slices[1], slices[2]);
+    document.viewer->setSlice(0, 1, 2);
     slices[0]->setValue(4); slices[1]->setValue(5); slices[2]->setValue(7);
     EXPECT_EQ(document.spatialPosition(), (std::array<std::size_t, 3>{7, 5, 4}));
     EXPECT_EQ(document.viewer->slice(), 4u);
     EXPECT_EQ(document.views()[1]->slice(), 5u); EXPECT_EQ(document.views()[2]->slice(), 7u);
-    channels[1]->setValue(1); times[2]->setValue(2);
-    for (int i = 0; i < document.views().size(); ++i) {
-        EXPECT_EQ(channels[i]->value(), 1); EXPECT_EQ(times[i]->value(), 2);
-        EXPECT_EQ(document.views()[i]->channel(), 1u); EXPECT_EQ(document.views()[i]->time(), 2u);
-    }
+    for (auto *view : document.views()) { EXPECT_EQ(view->channel(), 1u); EXPECT_EQ(view->time(), 2u); }
     document.viewer->setSlice(2, 0, 1);
     EXPECT_EQ(slices[0]->value(), 2);
-    for (int i = 0; i < document.views().size(); ++i) {
-        EXPECT_EQ(channels[i]->value(), 0); EXPECT_EQ(times[i]->value(), 1);
-    }
     document.views()[1]->positionPicked({1.5, 3.5});
     EXPECT_EQ(slices[0]->value(), 3); EXPECT_EQ(slices[1]->value(), 5); EXPECT_EQ(slices[2]->value(), 1);
     document.replaceImage(Image::allocate(PixelType::UInt16, {3, 2, 2}), "Shrink");
     EXPECT_EQ(slices[0]->maximum(), 1); EXPECT_EQ(slices[1]->maximum(), 1); EXPECT_EQ(slices[2]->maximum(), 2);
-    for (int i = 0; i < document.views().size(); ++i) {
-        EXPECT_EQ(slices[i]->value(), 1);
-        EXPECT_FALSE(channels[i]->isEnabled()); EXPECT_TRUE(channels[i]->isHidden());
-        EXPECT_FALSE(times[i]->isEnabled()); EXPECT_TRUE(times[i]->isHidden());
-    }
+    for (auto *slice : slices) EXPECT_EQ(slice->value(), 1);
     document.setViewMode(DocumentWidget::ViewMode::Linked);
     auto *linkedSlice = document.views()[1]->window()->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly);
     ASSERT_NE(linkedSlice, nullptr);
@@ -232,6 +220,8 @@ TEST(Viewer, EachWindowHasItsOwnSliceSliderAndSynchronizedChannelTimeControls)
     document.setViewMode(DocumentWidget::ViewMode::Single);
     slices[0]->setValue(1);
     EXPECT_EQ(document.viewer->slice(), 1u);
+    document.replaceImage(Image::allocate(PixelType::UInt16, {3, 2}), "Flatten");
+    EXPECT_EQ(slices[0]->maximum(), 0); EXPECT_FALSE(slices[0]->isEnabled());
 }
 
 TEST(Viewer, OrthogonalViewsRespectVoxelSpacingAndRefreshAfterEditsAndShapeChanges)
