@@ -551,9 +551,9 @@ TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
     auto *toolbar = window.findChild<QToolBar *>("imageTools");
     auto *orthogonal = window.findChild<QAction *>("view.orthogonal");
     ASSERT_NE(toolbar, nullptr); ASSERT_NE(orthogonal, nullptr);
-    auto *orthogonalButton = qobject_cast<QToolButton *>(toolbar->widgetForAction(orthogonal));
-    ASSERT_NE(orthogonalButton, nullptr);
-    EXPECT_FALSE(orthogonalButton->isEnabled());
+    EXPECT_FALSE(toolbar->actions().contains(orthogonal));
+    EXPECT_EQ(toolbar->widgetForAction(orthogonal), nullptr);
+    EXPECT_FALSE(orthogonal->isEnabled());
     bool inMenu = false;
     for (auto *menu : window.findChildren<QMenu *>()) if (menu->actions().contains(orthogonal)) inMenu = true;
     EXPECT_TRUE(inMenu);
@@ -579,11 +579,9 @@ TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
     auto *other = window.addDocument(Image::allocate(PixelType::UInt8, {8, 8}));
     auto *document = window.addDocument(image);
     EXPECT_TRUE(window.findChild<QAction *>("view.orthogonal")->isEnabled());
-    orthogonalButton->click();
+    orthogonal->trigger();
     EXPECT_EQ(document->viewMode(), DocumentWidget::ViewMode::Orthogonal);
     EXPECT_TRUE(window.findChild<QAction *>("view.orthogonal")->isChecked());
-    EXPECT_TRUE(orthogonalButton->isChecked());
-    EXPECT_EQ(orthogonalButton->text(), "Ortho");
     for (auto *view : document->views())
         EXPECT_TRUE(view->window()->findChildren<QComboBox *>(QString{}, Qt::FindDirectChildrenOnly).isEmpty());
     EXPECT_EQ(window.documents().size(), 2);
@@ -635,14 +633,14 @@ TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
     EXPECT_TRUE(window.findChild<QAction *>("view.orthogonal")->isChecked());
     EXPECT_EQ(document->views()[1]->window(), xzWindow);
     EXPECT_TRUE(xzWindow->isVisible());
-    screenshot("orthogonal-toolbar.png");
+    screenshot("orthogonal-menu-only.png");
     document->viewer->window()->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly)->setValue(25);
     xzWindow->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly)->setValue(50);
     yzWindow->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly)->setValue(80);
     EXPECT_EQ(document->views()[1]->slice(), 50u);
     EXPECT_EQ(document->viewer->slice(), 25u);
     EXPECT_EQ(document->views()[2]->slice(), 80u);
-    screenshot("orthogonal-toolbar-navigation.png");
+    screenshot("orthogonal-menu-navigation.png");
     QCoreApplication::sendEvent(document, &activated);
     window.commands().execute("view.linked"); settle();
     EXPECT_EQ(document->views().size(), 2);
@@ -660,7 +658,6 @@ TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
     EXPECT_EQ(document->views().size(), 1);
     auto *flat = window.addDocument(Image::allocate(PixelType::UInt8, {8, 8}));
     EXPECT_FALSE(window.findChild<QAction *>("view.orthogonal")->isEnabled());
-    EXPECT_FALSE(orthogonalButton->isEnabled());
     EXPECT_EQ(flat->viewMode(), DocumentWidget::ViewMode::Single);
     document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
     QPointer<QWidget> retiredWindow(document->views()[1]->window());
