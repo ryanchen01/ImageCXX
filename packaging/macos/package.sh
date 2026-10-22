@@ -23,8 +23,17 @@ cleanup() {
 trap cleanup EXIT
 umask 077
 python3 - "$temporary" <<'PY'
-import base64, os, pathlib, sys
+import base64, binascii, os, pathlib, sys
 folder = pathlib.Path(sys.argv[1])
+sparkle_key = "".join(os.environ["SPARKLE_PRIVATE_KEY"].split())
+try:
+    sparkle_secret = base64.b64decode(sparkle_key, validate=True)
+except (ValueError, binascii.Error):
+    raise SystemExit("SPARKLE_PRIVATE_KEY must be base64 key data exported with Sparkle generate_keys -x.")
+# Sparkle 2.10 accepts a 32-byte seed or a 96-byte legacy key pair.
+if len(sparkle_secret) not in (32, 96):
+    raise SystemExit("SPARKLE_PRIVATE_KEY must decode to a 32-byte seed or 96-byte legacy Sparkle key pair.")
+(folder / "sparkle-private-key").write_text(sparkle_key + "\n")
 (folder / "certificate.p12").write_bytes(base64.b64decode("".join(os.environ["MACOS_CERTIFICATE_P12"].split()), validate=True))
 key = os.environ["APPSTORE_API_PRIVATE_KEY"].strip()
 (folder / "AuthKey.p8").write_bytes(key.encode() if key.startswith("-----BEGIN") else base64.b64decode("".join(key.split()), validate=True))
@@ -99,7 +108,11 @@ xcrun notarytool submit "$dmg" --key "$temporary/AuthKey.p8" \
 python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["status"] == "Accepted", "DMG notarization failed"' "$temporary/dmg-notary.json"
 xcrun stapler staple "$dmg"
 xcrun stapler validate "$dmg"
-signature=$(printf '%s' "$SPARKLE_PRIVATE_KEY" | build/tools/bin/sign_update --ed-key-file - -p "$dmg")
+if ! signature=$(build/tools/bin/sign_update --ed-key-file "$temporary/sparkle-private-key" -p "$dmg"); then
+    # Sparkle can print private key input in its stdout diagnostics. Keep that output private.
+    echo 'Sparkle update signing failed after key-format validation; check the exported Sparkle key and signer compatibility.' >&2
+    exit 1
+fi
 public_key=$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$app/Contents/Info.plist")
 # Fail the release if the CI private key does not match the public key shipped in the app.
 swift - "$dmg" "$signature" "$public_key" <<'SWIFT'
