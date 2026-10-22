@@ -140,6 +140,10 @@ jobs:
       - name: Run tests
         run: ctest --preset release-vcpkg --timeout 120
 
+      - name: Test macOS packaging audit
+        if: runner.os == 'macOS'
+        run: python3 tests/macos_package_tests.py
+
       - name: Package Windows installer
         if: runner.os == 'Windows'
         shell: pwsh

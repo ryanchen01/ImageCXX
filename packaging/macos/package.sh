@@ -50,6 +50,7 @@ for driver in (pathlib.Path(app) / "Contents/PlugIns/sqldrivers").glob("*.dylib"
     if driver.name != "libqsqlite.dylib":
         driver.unlink()
 magic = {bytes.fromhex(value) for value in ("feedface", "cefaedfe", "feedfacf", "cffaedfe", "cafebabe", "bebafeca", "cafebabf", "bfbafeca")}
+dependency_commands = {"LC_LOAD_DYLIB", "LC_LOAD_WEAK_DYLIB", "LC_REEXPORT_DYLIB", "LC_LOAD_UPWARD_DYLIB", "LC_LAZY_LOAD_DYLIB"}
 for folder, dirs, files in os.walk(app, topdown=False):
     for name in files:
         path = pathlib.Path(folder) / name
@@ -58,11 +59,20 @@ for folder, dirs, files in os.walk(app, topdown=False):
         with path.open("rb") as file:
             is_macho = file.read(4) in magic
         if is_macho:
-            dependencies = subprocess.check_output(["otool", "-L", str(path)], text=True).splitlines()[1:]
-            for dependency in dependencies:
-                library = dependency.strip().split(" (", 1)[0]
-                if library.startswith("/") and not library.startswith(("/System/Library/", "/usr/lib/", "/Library/Apple/System/Library/")):
-                    raise RuntimeError(f"Unbundled dependency in {path}: {library}")
+            # Unlike -L, inspect dependency commands without treating LC_ID_DYLIB as a load.
+            load_commands = subprocess.check_output(["otool", "-l", str(path)], text=True).splitlines()
+            command = None
+            for line in load_commands:
+                fields = line.strip().split(maxsplit=1)
+                if len(fields) != 2:
+                    continue
+                field, value = fields
+                if field == "cmd":
+                    command = value
+                elif field == "name" and command in dependency_commands:
+                    library = value.rsplit(" (offset ", 1)[0]
+                    if library.startswith("/") and not library.startswith(("/System/Library/", "/usr/lib/", "/Library/Apple/System/Library/")):
+                        raise RuntimeError(f"Unbundled dependency in {path}: {library}")
             subprocess.run(["codesign", "--force", "--sign", identity, "--keychain", keychain,
                 "--options", "runtime", "--timestamp", "--preserve-metadata=entitlements", str(path)], check=True)
     if folder != app and folder.endswith((".app", ".xpc", ".framework", ".bundle")):
