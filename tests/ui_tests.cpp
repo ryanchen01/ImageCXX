@@ -691,6 +691,36 @@ TEST(Desktop, DisplayChannelTimeSelectorsSynchronizeViewsAndFollowTheActiveDocum
     EXPECT_FALSE(document->modified);
 }
 
+TEST(Desktop, IntersectionNavigationPreservesDocumentPanels)
+{
+    MainWindow window;
+    auto *document = window.addDocument(Image::allocate(PixelType::UInt16, {10, 8, 6, 2, 3}));
+    document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    Roi roi; roi.name = "Saved selection"; roi.points = {{1, 1}, {4, 4}};
+    document->rois.push_back(roi); document->setSelection(roi);
+    auto *properties = window.panel("properties")->findChild<QTreeWidget *>();
+    auto *rois = window.panel("rois")->findChild<QListWidget *>();
+    auto *history = window.panel("history")->findChild<QListWidget *>();
+    ASSERT_NE(properties, nullptr); ASSERT_NE(rois, nullptr); ASSERT_NE(history, nullptr);
+    properties->topLevelItem(0)->setExpanded(true);
+    ASSERT_NE(rois->currentItem(), nullptr);
+    const auto selectedId = rois->currentItem()->data(Qt::UserRole);
+    int resets = 0;
+    for (auto *model : {properties->model(), rois->model(), history->model()})
+        QObject::connect(model, &QAbstractItemModel::modelReset, &window, [&] { ++resets; });
+    document->views()[1]->positionPicked({2.5, 1.5});
+    document->views()[1]->positionPicked({2.5, 1.5});
+    document->views()[2]->positionPicked({3.5, 4.5});
+    document->setPosition(2, 3, 4, 1, 2);
+    EXPECT_EQ(resets, 0);
+    EXPECT_TRUE(properties->topLevelItem(0)->isExpanded());
+    ASSERT_NE(rois->currentItem(), nullptr);
+    EXPECT_EQ(rois->currentItem()->data(Qt::UserRole), selectedId);
+    EXPECT_EQ(window.panel("display")->findChild<QSpinBox *>("displayChannel")->value(), 2);
+    EXPECT_EQ(window.panel("display")->findChild<QSpinBox *>("displayTime")->value(), 3);
+    for (auto *view : document->views()) { EXPECT_EQ(view->channel(), 1u); EXPECT_EQ(view->time(), 2u); }
+}
+
 TEST(Desktop, DisplaySlidersTrackValuesAutoRangeAndActiveDocument)
 {
     MainWindow window;
@@ -1756,11 +1786,14 @@ TEST(Desktop, SavingPixelsWithRoisClearsModifiedState)
     QTemporaryDir directory;
     MainWindow window;
     auto image = Image::allocate(PixelType::UInt16, {8, 8, 2});
+    image.metadata().name = "original.tif";
     auto *pixels = reinterpret_cast<std::uint16_t *>(image.mutableData());
     for (std::size_t i = 0; i < image.pixelCount(); ++i) pixels[i] = std::uint16_t(30000 + i * 17);
     auto *document = window.addDocument(image);
     Roi roi; roi.points = {{1, 1}, {5, 5}}; document->rois.push_back(roi);
     document->modified = true;
+    document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    for (auto *view : document->views()) EXPECT_TRUE(view->window()->windowTitle().contains("original.tif *"));
     const auto output = directory.filePath("saved.tif");
     QTimer::singleShot(0, &window, [output] {
         for (auto *widget : QApplication::topLevelWidgets()) if (auto *dialog = qobject_cast<QFileDialog *>(widget)) {
@@ -1782,6 +1815,10 @@ TEST(Desktop, SavingPixelsWithRoisClearsModifiedState)
             EXPECT_EQ(saved.sample(x, y, z), 30000 + ((z * 8 + y) * 8 + x) * 17);
     EXPECT_FALSE(document->modified);
     EXPECT_FALSE(document->title().endsWith(" *"));
+    for (auto *view : document->views()) {
+        EXPECT_TRUE(view->window()->windowTitle().startsWith("saved.tif"));
+        EXPECT_FALSE(view->window()->windowTitle().contains(" *"));
+    }
     EXPECT_EQ(document->rois.size(), 1u);
 }
 

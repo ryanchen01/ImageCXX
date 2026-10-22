@@ -813,7 +813,7 @@ void ImageViewer::fitToWindow()
     d->fitted = true;
     d->pan = {};
     if (!d->image.empty())
-        d->zoom = std::max(1e-6, std::min(double(width()) / double(d->image.width()),
+        d->zoom = std::max(minimumZoom, std::min(double(width()) / double(d->image.width()),
                                         double(height()) / (double(d->image.height()) * d->pixelAspect)));
     updateCanvas();
     Q_EMIT zoomChanged(d->zoom);
@@ -823,7 +823,7 @@ void ImageViewer::setZoom(double scale)
 {
     if (!std::isfinite(scale) || scale <= 0) return;
     d->fitted = false;
-    d->zoom = std::clamp(scale, 1e-6, 256.0);
+    d->zoom = std::clamp(scale, minimumZoom, maximumZoom);
     updateCanvas();
     Q_EMIT zoomChanged(d->zoom);
     Q_EMIT viewTransformChanged();
@@ -835,7 +835,7 @@ void ImageViewer::setViewTransform(double scale, QPointF center)
 {
     if (!std::isfinite(scale) || scale <= 0 || !std::isfinite(center.x()) || !std::isfinite(center.y())) return;
     d->fitted = false;
-    d->zoom = std::clamp(scale, 1e-6, 256.0);
+    d->zoom = std::clamp(scale, minimumZoom, maximumZoom);
     d->pan = QPointF((double(d->image.width()) / 2 - center.x()) * d->zoom,
         (double(d->image.height()) / 2 - center.y()) * d->zoom * d->pixelAspect);
     updateCanvas();

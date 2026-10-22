@@ -33,7 +33,6 @@ DocumentWidget::DocumentWidget(Image source, QWidget *parent) : QWidget(parent, 
     layout->addWidget(viewer, 1);
     connectViewer(viewer, 0);
     spatial_ = {image.width() / 2, image.height() / 2, 0};
-    center_ = {double(image.width()) / 2, double(image.height()) / 2, double(image.depth()) / 2};
     addNavigationControls(viewer, 0, layout);
     connect(this, &DocumentWidget::changed, this, [this] {
         setWindowTitle(title());
@@ -144,19 +143,30 @@ void DocumentWidget::synchronizeTransform(ImageViewer *source, int index)
     const auto axes = viewAxes(index);
     center_[axes[0]] = source->viewCenter().x();
     center_[axes[1]] = source->viewCenter().y();
+    if (source->fitsWindow()) {
+        for (auto *view : views_) if (view != source) view->fitToWindow();
+        return;
+    }
     const auto spacing = [this](std::size_t axis) {
         const auto &metadata = image.metadata().axes;
         if (viewMode_ != ViewMode::Orthogonal || metadata.size() < 3
             || metadata[axis].unit != metadata[0].unit) return 1.0;
         return metadata[axis].spacing / metadata[0].spacing;
     };
-    for (int i = 0; i < views_.size(); ++i) if (views_[i] != source) {
-        if (source->fitsWindow()) views_[i]->fitToWindow();
-        else {
-            const auto target = viewAxes(i);
-            views_[i]->setViewTransform(source->zoom() * spacing(target[0]) / spacing(axes[0]),
+    // Clamp one physical scale for the group before updating any window.
+    double minimum = ImageViewer::minimumZoom, maximum = ImageViewer::maximumZoom;
+    for (int i = 0; i < views_.size(); ++i) {
+        const auto factor = spacing(viewAxes(i)[0]);
+        minimum = std::max(minimum, ImageViewer::minimumZoom / factor);
+        maximum = std::min(maximum, ImageViewer::maximumZoom / factor);
+    }
+    const auto scale = std::max(minimum, std::min(source->zoom() / spacing(axes[0]), maximum));
+    for (int i = 0; i < views_.size(); ++i) {
+        const auto target = viewAxes(i);
+        const auto zoom = scale * spacing(target[0]);
+        if (views_[i] != source || zoom != source->zoom())
+            views_[i]->setViewTransform(zoom,
                 {center_[target[0]], center_[target[1]]});
-        }
     }
 }
 
@@ -237,7 +247,7 @@ void DocumentWidget::setPosition(std::size_t x, std::size_t y, std::size_t z, st
     QScopedValueRollback guard(synchronizing_, true);
     spatial_ = {std::min(x, image.width() - 1), std::min(y, image.height() - 1), std::min(z, image.depth() - 1)};
     updateNavigation(std::min(channel, image.channels() - 1), std::min(time, image.frames() - 1));
-    emit changed();
+    emit displayChanged();
 }
 
 void DocumentWidget::updateNavigation(std::size_t channel, std::size_t time)

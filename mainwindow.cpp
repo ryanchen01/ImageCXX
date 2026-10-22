@@ -307,7 +307,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                 if (showJobError(error)) return;
                 if (target && target->revision == revision) {
                     target->modified = false; target->image.metadata().sourcePath = QFileInfo(path).absoluteFilePath();
-                    target->image.metadata().name = QFileInfo(path).fileName(); updatePanels();
+                    target->image.metadata().name = QFileInfo(path).fileName(); emit target->changed();
                 }
                 statusBar()->showMessage(tr("Saved %1").arg(path), 5000);
             });

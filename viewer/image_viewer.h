@@ -40,6 +40,8 @@ public:
     bool linearInterpolation() const;
     void setComposite(bool enabled);
     bool composite() const;
+    static constexpr double minimumZoom = 1e-6;
+    static constexpr double maximumZoom = 256.0;
     void fitToWindow();
     void setZoom(double scale);
     double zoom() const;

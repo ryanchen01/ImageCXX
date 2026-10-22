@@ -257,6 +257,29 @@ TEST(Viewer, OrthogonalViewsRespectVoxelSpacingAndRefreshAfterEditsAndShapeChang
     EXPECT_EQ(document.viewMode(), DocumentWidget::ViewMode::Single);
 }
 
+TEST(Viewer, OrthogonalZoomLimitsKeepPhysicalScaleAcrossViews)
+{
+    for (const double ySpacing : {.5, 2.0}) {
+        ImageMetadata metadata;
+        metadata.axes = {{"X", 1, 0, "mm"}, {"Y", ySpacing, 0, "mm"}, {"Z", 3, 0, "mm"}};
+        DocumentWidget document(Image::allocate(PixelType::UInt16, {10, 8, 6}, metadata));
+        document.setViewMode(DocumentWidget::ViewMode::Orthogonal);
+        for (auto *source : document.views()) {
+            for (const double requested : {1e-12, 1e6}) {
+                source->setZoom(requested);
+                const double xyZoom = requested < 1 ? 1e-6 / std::min(1.0, ySpacing)
+                                                    : 256 / std::max(1.0, ySpacing);
+                EXPECT_DOUBLE_EQ(document.viewer->zoom(), xyZoom);
+                EXPECT_DOUBLE_EQ(document.views()[1]->zoom(), xyZoom);
+                EXPECT_DOUBLE_EQ(document.views()[2]->zoom(), xyZoom * ySpacing);
+                source->setZoom(source->zoom());
+                EXPECT_DOUBLE_EQ(document.viewer->zoom(), xyZoom);
+                EXPECT_DOUBLE_EQ(document.views()[2]->zoom(), xyZoom * ySpacing);
+            }
+        }
+    }
+}
+
 TEST(Viewer, OrthogonalViewsDecodeLazyStorageAndRetirePendingPlanes)
 {
     auto storage = std::make_shared<SlowSlices>();
