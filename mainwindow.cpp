@@ -1068,7 +1068,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         action->setIcon(QIcon(":/icons/" + iconNames[int(tool)] + ".svg")); action->setCheckable(true); tools_->addAction(action);
         if (tool == ImageViewer::Tool::Polygon) action->setToolTip(tr("Draw a polygon. Double-click to finish."));
         else if (tool == ImageViewer::Tool::Pan) action->setToolTip(tr("Drag to pan. Wheel to browse slices. Ctrl or Command + wheel to zoom. F to fit."));
-        action->setData(static_cast<int>(tool)); if (tool == ImageViewer::Tool::Pan) action->setChecked(true);
+        action->setData(static_cast<int>(tool)); if (tool == ImageViewer::Tool::Rectangle) action->setChecked(true);
         connect(action, &QAction::triggered, this, [this, tool] { if (auto *doc = activeDocument()) doc->viewer->setTool(tool); });
     }
     toolbar->addSeparator(); toolbar->addAction(findChild<QAction *>("analyze.measure"));

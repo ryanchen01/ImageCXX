@@ -352,7 +352,7 @@ public:
     double zoom = 1;
     QPointF pan;
     QPointF mouseImage{-1, -1}, lastMouse;
-    Tool tool = Tool::Pan;
+    Tool tool = Tool::Rectangle;
     std::vector<Roi> rois;
     std::optional<Roi> draft, selection, dragOriginal;
     bool editing = false;
