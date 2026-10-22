@@ -574,8 +574,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                    "The result opens in a new image window."));
         });
         update();
-        const std::stop_source rangeCancellation;
-        connect(&dialog, &QDialog::finished, &dialog, [rangeCancellation] { rangeCancellation.request_stop(); });
+        std::stop_source rangeCancellation;
+        connect(&dialog, &QDialog::finished, &dialog, [rangeCancellation]() mutable { rangeCancellation.request_stop(); });
         jobs_.submit(tr("Reading projection intensity range"), [input, range, rangeCancellation](auto stop, auto progress) {
             std::size_t rows = 0;
             const auto totalRows = input.height() * input.depth() * input.channels() * input.frames();
