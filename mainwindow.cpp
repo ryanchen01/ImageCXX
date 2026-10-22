@@ -930,6 +930,13 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     commands_.add({"view.fit", tr("Fit to window"), "View", QKeySequence("Ctrl+0"), true, {}, [this](const QVariantMap &) {
         if (auto *doc = activeDocument()) doc->viewer->fitToWindow();
     }});
+    const QList<QPair<QString, QString>> viewModes{{"view.single", tr("Single view")},
+        {"view.linked", tr("Linked view")}, {"view.orthogonal", tr("Orthogonal views")}};
+    for (int index = 0; index < viewModes.size(); ++index) {
+        commands_.add({viewModes[index].first, viewModes[index].second, "View", {}, true, {}, [this, index](const QVariantMap &) {
+            if (auto *doc = activeDocument()) doc->setViewMode(DocumentWidget::ViewMode(index));
+        }});
+    }
     commands_.add({"process.repeat", tr("Repeat command"), "Process", QKeySequence("Shift+R"), true, {}, [this](const QVariantMap &) {
         if (!repeatCommand_.isEmpty()) commands_.execute(repeatCommand_, repeatParameters_);
     }});
@@ -938,7 +945,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         if (window && window != this) window->close(); else if (active_) active_->close();
     }});
     commands_.add({"window.showAll", tr("Show all windows"), "View", QKeySequence("Shift+F"), false, {}, [this](const QVariantMap &) {
-        showNormal(); for (auto *doc : documents()) doc->showNormal();
+        showNormal(); for (auto *doc : documents()) doc->showViews();
         for (auto *panel : panels_) if (panel->isVisible() || panel->isMinimized()) panel->showNormal();
     }});
     commands_.add({"window.next", tr("Next image window"), "View", QKeySequence("Tab"), true, {}, [this](const QVariantMap &) {
@@ -1279,13 +1286,14 @@ DocumentWidget *MainWindow::addDocument(Image image)
         document->setWindowTitle(document->title());
         if (activeDocument() == document) updatePanels();
     });
-    connect(document->viewer, &ImageViewer::pixelHovered, this, [this, document](int x, int y, double value) {
+    connect(document, &DocumentWidget::pixelHovered, this, [this, document](std::size_t x, std::size_t y, std::size_t z, double value) {
         if (activeDocument() != document) return;
-        const auto text = tr("X %1   Y %2   Value %3").arg(x).arg(y).arg(value, 0, 'g', 12);
+        const auto text = tr("X %1   Y %2   Z %3   Value %4").arg(x).arg(y).arg(z).arg(value, 0, 'g', 12);
         pixelStatus_->setText(text);
         pixelStatus_->setToolTip(text);
     });
-    connect(document->viewer, &ImageViewer::displayRangeChanged, this, [this, document](double, double) {
+    connect(document, &DocumentWidget::viewError, this, [this](const QString &error) { statusBar()->showMessage(error, 15000); });
+    connect(document, &DocumentWidget::displayChanged, this, [this, document] {
         if (activeDocument() == document) updateDisplayControls();
     });
     connect(document->viewer, &ImageViewer::sliceReady, this, [this, document] {
@@ -1555,7 +1563,12 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
     if (!widget) return false;
     auto *top = widget->window();
     const auto docs = documents();
-    if (top != this && !isAncestorOf(top) && !docs.contains(qobject_cast<DocumentWidget *>(top))) return false;
+    DocumentWidget *imageDocument = nullptr;
+    for (auto *document : docs)
+        for (auto *view : document->views())
+            if (view->window() == top) imageDocument = document;
+    if (top != this && !isAncestorOf(top) && !imageDocument) return false;
+    if (imageDocument && event->type() == QEvent::KeyPress) setActiveDocument(imageDocument);
     auto *key = static_cast<QKeyEvent *>(event);
     if (top == panel("measurements") && key->key() == Qt::Key_Escape && !QApplication::activeModalWidget()) {
         if (event->type() == QEvent::KeyPress) top->close();
@@ -1570,6 +1583,8 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
             || qobject_cast<QComboBox *>(parent);
     }
     const bool canvas = qobject_cast<ImageViewer *>(widget) != nullptr;
+    const bool selectionCanvas = canvas && activeDocument()
+        && (widget == activeDocument()->viewer || activeDocument()->viewMode() != DocumentWidget::ViewMode::Orthogonal);
     // Keep Tab/Enter and arrow navigation local to controls and ROI drafts.
     if ((key->key() == Qt::Key_Tab || key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter)
         && !canvas && top != this) return false;
@@ -1579,7 +1594,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
     }
     if (canvas && (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter)
         && activeDocument() && activeDocument()->viewer->tool() == ImageViewer::Tool::Polygon) return false;
-    if (canvas && key->key() >= Qt::Key_Left && key->key() <= Qt::Key_Down
+    if (selectionCanvas && key->key() >= Qt::Key_Left && key->key() <= Qt::Key_Down
         && !(key->modifiers() & (Qt::ShiftModifier | Qt::ControlModifier))) {
         if (auto roi = selectedRoi()) {
             if (event->type() == QEvent::ShortcutOverride) { key->accept(); return true; }
@@ -1740,6 +1755,13 @@ void MainWindow::updatePanels()
     for (auto *action : imageActions_) action->setEnabled(doc != nullptr);
     findChild<QAction *>("stacks.reslice")->setEnabled(doc && doc->image.depth() > 1);
     findChild<QAction *>("stacks.project3d")->setEnabled(doc && doc->image.depth() > 1);
+    const QStringList viewCommands{"view.single", "view.linked", "view.orthogonal"};
+    for (int index = 0; index < viewCommands.size(); ++index) {
+        auto *action = findChild<QAction *>(viewCommands[index]);
+        action->setCheckable(true);
+        action->setChecked(doc && int(doc->viewMode()) == index);
+    }
+    findChild<QAction *>("view.orthogonal")->setEnabled(doc && doc->image.depth() > 1);
     metadata_->clear(); history_->clear();
     const QString selectedId = rois_->currentItem() ? rois_->currentItem()->data(Qt::UserRole).toString() : QString{};
     QSignalBlocker roiSignals(rois_); rois_->clear();
@@ -1813,6 +1835,15 @@ void MainWindow::updateWindowMenu()
             setActiveDocument(target);
             target->showNormal(); target->raise(); target->activateWindow();
         });
+        for (int index = 1; index < document->views().size(); ++index) {
+            const QPointer<QWidget> viewWindow(document->views()[index]->window());
+            auto *viewAction = windowMenu_->addAction(viewWindow->windowTitle());
+            connect(viewAction, &QAction::triggered, this, [this, target, viewWindow] {
+                if (!target || !viewWindow) return;
+                setActiveDocument(target);
+                viewWindow->showNormal(); viewWindow->raise(); viewWindow->activateWindow();
+            });
+        }
     }
     windowMenu_->addSeparator();
     windowMenu_->addAction(findChild<QAction *>("window.close"));

@@ -545,6 +545,108 @@ TEST(Desktop, StartsCompactAndOpensIndependentImageAndToolWindows)
     EXPECT_TRUE(window.isVisible());
 }
 
+TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
+{
+    MainWindow window;
+    ImageMetadata metadata;
+    metadata.name = "Calibration phantom";
+    metadata.axes = {{"X", .6, 0, "mm"}, {"Y", .6, 0, "mm"}, {"Z", 1.2, 0, "mm"}, {"C"}, {"T"}};
+    auto image = Image::allocate(PixelType::UInt16, {128, 112, 64, 2, 2}, metadata);
+    auto *pixels = reinterpret_cast<std::uint16_t *>(image.mutableData());
+    for (std::size_t t = 0; t < 2; ++t)
+        for (std::size_t c = 0; c < 2; ++c)
+            for (std::size_t z = 0; z < image.depth(); ++z)
+                for (std::size_t y = 0; y < image.height(); ++y)
+                    for (std::size_t x = 0; x < image.width(); ++x) {
+                        const double dx = (double(x) - 63.5) / 53, dy = (double(y) - 55.5) / 46, dz = (double(z) - 31.5) / 27;
+                        const double radius = std::sqrt(dx*dx + dy*dy + dz*dz);
+                        double value = radius < 1 ? 1500 + 220 * std::sin(dx*24) * std::cos(dy*20) * std::cos(dz*16) : 0;
+                        if (radius > .91 && radius < 1) value = 3300;
+                        if (std::pow((dx + .32) / .22, 2) + std::pow(dy / .38, 2) + std::pow(dz / .5, 2) < 1) value = 600;
+                        if (std::pow((dx - .3) / .2, 2) + std::pow((dy + .12) / .24, 2) + std::pow((dz - .08) / .3, 2) < 1) value = 2600;
+                        const auto offset = x + image.width() * (y + image.height() * (z + image.depth() * (c + image.channels()*t)));
+                        pixels[offset] = std::uint16_t(value * (1 + c*.08) + t*80);
+                    }
+    auto *other = window.addDocument(Image::allocate(PixelType::UInt8, {8, 8}));
+    auto *document = window.addDocument(image);
+    EXPECT_TRUE(window.findChild<QAction *>("view.orthogonal")->isEnabled());
+    window.commands().execute("view.orthogonal");
+    EXPECT_EQ(document->viewMode(), DocumentWidget::ViewMode::Orthogonal);
+    EXPECT_TRUE(window.findChild<QAction *>("view.orthogonal")->isChecked());
+    EXPECT_EQ(window.documents().size(), 2);
+    EXPECT_EQ(other->viewMode(), DocumentWidget::ViewMode::Single);
+    document->setPosition(64, 56, 32, 0, 0);
+    document->viewer->setWindow(0, 3600);
+    document->viewer->setScaleBarVisible(true);
+    document->viewer->setLinearInterpolation(true);
+    // Place windows for review captures only. The application leaves placement to the user.
+    document->resize(600, 650); document->move(16, 32);
+    document->views()[1]->window()->resize(480, 340); document->views()[1]->window()->move(660, 32);
+    document->views()[2]->window()->resize(480, 340); document->views()[2]->window()->move(660, 420);
+
+    const auto capture = qEnvironmentVariable("IMAGECXX_VIEWS_CAPTURE_DIR");
+    const auto settle = [] {
+        QElapsedTimer timer; timer.start();
+        while (timer.elapsed() < 350) { QCoreApplication::processEvents(); QThread::msleep(2); }
+    };
+    const auto screenshot = [&](const QString &name) {
+        if (capture.isEmpty()) return;
+        ASSERT_NE(QApplication::platformName(), "offscreen");
+        QDir().mkpath(capture);
+        other->hide();
+        document->showViews();
+        for (auto *view : document->views()) view->window()->raise();
+        document->activateWindow(); settle();
+        auto frame = document->frameGeometry();
+        for (auto *view : document->views()) frame = frame.united(view->window()->frameGeometry());
+        EXPECT_TRUE(document->screen()->grabWindow(0, frame.x(), frame.y(), frame.width(), frame.height()).save(capture + "/" + name));
+    };
+    settle();
+    auto *xzWindow = document->views()[1]->window();
+    auto *yzWindow = document->views()[2]->window();
+    EXPECT_NE(xzWindow, yzWindow); EXPECT_NE(xzWindow, document);
+    QEvent activated(QEvent::WindowActivate);
+    QCoreApplication::sendEvent(other, &activated);
+    EXPECT_EQ(window.activeDocument(), other);
+    QCoreApplication::sendEvent(xzWindow, &activated);
+    EXPECT_EQ(window.activeDocument(), document);
+    sendKey(document->views()[1], Qt::Key_I);
+    EXPECT_TRUE(window.panel("properties")->isVisible());
+    window.panel("properties")->hide();
+    xzWindow->close();
+    EXPECT_FALSE(xzWindow->isVisible()); EXPECT_TRUE(window.documents().contains(document));
+    QCoreApplication::sendEvent(document, &activated);
+    window.findChild<QAction *>("view.orthogonal")->trigger();
+    EXPECT_TRUE(window.findChild<QAction *>("view.orthogonal")->isChecked());
+    EXPECT_EQ(document->views()[1]->window(), xzWindow);
+    EXPECT_TRUE(xzWindow->isVisible());
+    screenshot("orthogonal-windows.png");
+    document->views()[1]->positionPicked({80.5, 25.5});
+    EXPECT_EQ(document->viewer->slice(), 25u);
+    EXPECT_EQ(document->views()[2]->slice(), 80u);
+    screenshot("orthogonal-linked-position.png");
+    QCoreApplication::sendEvent(document, &activated);
+    window.commands().execute("view.linked"); settle();
+    EXPECT_EQ(document->views().size(), 2);
+    EXPECT_NE(document->viewer->window(), document->views()[1]->window());
+    document->views()[1]->window()->resize(480, 420);
+    document->views()[1]->window()->move(660, 32);
+    document->views()[1]->setSlice(28, 1, 1);
+    EXPECT_EQ(document->viewer->slice(), 28u);
+    EXPECT_EQ(other->viewer->slice(), 0u); EXPECT_DOUBLE_EQ(other->viewer->gamma(), 1);
+    screenshot("synchronized-windows.png");
+    window.commands().execute("view.single");
+    EXPECT_EQ(document->views().size(), 1);
+    auto *flat = window.addDocument(Image::allocate(PixelType::UInt8, {8, 8}));
+    EXPECT_FALSE(window.findChild<QAction *>("view.orthogonal")->isEnabled());
+    EXPECT_EQ(flat->viewMode(), DocumentWidget::ViewMode::Single);
+    document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    QPointer<QWidget> linkedWindow(document->views()[1]->window());
+    document->close();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    EXPECT_TRUE(linkedWindow.isNull());
+}
+
 TEST(Desktop, DisplaySlidersTrackValuesAutoRangeAndActiveDocument)
 {
     MainWindow window;

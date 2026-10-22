@@ -290,6 +290,32 @@ Image Image::slice(std::size_t z, std::size_t channel, std::size_t time) const {
     return result;
 }
 
+Image Image::permutedSpatialAxes(std::array<std::size_t, 3> axes) const {
+    auto sorted = axes;
+    std::sort(sorted.begin(), sorted.end());
+    if (shape_.size() < 3 || sorted != std::array<std::size_t, 3>{0, 1, 2})
+        throw std::invalid_argument("A spatial view requires three distinct spatial axes");
+    Image result = *this;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        result.shape_[axis] = shape_[axes[axis]];
+        result.strides_[axis] = strides_[axes[axis]];
+        result.metadata_.axes[axis] = metadata_.axes[axes[axis]];
+    }
+    if (!metadata_.direction.empty()) {
+        const auto oldSize = std::size_t(std::sqrt(metadata_.direction.size()));
+        const auto size = std::max<std::size_t>(3, oldSize);
+        result.metadata_.direction.assign(size * size, 0);
+        for (std::size_t row = 0; row < size; ++row)
+            for (std::size_t col = 0; col < size; ++col) {
+                const auto sourceRow = row < 3 ? axes[row] : row;
+                const auto sourceCol = col < 3 ? axes[col] : col;
+                result.metadata_.direction[row * size + col] = sourceRow < oldSize && sourceCol < oldSize
+                    ? metadata_.direction[sourceRow * oldSize + sourceCol] : double(sourceRow == sourceCol);
+            }
+    }
+    return result;
+}
+
 Image Image::region(std::span<const std::size_t> start, std::span<const std::size_t> extent) const {
     if (start.size() != shape_.size() || extent.size() != shape_.size())
         throw std::invalid_argument("Region dimensionality mismatch");

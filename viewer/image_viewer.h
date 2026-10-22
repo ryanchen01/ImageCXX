@@ -43,6 +43,10 @@ public:
     void fitToWindow();
     void setZoom(double scale);
     double zoom() const;
+    bool fitsWindow() const;
+    QPointF viewCenter() const;
+    void setViewTransform(double scale, QPointF center);
+    void setPixelAspectRatio(double heightOverWidth);
     void setTool(Tool tool);
     Tool tool() const;
     void setRois(const std::vector<Roi> &rois);
@@ -50,6 +54,12 @@ public:
     void setMask(const Image &mask);
     void setCrosshairVisible(bool visible);
     void setScaleBarVisible(bool visible);
+    bool crosshairVisible() const;
+    bool scaleBarVisible() const;
+    void setViewLabel(const QString &label);
+    // A linked intersection uses image coordinates. Pan-tool drags move it;
+    // middle-button and Space drags continue to pan the image.
+    void setNavigationCrosshair(std::optional<QPointF> position);
     // Limits for retained decoded slices and GPU textures. Oversized slices fail.
     void setCacheBudgets(std::size_t decodedBytes, std::size_t gpuBytes);
     std::size_t decodedCacheBytes() const;
@@ -66,6 +76,11 @@ Q_SIGNALS:
     void selectionCleared();
     void displayRangeChanged(double minimum, double maximum);
     void zoomChanged(double scale);
+    void viewTransformChanged();
+    void displaySettingsChanged();
+    void toolChanged();
+    void overlaysChanged(bool crosshair, bool scaleBar);
+    void positionPicked(QPointF point);
     void loadingChanged(bool loading);
     void sliceReady();
     void loadFailed(const QString &message);

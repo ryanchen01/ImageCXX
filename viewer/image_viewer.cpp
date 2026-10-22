@@ -349,9 +349,12 @@ public:
     Image image, mask;
     std::size_t z = 0, channel = 0, time = 0;
     std::uint64_t imageRevision = 0;
-    double zoom = 1;
+    double zoom = 1, pixelAspect = 1;
     QPointF pan;
     QPointF mouseImage{-1, -1}, lastMouse;
+    std::optional<QPointF> navigationCrosshair;
+    QString viewLabel;
+    bool pickingPosition = false;
     Tool tool = Tool::Pan;
     std::vector<Roi> rois;
     std::optional<Roi> draft, selection, dragOriginal;
@@ -394,7 +397,7 @@ ImageViewer::ImageViewer(QWidget *parent) : QWidget(parent), d(std::make_unique<
             painter.setBrush(Qt::NoBrush);
             const QRectF bounds(imageToWidget(roi.bounds().topLeft()), imageToWidget(roi.bounds().bottomRight()));
             const auto origin = imageToWidget({0, 0});
-            const QTransform transform(d->zoom, 0, 0, d->zoom, origin.x(), origin.y());
+            const QTransform transform(d->zoom, 0, 0, d->zoom * d->pixelAspect, origin.x(), origin.y());
             if (draft && roi.type == RoiType::Polygon) {
                 QPolygonF points;
                 for (QPointF point : roi.points) points << imageToWidget(point);
@@ -429,6 +432,18 @@ ImageViewer::ImageViewer(QWidget *parent) : QWidget(parent), d(std::make_unique<
             painter.drawLine(QPointF(point.x(), 0), QPointF(point.x(), height()));
             painter.drawLine(QPointF(0, point.y()), QPointF(width(), point.y()));
         }
+        if (d->navigationCrosshair) {
+            const auto point = imageToWidget(*d->navigationCrosshair);
+            const auto bounds = QRectF(imageToWidget({0, 0}), imageToWidget(
+                {double(d->image.width()), double(d->image.height())}));
+            painter.save();
+            painter.setClipRect(bounds);
+            painter.setPen(QPen(QColor(70, 220, 235, 210), 1));
+            painter.drawLine(QPointF(point.x(), bounds.top()), QPointF(point.x(), bounds.bottom()));
+            painter.setPen(QPen(QColor(255, 213, 115, 210), 1));
+            painter.drawLine(QPointF(bounds.left(), point.y()), QPointF(bounds.right(), point.y()));
+            painter.restore();
+        }
         if (d->scaleBar && width() > 180 && height() > 100) {
             const auto &axes = d->image.metadata().axes;
             const double spacing = axes.empty() ? 1.0 : axes[0].spacing;
@@ -444,9 +459,17 @@ ImageViewer::ImageViewer(QWidget *parent) : QWidget(parent), d(std::make_unique<
                 painter.drawLine(end - QPointF(pixels, 0), end);
                 painter.setPen(QPen(Qt::white, 2));
                 painter.drawLine(end - QPointF(pixels, 0), end);
-                painter.drawText(QRectF(end.x() - pixels - 25, end.y() - 24, pixels + 50, 19),
+                const QRectF textRect(end.x() - pixels - 25, end.y() - 24, pixels + 50, 19);
+                painter.fillRect(textRect.adjusted(10, 0, -10, 0), QColor(0, 0, 0, 160));
+                painter.drawText(textRect,
                                  Qt::AlignCenter, QStringLiteral("%1 %2").arg(length, 0, 'g', 4).arg(unit));
             }
+        }
+        if (!d->viewLabel.isEmpty()) {
+            const QRect label(8, 8, painter.fontMetrics().horizontalAdvance(d->viewLabel) + 20, 28);
+            painter.fillRect(label, QColor(12, 18, 26, 210));
+            painter.setPen(QColor(230, 237, 246));
+            painter.drawText(label, Qt::AlignCenter, d->viewLabel);
         }
     };
 
@@ -590,6 +613,7 @@ ImageViewer::ImageViewer(QWidget *parent) : QWidget(parent), d(std::make_unique<
                                 d->canvas->minimum = decoded->minimum / divisor;
                                 d->canvas->maximum = decoded->maximum / divisor;
                                 Q_EMIT displayRangeChanged(decoded->minimum, decoded->maximum);
+                                Q_EMIT displaySettingsChanged();
                             }
                             updateCanvas();
                             Q_EMIT loadingChanged(false);
@@ -708,6 +732,7 @@ void ImageViewer::setWindow(double minimum, double maximum)
     d->canvas->maximum = maximum / divisor;
     updateCanvas();
     Q_EMIT displayRangeChanged(minimum, maximum);
+    Q_EMIT displaySettingsChanged();
 }
 double ImageViewer::windowMinimum() const
 {
@@ -732,6 +757,7 @@ void ImageViewer::autoWindow()
         d->canvas->minimum = minimum / divisor;
         d->canvas->maximum = maximum / divisor;
         Q_EMIT displayRangeChanged(minimum, maximum);
+        Q_EMIT displaySettingsChanged();
         updateCanvas();
     }
 }
@@ -741,6 +767,7 @@ void ImageViewer::setGamma(double gamma)
     if (d->canvas->gamma == gamma) return;
     d->canvas->gamma = gamma;
     updateCanvas();
+    Q_EMIT displaySettingsChanged();
 }
 double ImageViewer::gamma() const { return d->canvas->gamma; }
 void ImageViewer::setInverted(bool inverted)
@@ -748,6 +775,7 @@ void ImageViewer::setInverted(bool inverted)
     if (d->canvas->inverted == inverted) return;
     d->canvas->inverted = inverted;
     updateCanvas();
+    Q_EMIT displaySettingsChanged();
 }
 bool ImageViewer::isInverted() const { return d->canvas->inverted; }
 void ImageViewer::setLut(const QString &name)
@@ -757,6 +785,7 @@ void ImageViewer::setLut(const QString &name)
     if (d->canvas->lut == lut) return;
     d->canvas->lut = lut;
     updateCanvas();
+    Q_EMIT displaySettingsChanged();
 }
 QString ImageViewer::lut() const
 {
@@ -767,6 +796,7 @@ void ImageViewer::setLinearInterpolation(bool enabled)
     if (d->canvas->linear == enabled) return;
     d->canvas->linear = enabled;
     updateCanvas();
+    Q_EMIT displaySettingsChanged();
 }
 bool ImageViewer::linearInterpolation() const { return d->canvas->linear; }
 void ImageViewer::setComposite(bool enabled)
@@ -774,6 +804,7 @@ void ImageViewer::setComposite(bool enabled)
     if (d->composite == enabled) return;
     d->composite = enabled;
     requestSlice();
+    Q_EMIT displaySettingsChanged();
 }
 bool ImageViewer::composite() const { return d->composite; }
 
@@ -783,9 +814,10 @@ void ImageViewer::fitToWindow()
     d->pan = {};
     if (!d->image.empty())
         d->zoom = std::max(1e-6, std::min(double(width()) / double(d->image.width()),
-                                        double(height()) / double(d->image.height())));
+                                        double(height()) / (double(d->image.height()) * d->pixelAspect)));
     updateCanvas();
     Q_EMIT zoomChanged(d->zoom);
+    Q_EMIT viewTransformChanged();
 }
 void ImageViewer::setZoom(double scale)
 {
@@ -794,8 +826,28 @@ void ImageViewer::setZoom(double scale)
     d->zoom = std::clamp(scale, 1e-6, 256.0);
     updateCanvas();
     Q_EMIT zoomChanged(d->zoom);
+    Q_EMIT viewTransformChanged();
 }
 double ImageViewer::zoom() const { return d->zoom; }
+bool ImageViewer::fitsWindow() const { return d->fitted; }
+QPointF ImageViewer::viewCenter() const { return widgetToImage(QPointF(width(), height()) / 2); }
+void ImageViewer::setViewTransform(double scale, QPointF center)
+{
+    if (!std::isfinite(scale) || scale <= 0 || !std::isfinite(center.x()) || !std::isfinite(center.y())) return;
+    d->fitted = false;
+    d->zoom = std::clamp(scale, 1e-6, 256.0);
+    d->pan = QPointF((double(d->image.width()) / 2 - center.x()) * d->zoom,
+        (double(d->image.height()) / 2 - center.y()) * d->zoom * d->pixelAspect);
+    updateCanvas();
+    Q_EMIT zoomChanged(d->zoom);
+    Q_EMIT viewTransformChanged();
+}
+void ImageViewer::setPixelAspectRatio(double heightOverWidth)
+{
+    if (!std::isfinite(heightOverWidth) || heightOverWidth <= 0 || d->pixelAspect == heightOverWidth) return;
+    d->pixelAspect = heightOverWidth;
+    fitToWindow();
+}
 void ImageViewer::setTool(Tool tool)
 {
     d->tool = tool;
@@ -803,6 +855,7 @@ void ImageViewer::setTool(Tool tool)
     d->drawing = false; d->editing = false; d->dragOriginal.reset();
     setCursor(tool == Tool::Pan ? Qt::OpenHandCursor : Qt::CrossCursor);
     updateCanvas();
+    Q_EMIT toolChanged();
 }
 ImageViewer::Tool ImageViewer::tool() const { return d->tool; }
 void ImageViewer::setRois(const std::vector<Roi> &rois)
@@ -839,8 +892,27 @@ void ImageViewer::setMask(const Image &mask)
     }
     updateCanvas();
 }
-void ImageViewer::setCrosshairVisible(bool visible) { d->crosshair = visible; d->overlay->update(); }
-void ImageViewer::setScaleBarVisible(bool visible) { d->scaleBar = visible; d->overlay->update(); }
+void ImageViewer::setCrosshairVisible(bool visible)
+{
+    if (d->crosshair == visible) return;
+    d->crosshair = visible; d->overlay->update();
+    Q_EMIT overlaysChanged(d->crosshair, d->scaleBar);
+}
+void ImageViewer::setScaleBarVisible(bool visible)
+{
+    if (d->scaleBar == visible) return;
+    d->scaleBar = visible; d->overlay->update();
+    Q_EMIT overlaysChanged(d->crosshair, d->scaleBar);
+}
+void ImageViewer::setNavigationCrosshair(std::optional<QPointF> position)
+{
+    d->navigationCrosshair = position;
+    if (!position) d->pickingPosition = false;
+    d->overlay->update();
+}
+bool ImageViewer::crosshairVisible() const { return d->crosshair; }
+bool ImageViewer::scaleBarVisible() const { return d->scaleBar; }
+void ImageViewer::setViewLabel(const QString &label) { d->viewLabel = label; d->overlay->update(); }
 void ImageViewer::setCacheBudgets(std::size_t decodedBytes, std::size_t gpuBytes)
 {
     {
@@ -864,17 +936,19 @@ std::size_t ImageViewer::gpuCacheBytes() const { return d->canvas->gpuBytes; }
 QPointF ImageViewer::imageToWidget(QPointF point) const
 {
     const QPointF origin = QPointF(width(), height()) / 2.0 + d->pan
-        - QPointF(double(d->image.width()), double(d->image.height())) * (d->zoom / 2.0);
-    return origin + point * d->zoom;
+        - QPointF(double(d->image.width()), double(d->image.height()) * d->pixelAspect) * (d->zoom / 2.0);
+    return origin + QPointF(point.x() * d->zoom, point.y() * d->zoom * d->pixelAspect);
 }
 QPointF ImageViewer::widgetToImage(QPointF point) const
 {
-    return (point - imageToWidget({0, 0})) / d->zoom;
+    const auto offset = (point - imageToWidget({0, 0})) / d->zoom;
+    return {offset.x(), offset.y() / d->pixelAspect};
 }
 void ImageViewer::updateCanvas()
 {
     if (!d->image.empty())
-        d->canvas->imageRect = QRectF(imageToWidget({0, 0}), QSizeF(double(d->image.width()) * d->zoom, double(d->image.height()) * d->zoom));
+        d->canvas->imageRect = QRectF(imageToWidget({0, 0}), QSizeF(double(d->image.width()) * d->zoom,
+            double(d->image.height()) * d->zoom * d->pixelAspect));
     d->canvas->update();
     d->overlay->update();
 }
@@ -896,6 +970,7 @@ void ImageViewer::wheelEvent(QWheelEvent *event)
         setZoom(d->zoom * factor);
         d->pan += event->position() - imageToWidget(anchor);
         updateCanvas();
+        Q_EMIT viewTransformChanged();
     } else if (d->image.depth() > 1) {
         const auto step = event->angleDelta().y() > 0 ? -1 : 1;
         const auto z = std::clamp<qint64>(qint64(d->z) + step, 0, qint64(d->image.depth()) - 1);
@@ -905,6 +980,7 @@ void ImageViewer::wheelEvent(QWheelEvent *event)
         setZoom(d->zoom * std::pow(1.2, double(event->angleDelta().y()) / 120.0));
         d->pan += event->position() - imageToWidget(anchor);
         updateCanvas();
+        Q_EMIT viewTransformChanged();
     }
     event->accept();
 }
@@ -924,6 +1000,11 @@ void ImageViewer::mousePressEvent(QMouseEvent *event)
     const QPointF point = widgetToImage(event->position());
     const bool onImage = point.x() >= 0 && point.y() >= 0
         && point.x() < double(d->image.width()) && point.y() < double(d->image.height());
+    if (onImage && d->navigationCrosshair && d->tool == Tool::Pan) {
+        d->pickingPosition = true;
+        Q_EMIT positionPicked(point);
+        return;
+    }
     if (!d->draft) {
         if (d->editing && d->selection) {
             const auto handles = roiHandles(*d->selection);
@@ -941,7 +1022,7 @@ void ImageViewer::mousePressEvent(QMouseEvent *event)
             if (!roi.visible || roi.time != d->time
                 || (!d->composite && roi.channel != d->channel)) return false;
             const auto origin = imageToWidget({0, 0});
-            const QTransform transform(d->zoom, 0, 0, d->zoom, origin.x(), origin.y());
+            const QTransform transform(d->zoom, 0, 0, d->zoom * d->pixelAspect, origin.x(), origin.y());
             QPainterPathStroker stroker;
             stroker.setWidth(12);
             return roi.contains(point) || stroker.createStroke(transform.map(roiPath(roi))).contains(event->position());
@@ -1049,7 +1130,9 @@ void ImageViewer::mouseMoveEvent(QMouseEvent *event)
     if (d->panning) {
         d->pan += event->position() - d->lastMouse;
         updateCanvas();
-    } else if (d->drawing || d->dragOriginal) updateRoiDrag(point, event->modifiers());
+        Q_EMIT viewTransformChanged();
+    } else if (d->pickingPosition) Q_EMIT positionPicked(point);
+    else if (d->drawing || d->dragOriginal) updateRoiDrag(point, event->modifiers());
     d->lastMouse = event->position();
     const int x = int(std::floor(point.x())), y = int(std::floor(point.y()));
     if (x >= 0 && y >= 0 && std::size_t(x) < d->image.width() && std::size_t(y) < d->image.height()) {
@@ -1062,6 +1145,7 @@ void ImageViewer::mouseReleaseEvent(QMouseEvent *event)
 {
     if (event->button() == Qt::MiddleButton || event->button() == Qt::LeftButton) {
         d->panning = false;
+        d->pickingPosition = false;
         setCursor((d->tool == Tool::Pan || d->spacePan) ? Qt::OpenHandCursor : Qt::CrossCursor);
         if (d->drawing && d->draft && event->button() == Qt::LeftButton) {
             updateRoiDrag(widgetToImage(event->position()), event->modifiers());
@@ -1141,7 +1225,7 @@ void ImageViewer::keyReleaseEvent(QKeyEvent *event)
 
 void ImageViewer::focusOutEvent(QFocusEvent *event)
 {
-    d->spacePan = false; d->panning = false;
+    d->spacePan = false; d->panning = false; d->pickingPosition = false;
     if (d->dragOriginal) {
         d->selection = d->dragOriginal;
         d->dragOriginal.reset();

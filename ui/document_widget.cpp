@@ -1,5 +1,10 @@
 #include "document_widget.h"
 #include <QHBoxLayout>
+#include <QComboBox>
+#include <QScopedValueRollback>
+#include <QStandardItemModel>
+#include <QScreen>
+#include <cmath>
 #include <QLabel>
 #include <QSlider>
 #include <QVBoxLayout>
@@ -19,7 +24,7 @@ namespace imagecxx {
 // child first and reparenting afterward can leave the launcher's backing store
 // registered for graphics composition, including unrelated raster dialogs.
 DocumentWidget::DocumentWidget(Image source, QWidget *parent) : QWidget(parent, Qt::Window),
-    image(std::move(source)), viewer(new ImageViewer(this)), z_(new QSlider(Qt::Horizontal, this)),
+    image(std::move(source)), viewer(nullptr), z_(new QSlider(Qt::Horizontal, this)),
     channel_(new QSlider(Qt::Horizontal, this)), time_(new QSlider(Qt::Horizontal, this)),
     position_(new QLabel(this))
 {
@@ -27,9 +32,21 @@ DocumentWidget::DocumentWidget(Image source, QWidget *parent) : QWidget(parent, 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
+    viewer = new ImageViewer(this);
+    viewer->setObjectName("xyView");
+    views_.append(viewer);
     layout->addWidget(viewer, 1);
+    connectViewer(viewer, 0);
+    spatial_ = {image.width() / 2, image.height() / 2, 0};
+    center_ = {double(image.width()) / 2, double(image.height()) / 2, double(image.depth()) / 2};
     auto *bar = new QHBoxLayout;
     bar->setContentsMargins(14, 10, 14, 10);
+    modeChoice_ = new QComboBox(this);
+    modeChoice_->setObjectName("viewMode");
+    modeChoice_->setAccessibleName(tr("Views"));
+    modeChoice_->addItems({tr("Single view"), tr("Linked view"), tr("Orthogonal views")});
+    connect(modeChoice_, &QComboBox::activated, this, [this](int index) { setViewMode(ViewMode(index)); });
+    bar->addWidget(modeChoice_);
     std::size_t axisIndex = 0;
     for (auto pair : {std::pair{tr("Z"), z_}, {tr("C"), channel_}, {tr("T"), time_}}) {
         auto *label = new QLabel(pair.first, this);
@@ -37,27 +54,210 @@ DocumentWidget::DocumentWidget(Image source, QWidget *parent) : QWidget(parent, 
         bar->addWidget(label);
         bar->addWidget(pair.second, 1);
         connect(pair.second, &QSlider::valueChanged, this, [this] {
-            viewer->setSlice(z_->value(), channel_->value(), time_->value());
-
+            setPosition(spatial_[0], spatial_[1], z_->value(), channel_->value(), time_->value());
         });
     }
-    connect(viewer, &ImageViewer::sliceChanged, this, [this](std::size_t z, std::size_t c, std::size_t t) {
-        const QSignalBlocker bz(z_), bc(channel_), bt(time_);
-        z_->setValue(int(z)); channel_->setValue(int(c)); time_->setValue(int(t));
-        position_->setText(tr("Z %1/%2  C %3/%4  T %5/%6").arg(z + 1).arg(image.depth())
-            .arg(c + 1).arg(image.channels()).arg(t + 1).arg(image.frames()));
-        emit changed();
-    });
     bar->addWidget(position_);
     layout->addLayout(bar);
-    connect(viewer, &ImageViewer::roiCreated, this, [this](Roi roi) {
-        setSelection(std::move(roi));
+    connect(this, &DocumentWidget::changed, this, [this] {
+        setWindowTitle(title());
+        for (int i = 1; i < views_.size(); ++i) {
+            auto *window = views_[i]->window();
+            window->setWindowTitle(title() + " · " + window->property("viewLabel").toString());
+        }
     });
-    connect(viewer, &ImageViewer::roiSelected, this, [this](const Roi &roi) { setSelection(roi); });
-    connect(viewer, &ImageViewer::selectionCleared, this, [this] { setSelection({}); });
-    connect(viewer, &ImageViewer::roiEdited, this, &DocumentWidget::editRoi);
-    connect(this, &DocumentWidget::changed, this, [this] { setWindowTitle(title()); });
     refresh();
+}
+
+std::array<std::size_t, 3> DocumentWidget::viewAxes(int index) const
+{
+    if (viewMode_ == ViewMode::Orthogonal) {
+        if (index == 1) return {0, 2, 1};
+        if (index == 2) return {1, 2, 0};
+    }
+    return {0, 1, 2};
+}
+
+void DocumentWidget::connectViewer(ImageViewer *view, int index)
+{
+    connect(view, &ImageViewer::pixelHovered, this, [this, index](int x, int y, double value) {
+        auto point = spatial_;
+        const auto axes = viewAxes(index);
+        point[axes[0]] = std::size_t(x); point[axes[1]] = std::size_t(y);
+        emit pixelHovered(point[0], point[1], point[2], value);
+    });
+    if (index > 0) connect(view, &ImageViewer::loadFailed, this, &DocumentWidget::viewError);
+    connect(view, &ImageViewer::sliceChanged, this, [this, index](std::size_t z, std::size_t c, std::size_t t) {
+        if (synchronizing_) return;
+        spatial_[viewAxes(index)[2]] = z;
+        setPosition(spatial_[0], spatial_[1], spatial_[2], c, t);
+    });
+    connect(view, &ImageViewer::positionPicked, this, [this, index](QPointF point) {
+        const auto axes = viewAxes(index);
+        const auto coordinate = [this](double value, std::size_t axis) {
+            return std::size_t(std::clamp(std::floor(value), 0.0, double(image.dimension(axis) - 1)));
+        };
+        spatial_[axes[0]] = coordinate(point.x(), axes[0]);
+        spatial_[axes[1]] = coordinate(point.y(), axes[1]);
+        setPosition(spatial_[0], spatial_[1], spatial_[2], viewer->channel(), viewer->time());
+    });
+    connect(view, &ImageViewer::displaySettingsChanged, this, [this, view] { synchronizeDisplay(view); });
+    connect(view, &ImageViewer::viewTransformChanged, this, [this, view, index] { synchronizeTransform(view, index); });
+    connect(view, &ImageViewer::toolChanged, this, [this, view] {
+        if (synchronizing_ || viewMode_ == ViewMode::Orthogonal) return;
+        QScopedValueRollback guard(synchronizing_, true);
+        for (auto *other : views_) if (other != view) other->setTool(view->tool());
+    });
+    connect(view, &ImageViewer::overlaysChanged, this, [this, view](bool crosshair, bool scaleBar) {
+        if (synchronizing_) return;
+        QScopedValueRollback guard(synchronizing_, true);
+        for (auto *other : views_) if (other != view) {
+            other->setCrosshairVisible(crosshair); other->setScaleBarVisible(scaleBar);
+        }
+    });
+    connect(view, &ImageViewer::roiCreated, this, [this](const Roi &roi) { setSelection(roi); });
+    connect(view, &ImageViewer::roiSelected, this, [this](const Roi &roi) { setSelection(roi); });
+    connect(view, &ImageViewer::selectionCleared, this, [this] { setSelection({}); });
+    connect(view, &ImageViewer::roiEdited, this, &DocumentWidget::editRoi);
+}
+
+void DocumentWidget::synchronizeDisplay(ImageViewer *source)
+{
+    if (synchronizing_) return;
+    QScopedValueRollback guard(synchronizing_, true);
+    for (auto *view : views_) if (view != source) {
+        view->setWindow(source->windowMinimum(), source->windowMaximum());
+        view->setGamma(source->gamma());
+        view->setInverted(source->isInverted());
+        view->setLut(source->lut());
+        view->setLinearInterpolation(source->linearInterpolation());
+        view->setComposite(source->composite());
+    }
+    emit displayChanged();
+}
+
+void DocumentWidget::synchronizeTransform(ImageViewer *source, int index)
+{
+    if (synchronizing_) return;
+    QScopedValueRollback guard(synchronizing_, true);
+    const auto axes = viewAxes(index);
+    center_[axes[0]] = source->viewCenter().x();
+    center_[axes[1]] = source->viewCenter().y();
+    const auto spacing = [this](std::size_t axis) {
+        const auto &metadata = image.metadata().axes;
+        if (viewMode_ != ViewMode::Orthogonal || metadata.size() < 3
+            || metadata[axis].unit != metadata[0].unit) return 1.0;
+        return metadata[axis].spacing / metadata[0].spacing;
+    };
+    for (int i = 0; i < views_.size(); ++i) if (views_[i] != source) {
+        if (source->fitsWindow()) views_[i]->fitToWindow();
+        else {
+            const auto target = viewAxes(i);
+            views_[i]->setViewTransform(source->zoom() * spacing(target[0]) / spacing(axes[0]),
+                {center_[target[0]], center_[target[1]]});
+        }
+    }
+}
+
+void DocumentWidget::setViewMode(ViewMode mode)
+{
+    if (mode == ViewMode::Orthogonal && image.depth() < 2) return;
+    if (mode == viewMode_) {
+        showViews();
+        emit changed();
+        return;
+    }
+    {
+        QScopedValueRollback guard(synchronizing_, true);
+        while (views_.size() > 1) delete views_.takeLast()->window();
+        viewMode_ = mode;
+        const int count = mode == ViewMode::Single ? 1 : mode == ViewMode::Orthogonal ? 3 : 2;
+        for (int i = 1; i < count; ++i) {
+            // Establish each native window before constructing its RHI widget.
+            auto *window = new QWidget(this, Qt::Window);
+            window->setObjectName("synchronizedViewWindow");
+            window->setAttribute(Qt::WA_ShowWithoutActivating);
+            window->setAcceptDrops(true);
+            window->resize(viewer->size().expandedTo(QSize(320, 240)));
+            window->installEventFilter(this);
+            auto *contents = new QVBoxLayout(window);
+            contents->setContentsMargins(0, 0, 0, 0);
+            auto *view = new ImageViewer(window);
+            contents->addWidget(view);
+            view->setObjectName(mode == ViewMode::Orthogonal ? (i == 1 ? "xzView" : "yzView") : "linkedView");
+            const auto axes = viewAxes(i);
+            view->setImage(mode == ViewMode::Orthogonal ? image.permutedSpatialAxes(axes) : image);
+            view->setTool(mode == ViewMode::Orthogonal ? ImageViewer::Tool::Pan : viewer->tool());
+            view->setCrosshairVisible(viewer->crosshairVisible());
+            view->setScaleBarVisible(viewer->scaleBarVisible());
+            views_.append(view);
+            connectViewer(view, i);
+            connect(view, &ImageViewer::sliceReady, window, [this, window] {
+                window->setProperty("sliceReady", true);
+                if (isVisible()) window->show();
+            }, Qt::SingleShotConnection);
+        }
+        const QSignalBlocker blocker(modeChoice_);
+        modeChoice_->setCurrentIndex(int(mode));
+        for (int i = 0; i < views_.size(); ++i) {
+            const auto axes = viewAxes(i);
+            const auto &metadata = image.metadata().axes;
+            const double aspect = mode == ViewMode::Orthogonal && metadata[axes[0]].unit == metadata[axes[1]].unit
+                ? metadata[axes[1]].spacing / metadata[axes[0]].spacing : 1.0;
+            views_[i]->setPixelAspectRatio(aspect);
+            views_[i]->setToolTip(mode == ViewMode::Orthogonal
+                ? tr("Pan tool: click or drag to move the intersection. Wheel to browse. Ctrl+wheel to zoom. Middle-button or Space+drag to pan. Edit selections in XY.")
+                : tr("Wheel to browse. Ctrl+wheel to zoom. Drag with the Pan tool to pan. Windows stay synchronized."));
+        }
+        center_ = {double(image.width()) / 2, double(image.height()) / 2, double(image.depth()) / 2};
+        for (auto *view : views_) view->fitToWindow();
+        updateNavigation(viewer->channel(), viewer->time());
+    }
+    synchronizeDisplay(viewer);
+    refreshRois();
+    emit changed();
+}
+
+void DocumentWidget::showViews()
+{
+    showNormal();
+    for (int i = 1; i < views_.size(); ++i) {
+        auto *window = views_[i]->window();
+        if (window->property("sliceReady").toBool()) window->showNormal();
+    }
+}
+
+void DocumentWidget::setPosition(std::size_t x, std::size_t y, std::size_t z, std::size_t channel, std::size_t time)
+{
+    if (image.empty() || synchronizing_) return;
+    QScopedValueRollback guard(synchronizing_, true);
+    spatial_ = {std::min(x, image.width() - 1), std::min(y, image.height() - 1), std::min(z, image.depth() - 1)};
+    updateNavigation(std::min(channel, image.channels() - 1), std::min(time, image.frames() - 1));
+    emit changed();
+}
+
+void DocumentWidget::updateNavigation(std::size_t channel, std::size_t time)
+{
+    for (int i = 0; i < views_.size(); ++i) {
+        const auto axes = viewAxes(i);
+        views_[i]->setSlice(spatial_[axes[2]], channel, time);
+        const bool orthogonal = viewMode_ == ViewMode::Orthogonal;
+        views_[i]->setNavigationCrosshair(orthogonal
+            ? std::optional<QPointF>{{double(spatial_[axes[0]]) + .5, double(spatial_[axes[1]]) + .5}} : std::nullopt);
+        const QStringList names{QStringLiteral("X"), QStringLiteral("Y"), QStringLiteral("Z")};
+        const QString label = orthogonal ? tr("%1%2  ·  %3 %4/%5").arg(names[int(axes[0])], names[int(axes[1])], names[int(axes[2])])
+            .arg(spatial_[axes[2]] + 1).arg(image.dimension(axes[2])) : tr("Linked XY view");
+        views_[i]->setViewLabel(orthogonal ? label : QString{});
+        if (i > 0) {
+            views_[i]->window()->setProperty("viewLabel", label);
+            views_[i]->window()->setWindowTitle(title() + " · " + label);
+        }
+
+    }
+    const QSignalBlocker bz(z_), bc(channel_), bt(time_);
+    z_->setValue(int(spatial_[2])); channel_->setValue(int(channel)); time_->setValue(int(time));
+    position_->setText(tr("Z %1/%2  C %3/%4  T %5/%6").arg(spatial_[2] + 1).arg(image.depth())
+        .arg(channel + 1).arg(image.channels()).arg(time + 1).arg(image.frames()));
 }
 
 void DocumentWidget::dragEnterEvent(QDragEnterEvent *event)
@@ -85,8 +285,11 @@ void DocumentWidget::setSelection(std::optional<Roi> roi)
 
 void DocumentWidget::refreshRois()
 {
-    viewer->setRois(rois);
-    viewer->setSelection(selection);
+    for (int i = 0; i < views_.size(); ++i) {
+        const bool xy = viewAxes(i)[2] == 2;
+        views_[i]->setRois(xy ? rois : std::vector<Roi>{});
+        views_[i]->setSelection(xy ? selection : std::nullopt);
+    }
 }
 
 void DocumentWidget::editRoi(Roi roi)
@@ -135,34 +338,59 @@ void DocumentWidget::replaceImage(Image replacement, const QString &label)
 void DocumentWidget::refresh()
 {
     setWindowTitle(title());
-    const auto oldZ = viewer->slice(), oldC = viewer->channel(), oldT = viewer->time();
-    viewer->setImage(image, !viewer->image().empty());
-    const auto clampSlider = [](QSlider *slider, std::size_t size, std::size_t value) {
-        QSignalBlocker blocker(slider);
-        slider->setRange(0, static_cast<int>(std::min<std::size_t>(size - 1, std::numeric_limits<int>::max())));
-        slider->setValue(static_cast<int>(std::min(value, size - 1)));
-        slider->setEnabled(size > 1);
-    };
-    clampSlider(z_, image.depth(), oldZ);
-    clampSlider(channel_, image.channels(), oldC);
-    clampSlider(time_, image.frames(), oldT);
-    const std::array<QSlider *, 3> controls{z_, channel_, time_};
-    const std::array<std::size_t, 3> lengths{image.depth(), image.channels(), image.frames()};
-    for (std::size_t axis = 0; axis < controls.size(); ++axis) {
-        controls[axis]->setVisible(lengths[axis] > 1); axisLabels_[axis]->setVisible(lengths[axis] > 1);
+    const auto oldC = viewer->channel(), oldT = viewer->time();
+    if (viewMode_ == ViewMode::Orthogonal && image.depth() < 2) setViewMode(ViewMode::Single);
+    {
+        QScopedValueRollback guard(synchronizing_, true);
+        center_ = {double(image.width()) / 2, double(image.height()) / 2, double(image.depth()) / 2};
+        for (std::size_t axis = 0; axis < 3; ++axis)
+            spatial_[axis] = std::min(spatial_[axis], image.dimension(axis) - 1);
+        for (int i = 0; i < views_.size(); ++i) {
+            auto *view = views_[i];
+            view->setImage(viewMode_ == ViewMode::Orthogonal && i > 0
+                ? image.permutedSpatialAxes(viewAxes(i)) : image, !view->image().empty());
+            const auto axes = viewAxes(i);
+            const auto &metadata = image.metadata().axes;
+            view->setPixelAspectRatio(viewMode_ == ViewMode::Orthogonal
+                && metadata[axes[0]].unit == metadata[axes[1]].unit
+                ? metadata[axes[1]].spacing / metadata[axes[0]].spacing : 1.0);
+        }
+        const std::array<QSlider *, 3> controls{z_, channel_, time_};
+        const std::array<std::size_t, 3> lengths{image.depth(), image.channels(), image.frames()};
+        for (std::size_t axis = 0; axis < controls.size(); ++axis) {
+            const QSignalBlocker blocker(controls[axis]);
+            controls[axis]->setRange(0, int(std::min<std::size_t>(lengths[axis] - 1, std::numeric_limits<int>::max())));
+            controls[axis]->setEnabled(lengths[axis] > 1);
+            controls[axis]->setVisible(lengths[axis] > 1);
+            axisLabels_[axis]->setVisible(lengths[axis] > 1);
+        }
+        auto *choices = qobject_cast<QStandardItemModel *>(modeChoice_->model());
+        choices->item(int(ViewMode::Orthogonal))->setEnabled(image.depth() > 1);
+        updateNavigation(std::min(oldC, image.channels() - 1), std::min(oldT, image.frames() - 1));
     }
-    viewer->setSlice(z_->value(), channel_->value(), time_->value());
+    synchronizeDisplay(viewer);
     refreshRois();
-    position_->setText(tr("Z %1/%2  C %3/%4  T %5/%6").arg(z_->value() + 1)
-        .arg(image.depth()).arg(channel_->value() + 1).arg(image.channels())
-        .arg(time_->value() + 1).arg(image.frames()));
 }
 
 bool DocumentWidget::event(QEvent *event)
 {
     const bool handled = QWidget::event(event);
     if (event->type() == QEvent::WindowActivate) emit activated();
+    if (event->type() == QEvent::Show) {
+        for (int i = 1; i < views_.size(); ++i) {
+            auto *window = views_[i]->window();
+            if (window->property("sliceReady").toBool()) window->show();
+        }
+    }
     return handled;
+}
+
+bool DocumentWidget::eventFilter(QObject *watched, QEvent *event)
+{
+    if (event->type() == QEvent::WindowActivate) emit activated();
+    if (event->type() == QEvent::DragEnter) { dragEnterEvent(static_cast<QDragEnterEvent *>(event)); return event->isAccepted(); }
+    if (event->type() == QEvent::Drop) { dropEvent(static_cast<QDropEvent *>(event)); return event->isAccepted(); }
+    return QWidget::eventFilter(watched, event);
 }
 
 void DocumentWidget::closeEvent(QCloseEvent *event)
@@ -176,6 +404,7 @@ void DocumentWidget::closeEvent(QCloseEvent *event)
         prompt.setDefaultButton(QMessageBox::Cancel);
         if (prompt.exec() != QMessageBox::Discard) { event->ignore(); return; }
     }
+    for (int i = 1; i < views_.size(); ++i) views_[i]->window()->hide();
     emit closing();
     event->accept();
 }

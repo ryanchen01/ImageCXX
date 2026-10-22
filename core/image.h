@@ -3,6 +3,7 @@
 #include <QMap>
 #include <QString>
 #include <QStringList>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -92,6 +93,9 @@ public:
                   std::size_t channel = 0, std::size_t time = 0,
                   std::size_t component = 0) const;
     Image slice(std::size_t z = 0, std::size_t channel = 0, std::size_t time = 0) const;
+    // Reorder spatial indices and their coordinate basis without copying pixels.
+    // C/T and storage ownership are unchanged; edits detach like other views.
+    Image permutedSpatialAxes(std::array<std::size_t, 3> axes) const;
     Image region(std::span<const std::size_t> start, std::span<const std::size_t> extent) const;
     Image clone() const;
     Image materialized() const;
