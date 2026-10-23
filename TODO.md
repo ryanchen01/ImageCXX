@@ -23,7 +23,6 @@ Register new commands through the existing `CommandRegistry`, with Qt actions, m
 ## Viewer, models and desktop tools
 
 - [x] Add synchronized multi-view windows. Users place and resize linked windows freely; independent image documents remain separate.
-- [ ] Add a file-browser tool using `QAbstractItemModel` and Qt item views.
 - [ ] Add a separate project-owned annotation model and annotation tools in the overlay layer. ROI outlines, ROI names, masks, crosshairs and scale bars already exist.
 - [ ] Extend advanced channel/time workflows. Z/C/T browsing, animation and basic compositing already exist, but composite display currently uses at most four channels. Keep channel metadata and original pixel values in the model; apply blending in shaders.
 - [ ] Add tile-based display and partial texture updates where practical. The viewer currently uploads whole changed slices and rejects slices exceeding texture or memory limits. Reuse GPU resources and keep CPU/GPU caches bounded.
