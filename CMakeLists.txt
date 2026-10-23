@@ -53,10 +53,10 @@ set_source_files_properties(plots/Plot.qml PROPERTIES QT_RESOURCE_ALIAS Plot.qml
 qt_add_qml_module(imagecxx_plots URI ImageCXX.Plots VERSION 1.0 NO_PLUGIN
     RESOURCE_PREFIX "/qt/qml" OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/qml/ImageCXX/Plots" QML_FILES plots/Plot.qml)
 
-add_library(imagecxx_ui STATIC mainwindow.cpp ui/document_widget.cpp)
+add_library(imagecxx_ui STATIC mainwindow.cpp ui/image_window.cpp ui/document_widget.cpp)
 target_link_libraries(imagecxx_ui PUBLIC imagecxx_app imagecxx_viewer imagecxx_plots Qt6::Widgets Qt6::Svg Qt6::PrintSupport)
 qt_add_resources(imagecxx_ui imagecxx_icons PREFIX "/" BASE "resources" FILES
-    resources/icons/open.svg resources/icons/pan.svg resources/icons/rectangle.svg resources/icons/ellipse.svg
+    resources/icons/open.svg resources/icons/pointer.svg resources/icons/pan.svg resources/icons/rectangle.svg resources/icons/ellipse.svg
     resources/icons/polygon.svg resources/icons/line.svg resources/icons/measure.svg
     resources/icons/histogram.svg resources/icons/undo.svg resources/icons/search.svg resources/icons/imagecxx.svg)
 qt_add_executable(ImageCXX WIN32 MACOSX_BUNDLE main.cpp)

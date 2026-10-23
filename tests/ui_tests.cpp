@@ -3,6 +3,8 @@
 #include "ui/theme.h"
 #include <dcmtk/dcmdata/dctk.h>
 #include <gtest/gtest.h>
+#include <algorithm>
+#include <iterator>
 #include <limits>
 #include <atomic>
 #include <cmath>
@@ -13,6 +15,7 @@
 #include <QSet>
 #include <QSettings>
 #include <QScreen>
+#include <QWindow>
 #include <QCheckBox>
 #include <QToolButton>
 #include <QClipboard>
@@ -545,6 +548,29 @@ TEST(Desktop, StartsCompactAndOpensIndependentImageAndToolWindows)
     EXPECT_TRUE(window.isVisible());
 }
 
+TEST(Desktop, PointerStartsSelectedBeforePanAndNavigationToolsApplyToEveryPlane)
+{
+    MainWindow window;
+    auto *toolbar = window.findChild<QToolBar *>("imageTools");
+    ASSERT_NE(toolbar, nullptr);
+    const auto actions = toolbar->actions();
+    auto pointer = std::find_if(actions.begin(), actions.end(), [](auto *action) { return action->text() == "Pointer"; });
+    ASSERT_NE(pointer, actions.end());
+    auto pan = std::next(pointer);
+    ASSERT_NE(pan, actions.end());
+    EXPECT_EQ((*pan)->text(), "Pan");
+    EXPECT_TRUE((*pointer)->isChecked()); EXPECT_FALSE((*pan)->isChecked());
+    EXPECT_FALSE((*pointer)->icon().pixmap(24, 24).isNull());
+    auto *document = window.addDocument(Image::allocate(PixelType::UInt8, {20, 16, 8}));
+    EXPECT_EQ(document->viewer->tool(), ImageViewer::Tool::Pointer);
+    document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    (*pan)->trigger();
+    for (auto *view : document->views()) EXPECT_EQ(view->tool(), ImageViewer::Tool::Pan);
+    (*pointer)->trigger();
+    for (auto *view : document->views()) EXPECT_EQ(view->tool(), ImageViewer::Tool::Pointer);
+    EXPECT_TRUE((*pointer)->isChecked()); EXPECT_FALSE((*pan)->isChecked());
+}
+
 TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
 {
     MainWindow window;
@@ -586,6 +612,21 @@ TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
         EXPECT_TRUE(view->window()->findChildren<QComboBox *>(QString{}, Qt::FindDirectChildrenOnly).isEmpty());
     EXPECT_EQ(window.documents().size(), 2);
     EXPECT_EQ(other->viewMode(), DocumentWidget::ViewMode::Single);
+    QPointer<QWidget> previousXzWindow(document->views()[1]->window());
+    QPointer<QWidget> previousYzWindow(document->views()[2]->window());
+    window.findChild<QAction *>("view.single")->trigger();
+    EXPECT_EQ(document->viewMode(), DocumentWidget::ViewMode::Single);
+    EXPECT_FALSE(orthogonal->isChecked());
+    EXPECT_TRUE(window.findChild<QAction *>("view.single")->isChecked());
+    ASSERT_EQ(document->views().size(), 1);
+    EXPECT_TRUE(previousXzWindow.isNull()); EXPECT_TRUE(previousYzWindow.isNull());
+    EXPECT_EQ(window.documents().size(), 2);
+    EXPECT_EQ(other->viewMode(), DocumentWidget::ViewMode::Single);
+    orthogonal->trigger();
+    EXPECT_EQ(document->viewMode(), DocumentWidget::ViewMode::Orthogonal);
+    EXPECT_TRUE(orthogonal->isChecked());
+    EXPECT_FALSE(window.findChild<QAction *>("view.single")->isChecked());
+    ASSERT_EQ(document->views().size(), 3);
     document->setPosition(64, 56, 32, 0, 0);
     document->viewer->setWindow(0, 3600);
     document->viewer->setScaleBarVisible(true);
@@ -618,6 +659,25 @@ TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
     auto *xzWindow = document->views()[1]->window();
     auto *yzWindow = document->views()[2]->window();
     EXPECT_NE(xzWindow, yzWindow); EXPECT_NE(xzWindow, document);
+    for (auto *viewWindow : {xzWindow, yzWindow}) {
+        EXPECT_EQ(viewWindow->parentWidget(), document->parentWidget());
+        ASSERT_NE(viewWindow->windowHandle(), nullptr);
+        EXPECT_NE(viewWindow->windowHandle()->transientParent(), document->windowHandle());
+    }
+    if (QApplication::platformName() == "xcb") {
+        const auto position = xzWindow->pos();
+        xzWindow->move(document->pos());
+        xzWindow->raise(); xzWindow->activateWindow(); settle();
+        const auto overlap = xzWindow->mapToGlobal(xzWindow->rect().center());
+        auto *front = QApplication::widgetAt(overlap);
+        ASSERT_NE(front, nullptr);
+        EXPECT_EQ(front->window(), xzWindow) << front->window()->windowTitle().toStdString();
+        document->raise(); document->activateWindow(); settle();
+        front = QApplication::widgetAt(overlap);
+        ASSERT_NE(front, nullptr);
+        EXPECT_EQ(front->window(), document) << front->window()->windowTitle().toStdString();
+        xzWindow->move(position);
+    }
     QEvent activated(QEvent::WindowActivate);
     QCoreApplication::sendEvent(other, &activated);
     EXPECT_EQ(window.activeDocument(), other);
@@ -629,7 +689,7 @@ TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
     xzWindow->close();
     EXPECT_FALSE(xzWindow->isVisible()); EXPECT_TRUE(window.documents().contains(document));
     QCoreApplication::sendEvent(document, &activated);
-    window.findChild<QAction *>("view.orthogonal")->trigger();
+    orthogonal->trigger();
     EXPECT_TRUE(window.findChild<QAction *>("view.orthogonal")->isChecked());
     EXPECT_EQ(document->views()[1]->window(), xzWindow);
     EXPECT_TRUE(xzWindow->isVisible());
@@ -664,6 +724,27 @@ TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
     document->close();
     QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
     EXPECT_TRUE(retiredWindow.isNull());
+}
+
+TEST(Desktop, SynchronizedWindowsUseNormalImageSizingForTheirCalibratedPlanes)
+{
+    MainWindow window;
+    const auto xzSize = window.addDocument(Image::allocate(PixelType::UInt8, {400, 320}))->size();
+    const auto yzSize = window.addDocument(Image::allocate(PixelType::UInt8, {280, 160}))->size();
+    ImageMetadata metadata;
+    metadata.axes = {{"X", .5, 0, "mm"}, {"Y", 1, 0, "mm"}, {"Z", 2, 0, "mm"}};
+    auto *document = window.addDocument(Image::allocate(PixelType::UInt8, {400, 280, 80}, metadata));
+    const auto xySize = document->size();
+    document->resize(640, 600);
+    document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    ASSERT_EQ(document->views().size(), 3);
+    EXPECT_EQ(document->views()[1]->window()->size(), xzSize);
+    EXPECT_EQ(document->views()[2]->window()->size(), yzSize);
+    for (auto *view : document->views())
+        EXPECT_EQ(view->window()->minimumSize(), document->minimumSize());
+    document->setViewMode(DocumentWidget::ViewMode::Linked);
+    ASSERT_EQ(document->views().size(), 2);
+    EXPECT_EQ(document->views()[1]->window()->size(), xySize);
 }
 
 TEST(Desktop, DisplayChannelTimeSelectorsSynchronizeViewsAndFollowTheActiveDocument)

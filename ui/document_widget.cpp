@@ -17,23 +17,14 @@
 #include <limits>
 
 namespace imagecxx {
-// Establish the separate window before constructing its QRhiWidget. Creating a
-// child first and reparenting afterward can leave the launcher's backing store
-// registered for graphics composition, including unrelated raster dialogs.
-DocumentWidget::DocumentWidget(Image source, QWidget *parent) : QWidget(parent, Qt::Window),
-    image(std::move(source)), viewer(nullptr)
+DocumentWidget::DocumentWidget(Image source, QWidget *parent) : ImageWindow(parent),
+    image(std::move(source))
 {
-    setAcceptDrops(true);
-    auto *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(0);
-    viewer = new ImageViewer(this);
     viewer->setObjectName("xyView");
     views_.append(viewer);
-    layout->addWidget(viewer, 1);
     connectViewer(viewer, 0);
     spatial_ = {image.width() / 2, image.height() / 2, 0};
-    addNavigationControls(viewer, 0, layout);
+    addNavigationControls(viewer, 0, static_cast<QVBoxLayout *>(layout()));
     connect(this, &DocumentWidget::changed, this, [this] {
         setWindowTitle(title());
         for (int i = 1; i < views_.size(); ++i) {
@@ -42,6 +33,12 @@ DocumentWidget::DocumentWidget(Image source, QWidget *parent) : QWidget(parent, 
         }
     });
     refresh();
+}
+
+DocumentWidget::~DocumentWidget()
+{
+    synchronizing_ = true;
+    while (views_.size() > 1) delete views_.takeLast()->window();
 }
 
 void DocumentWidget::addNavigationControls(ImageViewer *view, int index, QVBoxLayout *layout)
@@ -104,9 +101,14 @@ void DocumentWidget::connectViewer(ImageViewer *view, int index)
     connect(view, &ImageViewer::displaySettingsChanged, this, [this, view] { synchronizeDisplay(view); });
     connect(view, &ImageViewer::viewTransformChanged, this, [this, view, index] { synchronizeTransform(view, index); });
     connect(view, &ImageViewer::toolChanged, this, [this, view] {
-        if (synchronizing_ || viewMode_ == ViewMode::Orthogonal) return;
+        if (synchronizing_) return;
         QScopedValueRollback guard(synchronizing_, true);
-        for (auto *other : views_) if (other != view) other->setTool(view->tool());
+        for (auto *other : views_) if (other != view) {
+            const auto tool = view->tool();
+            other->setTool(viewMode_ == ViewMode::Orthogonal && other != viewer
+                && tool != ImageViewer::Tool::Pointer && tool != ImageViewer::Tool::Pan
+                ? ImageViewer::Tool::Pointer : tool);
+        }
     });
     connect(view, &ImageViewer::overlaysChanged, this, [this, view](bool crosshair, bool scaleBar) {
         if (synchronizing_) return;
@@ -187,23 +189,18 @@ void DocumentWidget::setViewMode(ViewMode mode)
         viewMode_ = mode;
         const int count = mode == ViewMode::Single ? 1 : mode == ViewMode::Orthogonal ? 3 : 2;
         for (int i = 1; i < count; ++i) {
-            // Establish each native window before constructing its RHI widget.
-            auto *window = new QWidget(this, Qt::Window);
+            // Sibling windows can stack independently of the document's XY view.
+            auto *window = new ImageWindow(parentWidget());
             window->setObjectName("synchronizedViewWindow");
             window->setAttribute(Qt::WA_ShowWithoutActivating);
-            window->setAcceptDrops(true);
-            window->resize(viewer->size().expandedTo(QSize(320, 240)));
             window->installEventFilter(this);
-            auto *contents = new QVBoxLayout(window);
-            contents->setContentsMargins(0, 0, 0, 0);
-            contents->setSpacing(0);
-            auto *view = new ImageViewer(window);
-            contents->addWidget(view, 1);
-            addNavigationControls(view, i, contents);
+            auto *view = window->viewer;
+            addNavigationControls(view, i, static_cast<QVBoxLayout *>(window->layout()));
             view->setObjectName(mode == ViewMode::Orthogonal ? (i == 1 ? "xzView" : "yzView") : "linkedView");
             const auto axes = viewAxes(i);
             view->setImage(mode == ViewMode::Orthogonal ? image.permutedSpatialAxes(axes) : image);
-            view->setTool(mode == ViewMode::Orthogonal ? ImageViewer::Tool::Pan : viewer->tool());
+            view->setTool(mode == ViewMode::Orthogonal && viewer->tool() != ImageViewer::Tool::Pan
+                ? ImageViewer::Tool::Pointer : viewer->tool());
             view->setCrosshairVisible(viewer->crosshairVisible());
             view->setScaleBarVisible(viewer->scaleBarVisible());
             views_.append(view);
@@ -213,6 +210,8 @@ void DocumentWidget::setViewMode(ViewMode mode)
                 if (isVisible()) window->show();
             }, Qt::SingleShotConnection);
         }
+        center_ = {double(image.width()) / 2, double(image.height()) / 2, double(image.depth()) / 2};
+        updateNavigation(viewer->channel(), viewer->time());
         for (int i = 0; i < views_.size(); ++i) {
             const auto axes = viewAxes(i);
             const auto &metadata = image.metadata().axes;
@@ -220,12 +219,11 @@ void DocumentWidget::setViewMode(ViewMode mode)
                 ? metadata[axes[1]].spacing / metadata[axes[0]].spacing : 1.0;
             views_[i]->setPixelAspectRatio(aspect);
             views_[i]->setToolTip(mode == ViewMode::Orthogonal
-                ? tr("Pan tool: click or drag to move the intersection. Wheel to browse. Ctrl+wheel to zoom. Middle-button or Space+drag to pan. Edit selections in XY.")
+                ? tr("Pointer tool: click or drag to move the intersection. Pan tool: drag to pan. Wheel to browse. Ctrl+wheel to zoom. Edit selections in XY.")
                 : tr("Wheel to browse. Ctrl+wheel to zoom. Drag with the Pan tool to pan. Windows stay synchronized."));
+            if (i > 0) static_cast<ImageWindow *>(views_[i]->window())->resizeToImage(aspect);
         }
-        center_ = {double(image.width()) / 2, double(image.height()) / 2, double(image.depth()) / 2};
         for (auto *view : views_) view->fitToWindow();
-        updateNavigation(viewer->channel(), viewer->time());
     }
     synchronizeDisplay(viewer);
     refreshRois();

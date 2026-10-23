@@ -355,7 +355,7 @@ public:
     std::optional<QPointF> navigationCrosshair;
     QString viewLabel;
     bool pickingPosition = false;
-    Tool tool = Tool::Rectangle;
+    Tool tool = Tool::Pointer;
     std::vector<Roi> rois;
     std::optional<Roi> draft, selection, dragOriginal;
     bool editing = false;
@@ -378,6 +378,7 @@ ImageViewer::ImageViewer(QWidget *parent) : QWidget(parent), d(std::make_unique<
     setMinimumSize(160, 120);
     setMouseTracking(true);
     setFocusPolicy(Qt::StrongFocus);
+    setCursor(toolCursor());
     d->canvas = new SliceCanvas(this);
     d->overlay = new ViewerOverlay(this);
     d->canvas->failed = [this](const QString &message) { Q_EMIT loadFailed(message); };
@@ -853,9 +854,14 @@ void ImageViewer::setTool(Tool tool)
     d->tool = tool;
     d->draft.reset();
     d->drawing = false; d->editing = false; d->dragOriginal.reset();
-    setCursor(tool == Tool::Pan ? Qt::OpenHandCursor : Qt::CrossCursor);
+    d->panning = false; d->pickingPosition = false;
+    setCursor(toolCursor());
     updateCanvas();
     Q_EMIT toolChanged();
+}
+Qt::CursorShape ImageViewer::toolCursor() const
+{
+    return d->tool == Tool::Pan || d->spacePan ? Qt::OpenHandCursor : Qt::CrossCursor;
 }
 ImageViewer::Tool ImageViewer::tool() const { return d->tool; }
 void ImageViewer::setRois(const std::vector<Roi> &rois)
@@ -1000,9 +1006,15 @@ void ImageViewer::mousePressEvent(QMouseEvent *event)
     const QPointF point = widgetToImage(event->position());
     const bool onImage = point.x() >= 0 && point.y() >= 0
         && point.x() < double(d->image.width()) && point.y() < double(d->image.height());
-    if (onImage && d->navigationCrosshair && d->tool == Tool::Pan) {
-        d->pickingPosition = true;
-        Q_EMIT positionPicked(point);
+    if (d->tool == Tool::Pointer) {
+        if (onImage && d->navigationCrosshair) {
+            d->pickingPosition = true;
+            Q_EMIT positionPicked(point);
+        }
+        return;
+    }
+    if (d->tool == Tool::Pan) {
+        d->panning = true; d->fitted = false; setCursor(Qt::ClosedHandCursor);
         return;
     }
     if (!d->draft) {
@@ -1052,10 +1064,6 @@ void ImageViewer::mousePressEvent(QMouseEvent *event)
             // A drag can start a replacement ROI; a click simply clears it.
             if (d->tool == Tool::Polygon) return;
         }
-    }
-    if (d->tool == Tool::Pan) {
-        d->panning = true; d->fitted = false; setCursor(Qt::ClosedHandCursor);
-        return;
     }
     if (!onImage) return;
     if (d->tool == Tool::Polygon && d->draft)
@@ -1146,7 +1154,7 @@ void ImageViewer::mouseReleaseEvent(QMouseEvent *event)
     if (event->button() == Qt::MiddleButton || event->button() == Qt::LeftButton) {
         d->panning = false;
         d->pickingPosition = false;
-        setCursor((d->tool == Tool::Pan || d->spacePan) ? Qt::OpenHandCursor : Qt::CrossCursor);
+        setCursor(toolCursor());
         if (d->drawing && d->draft && event->button() == Qt::LeftButton) {
             updateRoiDrag(widgetToImage(event->position()), event->modifiers());
             completeRoi();
@@ -1215,7 +1223,7 @@ void ImageViewer::keyReleaseEvent(QKeyEvent *event)
 {
     if (event->key() == Qt::Key_Space && !event->isAutoRepeat()) {
         d->spacePan = false;
-        setCursor(d->tool == Tool::Pan ? Qt::OpenHandCursor : Qt::CrossCursor);
+        setCursor(toolCursor());
         event->accept();
     } else if (event->key() == Qt::Key_Shift && !event->isAutoRepeat()) {
         updateRoiDrag(widgetToImage(d->lastMouse), event->modifiers() & ~Qt::ShiftModifier);
@@ -1231,7 +1239,7 @@ void ImageViewer::focusOutEvent(QFocusEvent *event)
         d->dragOriginal.reset();
         updateCanvas();
     }
-    setCursor(d->tool == Tool::Pan ? Qt::OpenHandCursor : Qt::CrossCursor);
+    setCursor(toolCursor());
     QWidget::focusOutEvent(event);
 }
 

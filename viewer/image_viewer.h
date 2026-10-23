@@ -12,7 +12,7 @@ namespace imagecxx {
 class ImageViewer final : public QWidget {
     Q_OBJECT
 public:
-    enum class Tool { Pan, Rectangle, Ellipse, Polygon, Line };
+    enum class Tool { Pointer, Pan, Rectangle, Ellipse, Polygon, Line };
     Q_ENUM(Tool)
 
     explicit ImageViewer(QWidget *parent = nullptr);
@@ -59,7 +59,7 @@ public:
     bool crosshairVisible() const;
     bool scaleBarVisible() const;
     void setViewLabel(const QString &label);
-    // A linked intersection uses image coordinates. Pan-tool drags move it;
+    // A linked intersection uses image coordinates. Pointer-tool drags move it;
     // middle-button and Space drags continue to pan the image.
     void setNavigationCrosshair(std::optional<QPointF> position);
     // Limits for retained decoded slices and GPU textures. Oversized slices fail.
@@ -104,6 +104,7 @@ private:
     void requestSlice();
     void updateCanvas();
     void completeRoi();
+    Qt::CursorShape toolCursor() const;
     void updateRoiDrag(QPointF point, Qt::KeyboardModifiers modifiers);
 };
 

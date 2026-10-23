@@ -173,12 +173,60 @@ TEST(Viewer, OrthogonalViewsNavigateTheSameVoxelAndKeepOriginalModelAndXYSelecti
     EXPECT_EQ(document.spatialPosition()[1], 6u);
     EXPECT_EQ(xy->channel(), 0u); EXPECT_EQ(yz->time(), 1u);
     xy->setTool(ImageViewer::Tool::Rectangle);
-    EXPECT_EQ(xz->tool(), ImageViewer::Tool::Pan); EXPECT_EQ(yz->tool(), ImageViewer::Tool::Pan);
+    EXPECT_EQ(xz->tool(), ImageViewer::Tool::Pointer); EXPECT_EQ(yz->tool(), ImageViewer::Tool::Pointer);
     roiDrag(*xy, {1, 1}, {5, 4});
     ASSERT_TRUE(document.selection); EXPECT_EQ(document.selection->z, xy->slice());
     EXPECT_FALSE(document.modified); EXPECT_FALSE(document.history.canUndo());
     EXPECT_EQ(document.image.shape(), image.shape());
     EXPECT_DOUBLE_EQ(document.image.sample(7, 3, 4, 1, 2), image.sample(7, 3, 4, 1, 2));
+}
+
+TEST(Viewer, PointerMovesOnlyTheOrthogonalIntersectionWhilePanPreservesIt)
+{
+    DocumentWidget document(Image::allocate(PixelType::UInt8, {100, 100, 16}));
+    auto *primary = document.viewer;
+    primary->resize(400, 400); primary->setZoom(4);
+    Roi roi; roi.points = {{4, 4}, {20, 20}};
+    document.setSelection(roi);
+    const auto center = primary->viewCenter();
+    roiClick(*primary, {10, 10});
+    roiDrag(*primary, {10, 10}, {12, 12});
+    roiClick(*primary, {30, 30});
+    EXPECT_EQ(primary->viewCenter(), center);
+    ASSERT_TRUE(document.selection);
+    EXPECT_EQ(document.selection->points, roi.points);
+    EXPECT_TRUE(document.rois.empty());
+
+    document.setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    const std::array<std::array<int, 2>, 3> axes{{{0, 1}, {0, 2}, {1, 2}}};
+    for (int i = 0; i < document.views().size(); ++i) {
+        auto *view = document.views()[i];
+        primary->setTool(ImageViewer::Tool::Pointer);
+        EXPECT_EQ(view->tool(), ImageViewer::Tool::Pointer);
+        document.setPosition(10, 12, 4);
+        auto expected = document.spatialPosition();
+        expected[axes[i][0]] = 6; expected[axes[i][1]] = 7;
+        roiDrag(*view, {2.5, 3.5}, {6.5, 7.5});
+        EXPECT_EQ(document.spatialPosition(), expected);
+        EXPECT_EQ(view->cursor().shape(), Qt::CrossCursor);
+        primary->setTool(ImageViewer::Tool::Pan);
+        EXPECT_EQ(view->tool(), ImageViewer::Tool::Pan);
+        const auto beforePan = view->viewCenter();
+        roiDrag(*view, {10, 8}, {12, 9});
+        EXPECT_NE(view->viewCenter(), beforePan);
+        EXPECT_EQ(document.spatialPosition(), expected);
+        EXPECT_EQ(view->cursor().shape(), Qt::OpenHandCursor);
+        ASSERT_TRUE(document.selection);
+        EXPECT_EQ(document.selection->points, roi.points);
+        primary->setTool(ImageViewer::Tool::Pointer);
+        const auto beforeSpacePan = view->viewCenter();
+        roiKey(*view, Qt::Key_Space);
+        roiDrag(*view, {10, 8}, {12, 9});
+        roiKey(*view, Qt::Key_Space, QEvent::KeyRelease);
+        EXPECT_NE(view->viewCenter(), beforeSpacePan);
+        EXPECT_EQ(document.spatialPosition(), expected);
+        EXPECT_EQ(view->cursor().shape(), Qt::CrossCursor);
+    }
 }
 
 TEST(Viewer, EachWindowHasExactlyOneSliderForItsPlane)
@@ -304,7 +352,10 @@ TEST(Viewer, OrthogonalViewsDecodeLazyStorageAndRetirePendingPlanes)
     document->setViewMode(DocumentWidget::ViewMode::Linked);
     document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
     document->setPosition(7, 8, 4);
+    QPointer<QWidget> xzWindow(document->views()[1]->window());
+    QPointer<QWidget> yzWindow(document->views()[2]->window());
     document.reset();
+    EXPECT_TRUE(xzWindow.isNull()); EXPECT_TRUE(yzWindow.isNull());
     QApplication::processEvents();
 }
 
@@ -526,7 +577,8 @@ TEST(Viewer, DragCreatesRoiInOriginalImageCoordinates)
     viewer.setImage(Image::allocate(PixelType::UInt8, {64, 48, 3}));
     viewer.setSlice(2);
     viewer.setZoom(4);
-    EXPECT_EQ(viewer.tool(), ImageViewer::Tool::Rectangle);
+    EXPECT_EQ(viewer.tool(), ImageViewer::Tool::Pointer);
+    viewer.setTool(ImageViewer::Tool::Rectangle);
     std::optional<Roi> roi;
     QObject::connect(&viewer, &ImageViewer::roiCreated, [&roi](const Roi &created) { roi = created; });
     const QPointF begin = viewer.imageToWidget({4, 5});
@@ -681,7 +733,7 @@ TEST(Viewer, PolygonVerticesStayEditableAcrossSlicesAndHiddenRoisCannotBePicked)
 {
     DocumentWidget document(Image::allocate(PixelType::UInt8, {100, 100, 2}));
     auto &viewer = *document.viewer;
-    viewer.resize(400, 400); viewer.setZoom(4);
+    viewer.resize(400, 400); viewer.setZoom(4); viewer.setTool(ImageViewer::Tool::Rectangle);
     Roi polygon; polygon.type = RoiType::Polygon; polygon.points = {{10, 10}, {50, 10}, {30, 50}};
     document.setSelection(polygon);
     roiClick(viewer, {30, 20});
@@ -705,7 +757,7 @@ TEST(Viewer, ManagedRoisCanBeSelectedAndResizedOnOtherSlices)
 {
     DocumentWidget document(Image::allocate(PixelType::UInt8, {100, 100, 3}));
     auto &viewer = *document.viewer;
-    viewer.resize(400, 400); viewer.setZoom(4);
+    viewer.resize(400, 400); viewer.setZoom(4); viewer.setTool(ImageViewer::Tool::Rectangle);
     Roi roi; roi.z = 1; roi.points = {{20, 20}, {60, 60}};
     document.rois.push_back(roi); document.refreshRois();
     viewer.setSlice(2);
@@ -723,7 +775,7 @@ TEST(Viewer, EscapeCancelsAnActiveResizeAndDegeneratePolygonEditsAreRejected)
 {
     DocumentWidget document(Image::allocate(PixelType::UInt8, {100, 100}));
     auto &viewer = *document.viewer;
-    viewer.resize(400, 400); viewer.setZoom(4);
+    viewer.resize(400, 400); viewer.setZoom(4); viewer.setTool(ImageViewer::Tool::Rectangle);
     Roi roi; roi.points = {{20, 20}, {60, 60}};
     document.setSelection(roi);
     roiClick(viewer, {40, 40});
@@ -745,6 +797,7 @@ TEST(Viewer, RoiHandlesRemainSmallAndYellowAtDifferentZoomLevels)
 {
     ImageViewer viewer;
     viewer.resize(400, 400); viewer.setImage(Image::allocate(PixelType::UInt8, {100, 100, 3}));
+    viewer.setTool(ImageViewer::Tool::Rectangle);
     Roi roi; roi.points = {{20, 20}, {60, 60}};
     viewer.setSelection(roi);
     auto *overlay = viewer.findChildren<QWidget *>().back();

@@ -1,7 +1,7 @@
 #pragma once
 #include "core/history.h"
 #include "core/roi.h"
-#include "viewer/image_viewer.h"
+#include "image_window.h"
 #include <QWidget>
 #include <QList>
 #include <array>
@@ -11,12 +11,13 @@ class QEvent;
 class QLabel;
 class QVBoxLayout;
 namespace imagecxx {
-class DocumentWidget : public QWidget {
+class DocumentWidget : public ImageWindow {
     Q_OBJECT
 public:
     enum class ViewMode { Single, Linked, Orthogonal };
     Q_ENUM(ViewMode)
     explicit DocumentWidget(Image image, QWidget *parent = nullptr);
+    ~DocumentWidget() override;
     Image image;
     std::vector<Roi> rois;
     std::optional<Roi> selection;
@@ -26,7 +27,6 @@ public:
     void editRoi(Roi roi);
     void refreshRois();
     ImageHistory history;
-    ImageViewer *viewer;
     ViewMode viewMode() const { return viewMode_; }
     void setViewMode(ViewMode mode);
     void showViews();

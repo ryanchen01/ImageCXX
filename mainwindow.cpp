@@ -1075,16 +1075,18 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     toolbar->setToolButtonStyle(Qt::ToolButtonIconOnly); toolbar->setIconSize(QSize(24, 24));
     toolbar->addAction(findChild<QAction *>("file.open")); toolbar->addSeparator();
     tools_ = new QActionGroup(this);
-    const std::vector<std::pair<QString, ImageViewer::Tool>> tools{{tr("Pan"), ImageViewer::Tool::Pan},
+    const std::vector<std::pair<QString, ImageViewer::Tool>> tools{{tr("Pointer"), ImageViewer::Tool::Pointer},
+        {tr("Pan"), ImageViewer::Tool::Pan},
         {tr("Rectangle"), ImageViewer::Tool::Rectangle}, {tr("Ellipse"), ImageViewer::Tool::Ellipse},
         {tr("Polygon"), ImageViewer::Tool::Polygon}, {tr("Line"), ImageViewer::Tool::Line}};
     for (const auto &[name, tool] : tools) {
         auto *action = toolbar->addAction(name);
-        const QStringList iconNames{"pan", "rectangle", "ellipse", "polygon", "line"};
+        const QStringList iconNames{"pointer", "pan", "rectangle", "ellipse", "polygon", "line"};
         action->setIcon(QIcon(":/icons/" + iconNames[int(tool)] + ".svg")); action->setCheckable(true); tools_->addAction(action);
-        if (tool == ImageViewer::Tool::Polygon) action->setToolTip(tr("Draw a polygon. Double-click to finish."));
+        if (tool == ImageViewer::Tool::Pointer) action->setToolTip(tr("Click or drag to move the crosshair in orthogonal views."));
+        else if (tool == ImageViewer::Tool::Polygon) action->setToolTip(tr("Draw a polygon. Double-click to finish."));
         else if (tool == ImageViewer::Tool::Pan) action->setToolTip(tr("Drag to pan. Wheel to browse slices. Ctrl or Command + wheel to zoom. F to fit."));
-        action->setData(static_cast<int>(tool)); if (tool == ImageViewer::Tool::Rectangle) action->setChecked(true);
+        action->setData(static_cast<int>(tool)); if (tool == ImageViewer::Tool::Pointer) action->setChecked(true);
         connect(action, &QAction::triggered, this, [this, tool] { if (auto *doc = activeDocument()) doc->viewer->setTool(tool); });
     }
     toolbar->addSeparator(); toolbar->addAction(findChild<QAction *>("analyze.measure"));
@@ -1273,18 +1275,7 @@ DocumentWidget *MainWindow::addDocument(Image image)
     document->setAttribute(Qt::WA_DeleteOnClose);
     documents_.append(document);
     const QRect available = screen() ? screen()->availableGeometry() : QRect(0, 0, 1280, 900);
-    const int maximumWidth = std::max(320, std::min(1000, available.width() * 4 / 5));
-    const int maximumHeight = std::max(240, std::min(800, available.height() * 4 / 5));
-    document->setMinimumSize(240, 180);
-    document->layout()->activate();
-    const int controlsHeight = document->height() - document->viewer->height();
-    const double imageWidth = double(document->image.width());
-    const double imageHeight = double(document->image.height());
-    const double scale = std::min(
-        std::max({1.0, 320.0 / imageWidth, (240.0 - controlsHeight) / imageHeight}),
-        std::min(double(maximumWidth) / imageWidth, (maximumHeight - controlsHeight) / imageHeight));
-    document->resize(std::clamp(qRound(imageWidth * scale), 320, maximumWidth),
-                     std::clamp(qRound(imageHeight * scale) + controlsHeight, 240, maximumHeight));
+    document->resizeToImage();
     const int offset = int((documents_.size() - 1) % 8) * 28;
     const QPoint position = frameGeometry().bottomLeft() + QPoint(offset, 12 + offset);
     document->move(std::clamp(position.x(), available.left(), available.right() - document->width() + 1),
