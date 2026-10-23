@@ -743,12 +743,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             const std::weak_ptr<const Image> snapshot = mime->image;
             const auto minimum = doc->viewer->windowMinimum(), maximum = doc->viewer->windowMaximum();
             const QPointer<ImageMimeData> pending = mime.get();
-            const std::stop_source cancellation;
-            connect(mime.get(), &QObject::destroyed, this, [cancellation] { cancellation.request_stop(); });
+            std::stop_source cancellation;
+            connect(mime.get(), &QObject::destroyed, this, [cancellation]() mutable { cancellation.request_stop(); });
             QApplication::clipboard()->setMimeData(mime.release());
             auto output = std::make_shared<std::pair<QImage, QByteArray>>();
-            jobs_.submit(tr("Preparing clipboard PNG"), [snapshot, minimum, maximum, output, cancellation](auto stop, auto progress) {
-                std::stop_callback cancelled(stop, [cancellation] { cancellation.request_stop(); });
+            jobs_.submit(tr("Preparing clipboard PNG"), [snapshot, minimum, maximum, output, cancellation](auto stop, auto progress) mutable {
+                std::stop_callback cancelled(stop, [cancellation]() mutable { cancellation.request_stop(); });
                 const auto token = cancellation.get_token();
                 const auto held = snapshot.lock();
                 if (!held || token.stop_requested()) return;
