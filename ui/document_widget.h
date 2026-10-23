@@ -4,6 +4,7 @@
 #include "image_window.h"
 #include <QWidget>
 #include <QList>
+#include <QPointer>
 #include <array>
 class QSlider;
 class QCloseEvent;
@@ -29,6 +30,8 @@ public:
     ImageHistory history;
     ViewMode viewMode() const { return viewMode_; }
     void setViewMode(ViewMode mode);
+    void linkTo(QList<DocumentWidget *> documents);
+    const QList<QPointer<DocumentWidget>> &linkedDocuments() const { return linkedDocuments_; }
     void showViews();
     const QList<ImageViewer *> &views() const { return views_; }
     std::array<std::size_t, 3> spatialPosition() const { return spatial_; }
@@ -55,6 +58,7 @@ protected:
     void dropEvent(QDropEvent *event) override;
 private:
     ViewMode viewMode_ = ViewMode::Single;
+    QList<QPointer<DocumentWidget>> linkedDocuments_;
     QList<ImageViewer *> views_;
     struct NavigationControls {
         QSlider *slice;
@@ -65,6 +69,7 @@ private:
     std::array<std::size_t, 3> spatial_{};
     std::array<double, 3> center_{};
     bool synchronizing_ = false;
+    void unlink();
     std::array<std::size_t, 3> viewAxes(int index) const;
     void connectViewer(ImageViewer *view, int index);
     void addNavigationControls(ImageViewer *view, int index, QVBoxLayout *layout);

@@ -987,7 +987,39 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         {"view.linked", tr("Linked view")}, {"view.orthogonal", tr("Orthogonal views")}};
     for (int index = 0; index < viewModes.size(); ++index) {
         commands_.add({viewModes[index].first, viewModes[index].second, "View", {}, true, {}, [this, index](const QVariantMap &) {
-            if (auto *doc = activeDocument()) doc->setViewMode(DocumentWidget::ViewMode(index));
+            QPointer<DocumentWidget> doc = activeDocument();
+            if (!doc) return;
+            if (index != int(DocumentWidget::ViewMode::Linked)) {
+                doc->setViewMode(DocumentWidget::ViewMode(index));
+                return;
+            }
+            QList<QPointer<DocumentWidget>> candidates;
+            QDialog picker(this);
+            picker.setWindowTitle(tr("Linked view"));
+            auto *layout = new QVBoxLayout(&picker);
+            auto *images = new QListWidget(&picker);
+            images->setObjectName("linkedImages");
+            images->setAccessibleName(tr("Linked images"));
+            layout->addWidget(images);
+            for (auto *other : documents()) if (other != doc) {
+                candidates.append(other);
+                auto *item = new QListWidgetItem(tr("%1. %2").arg(candidates.size()).arg(other->title()), images);
+                item->setToolTip(other->image.metadata().sourcePath);
+                item->setCheckState(doc->linkedDocuments().contains(other) ? Qt::Checked : Qt::Unchecked);
+            }
+            if (candidates.isEmpty()) return;
+            auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &picker);
+            layout->addWidget(buttons);
+            connect(buttons, &QDialogButtonBox::accepted, &picker, &QDialog::accept);
+            connect(buttons, &QDialogButtonBox::rejected, &picker, &QDialog::reject);
+            picker.resize(400, 300);
+            if (picker.exec() == QDialog::Accepted && doc) {
+                QList<DocumentWidget *> selected;
+                for (int i = 0; i < candidates.size(); ++i)
+                    if (candidates[i] && images->item(i)->checkState() == Qt::Checked) selected.append(candidates[i]);
+                doc->linkTo(selected);
+            }
+            updatePanels();
         }});
     }
     commands_.add({"process.repeat", tr("Repeat command"), "Process", QKeySequence("Shift+R"), true, {}, [this](const QVariantMap &) {
@@ -1318,12 +1350,11 @@ DocumentWidget *MainWindow::addDocument(Image image)
     connect(document, &DocumentWidget::pathsDropped, this, &MainWindow::openPaths);
     document->setAttribute(Qt::WA_DeleteOnClose);
     documents_.append(document);
-    const QRect available = screen() ? screen()->availableGeometry() : QRect(0, 0, 1280, 900);
+    document->setScreen(screen());
     document->resizeToImage();
     const int offset = int((documents_.size() - 1) % 8) * 28;
     const QPoint position = frameGeometry().bottomLeft() + QPoint(offset, 12 + offset);
-    document->move(std::clamp(position.x(), available.left(), available.right() - document->width() + 1),
-                   std::clamp(position.y(), available.top(), available.bottom() - document->height() + 1));
+    document->move(position);
     connect(document, &DocumentWidget::activated, this, [this, document] { setActiveDocument(document); });
     connect(document, &DocumentWidget::closing, this, [this, document] {
         documents_.removeAll(QPointer<DocumentWidget>(document));
@@ -1680,6 +1711,13 @@ void MainWindow::openFiles(const QStringList &paths)
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
+    if (event->type() == QEvent::Show) {
+        auto *window = qobject_cast<QWidget *>(watched);
+        if (window && (window == this || panels_.values().contains(window))) {
+            keepWindowOnScreen(window);
+            QTimer::singleShot(0, window, [window] { keepWindowOnScreen(window); });
+        }
+    }
     if (event->type() == QEvent::Close && watched == panel("measurements") && !confirmDiscardMeasurements()) {
         event->ignore(); return true;
     }
@@ -1897,6 +1935,7 @@ void MainWindow::updatePanels()
         action->setChecked(doc && int(doc->viewMode()) == index);
     }
     findChild<QAction *>("view.orthogonal")->setEnabled(doc && doc->image.depth() > 1);
+    findChild<QAction *>("view.linked")->setEnabled(doc && documents().size() > 1);
     metadata_->clear(); history_->clear();
     const QString selectedId = rois_->currentItem() ? rois_->currentItem()->data(Qt::UserRole).toString() : QString{};
     QSignalBlocker roiSignals(rois_); rois_->clear();

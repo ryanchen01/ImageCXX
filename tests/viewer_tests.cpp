@@ -95,54 +95,173 @@ public:
 
 } // namespace
 
-TEST(Viewer, LinkedViewsSynchronizeNavigationDisplayToolsSelectionsAndTransforms)
+TEST(Viewer, LinkedImagesSynchronizeNavigationAndTransformsButKeepTheirOwnPixelsAndDisplay)
 {
     DocumentWidget document(Image::allocate(PixelType::UInt16, {40, 30, 5, 2, 3}));
-    auto *primary = document.viewer;
-    document.setViewMode(DocumentWidget::ViewMode::Linked);
-    document.show(); QApplication::processEvents();
-    ASSERT_EQ(document.views().size(), 2);
-    auto *linked = document.views()[1];
-    EXPECT_NE(primary->window(), linked->window());
-    EXPECT_TRUE(linked->window()->isWindow());
-    linked->window()->resize(420, 280);
-    linked->window()->move(40, 70);
-    QApplication::processEvents();
-    const QRect geometry = linked->window()->geometry();
-    document.setViewMode(DocumentWidget::ViewMode::Linked);
-    EXPECT_EQ(linked->window()->geometry(), geometry);
-    EXPECT_EQ(linked->image().data(), document.image.data());
+    DocumentWidget other(Image::allocate(PixelType::UInt8, {40, 30, 5, 2, 3}));
+    auto *primary = document.viewer, *linked = other.viewer;
+    document.linkTo({&other});
+    EXPECT_EQ(document.views().size(), 1); EXPECT_EQ(other.views().size(), 1);
+    EXPECT_EQ(document.viewMode(), DocumentWidget::ViewMode::Linked);
+    EXPECT_EQ(other.viewMode(), DocumentWidget::ViewMode::Linked);
+    EXPECT_NE(linked->image().data(), document.image.data());
     linked->setSlice(3, 1, 2);
     EXPECT_EQ(primary->slice(), 3u); EXPECT_EQ(primary->channel(), 1u); EXPECT_EQ(primary->time(), 2u);
     primary->setSlice(2, 0, 1);
     EXPECT_EQ(linked->slice(), 2u); EXPECT_EQ(linked->channel(), 0u); EXPECT_EQ(linked->time(), 1u);
     linked->setWindow(-100, 1000); linked->setGamma(1.7); linked->setLut("hot");
     linked->setInverted(true); linked->setLinearInterpolation(true); linked->setComposite(true);
-    EXPECT_DOUBLE_EQ(primary->windowMinimum(), -100); EXPECT_DOUBLE_EQ(primary->windowMaximum(), 1000);
-    EXPECT_DOUBLE_EQ(primary->gamma(), 1.7); EXPECT_EQ(primary->lut(), "hot");
-    EXPECT_TRUE(primary->isInverted()); EXPECT_TRUE(primary->linearInterpolation()); EXPECT_TRUE(primary->composite());
-    primary->setScaleBarVisible(true); primary->setCrosshairVisible(true);
-    EXPECT_TRUE(linked->scaleBarVisible()); EXPECT_TRUE(linked->crosshairVisible());
-    primary->setTool(ImageViewer::Tool::Rectangle);
-    EXPECT_EQ(linked->tool(), ImageViewer::Tool::Rectangle);
+    EXPECT_DOUBLE_EQ(primary->gamma(), 1); EXPECT_NE(primary->lut(), "hot");
+    EXPECT_FALSE(primary->isInverted()); EXPECT_FALSE(primary->linearInterpolation()); EXPECT_FALSE(primary->composite());
+    linked->setTool(ImageViewer::Tool::Rectangle);
     roiDrag(*linked, {3, 4}, {15, 18});
-    ASSERT_TRUE(document.selection.has_value());
-    EXPECT_EQ(document.selection->bounds(), QRectF(3, 4, 12, 14));
+    ASSERT_TRUE(other.selection.has_value()); EXPECT_FALSE(document.selection.has_value());
+    EXPECT_EQ(primary->tool(), ImageViewer::Tool::Pointer);
     primary->setViewTransform(4, {11, 12});
     EXPECT_DOUBLE_EQ(linked->zoom(), 4);
     EXPECT_NEAR(linked->viewCenter().x(), 11, 1e-12); EXPECT_NEAR(linked->viewCenter().y(), 12, 1e-12);
     linked->setTool(ImageViewer::Tool::Pan);
-    document.setSelection({});
+    other.setSelection({});
     roiDrag(*linked, {8, 8}, {10, 11});
     EXPECT_EQ(primary->viewCenter(), linked->viewCenter());
-    QPointer<ImageViewer> retired = linked;
+    other.replaceImage(Image::allocate(PixelType::UInt8, {40, 30, 5, 2, 3}), "Replace");
+    EXPECT_EQ(document.image.pixelType(), PixelType::UInt16);
+    EXPECT_EQ(document.history.labels().size(), 0);
     document.setViewMode(DocumentWidget::ViewMode::Single);
-    EXPECT_TRUE(retired.isNull()); EXPECT_EQ(document.viewer, primary);
-    document.setViewMode(DocumentWidget::ViewMode::Linked);
-    EXPECT_EQ(document.viewer->slice(), 2u);
-    EXPECT_DOUBLE_EQ(document.views()[1]->gamma(), 1.7);
-    document.setViewMode(DocumentWidget::ViewMode::Single);
-    EXPECT_EQ(document.views().size(), 1); EXPECT_EQ(document.findChildren<ImageViewer *>().size(), 1);
+    EXPECT_EQ(other.viewMode(), DocumentWidget::ViewMode::Single);
+    linked->setSlice(4); EXPECT_EQ(primary->slice(), 2u);
+    document.linkTo({&other});
+    document.setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    EXPECT_EQ(other.viewMode(), DocumentWidget::ViewMode::Single);
+}
+
+TEST(Viewer, LinkedImagesMapOriginsSpacingUnitsAndDirectionsWithoutClampingTheSource)
+{
+    ImageMetadata sourceMetadata, targetMetadata;
+    sourceMetadata.axes = {{"X", 2, 10, "mm"}, {"Y", 4, 20, "mm"}, {"Z", 6, 30, "mm"}};
+    targetMetadata.axes = {{"X", .1, .8, "cm"}, {"Y", .2, 1.6, "cm"}, {"Z", .3, 2.4, "cm"}};
+    DocumentWidget source(Image::allocate(PixelType::UInt8, {40, 30, 8, 2, 3}, sourceMetadata));
+    DocumentWidget target(Image::allocate(PixelType::UInt8, {80, 60, 12}, targetMetadata));
+    source.linkTo({&target});
+    source.setPosition(3, 4, 2, 1, 2);
+    EXPECT_EQ(target.spatialPosition(), (std::array<std::size_t, 3>{8, 10, 6}));
+    EXPECT_EQ(source.viewer->channel(), 1u); EXPECT_EQ(source.viewer->time(), 2u);
+    EXPECT_EQ(target.viewer->channel(), 0u); EXPECT_EQ(target.viewer->time(), 0u);
+    source.viewer->setViewTransform(4, {3.5, 4.5});
+    EXPECT_NEAR(source.viewer->imageToWidget({0, 1}).y() - source.viewer->imageToWidget({0, 0}).y(), 8, 1e-12);
+    EXPECT_NEAR(target.viewer->zoom(), 2, 1e-12);
+    EXPECT_NEAR(target.viewer->viewCenter().x(), 8.5, 1e-12);
+    EXPECT_NEAR(target.viewer->viewCenter().y(), 10.5, 1e-12);
+    target.viewer->setViewTransform(3, {12.5, 14.5});
+    EXPECT_NEAR(source.viewer->zoom(), 6, 1e-12);
+    EXPECT_NEAR(source.viewer->viewCenter().x(), 5.5, 1e-12);
+    EXPECT_NEAR(source.viewer->viewCenter().y(), 6.5, 1e-12);
+    source.setPosition(39, 29, 7);
+    EXPECT_EQ(source.viewer->slice(), 7u); EXPECT_EQ(target.viewer->slice(), 11u);
+    targetMetadata.direction = {0, -1, 0, 1, 0, 0, 0, 0, -1};
+    targetMetadata.axes = {{"X", 1, 30, "mm"}, {"Y", 2, 20, "mm"}, {"Z", 3, 60, "mm"}};
+    DocumentWidget rotated(Image::allocate(PixelType::UInt8, {80, 60, 12}, targetMetadata));
+    source.linkTo({&rotated});
+    source.setPosition(3, 4, 2);
+    EXPECT_EQ(rotated.spatialPosition(), (std::array<std::size_t, 3>{16, 7, 6}));
+    EXPECT_EQ(target.viewMode(), DocumentWidget::ViewMode::Single);
+    rotated.close();
+    EXPECT_EQ(source.viewMode(), DocumentWidget::ViewMode::Single);
+    auto temporary = std::make_unique<DocumentWidget>(Image::allocate(PixelType::UInt8, {4, 4, 2}, sourceMetadata));
+    source.linkTo({temporary.get()}); temporary.reset();
+    EXPECT_EQ(source.viewMode(), DocumentWidget::ViewMode::Single);
+    targetMetadata.axes[0].unit = "px";
+    DocumentWidget incompatible(Image::allocate(PixelType::UInt8, {4, 4, 2}, targetMetadata));
+    source.linkTo({&incompatible});
+    EXPECT_EQ(source.viewMode(), DocumentWidget::ViewMode::Single);
+}
+
+TEST(Viewer, LinkedGroupsApplyCalibrationFromTheSenderWithoutFeedbackFromClippedImages)
+{
+    ImageMetadata metadata;
+    metadata.axes = {{"X", 1, 0, "mm"}, {"Y", 1, 0, "mm"}, {"Z", 2, 0, "mm"}};
+    DocumentWidget source(Image::allocate(PixelType::UInt8, {20, 20, 10}, metadata));
+    metadata.axes[2].spacing = 1;
+    DocumentWidget shortStack(Image::allocate(PixelType::UInt8, {20, 20, 3}, metadata));
+    for (auto &axis : metadata.axes) axis.spacing = .5;
+    DocumentWidget fineStack(Image::allocate(PixelType::UInt8, {40, 40, 40}, metadata));
+    source.linkTo({&shortStack, &fineStack});
+    source.viewer->setSlice(7);
+    EXPECT_EQ(source.viewer->slice(), 7u); EXPECT_EQ(shortStack.viewer->slice(), 2u);
+    EXPECT_EQ(fineStack.viewer->slice(), 28u);
+    fineStack.viewer->setSlice(12);
+    EXPECT_EQ(source.viewer->slice(), 3u); EXPECT_EQ(shortStack.viewer->slice(), 2u);
+    EXPECT_EQ(fineStack.viewer->slice(), 12u);
+    source.viewer->setViewTransform(4, {5.5, 6.5});
+    EXPECT_DOUBLE_EQ(shortStack.viewer->zoom(), 4); EXPECT_DOUBLE_EQ(fineStack.viewer->zoom(), 2);
+    EXPECT_EQ(fineStack.viewer->viewCenter(), QPointF(10.5, 12.5));
+    source.linkTo({&shortStack});
+    EXPECT_EQ(fineStack.viewMode(), DocumentWidget::ViewMode::Single);
+    source.viewer->setSlice(5);
+    EXPECT_EQ(shortStack.viewer->slice(), 2u); EXPECT_EQ(fineStack.viewer->slice(), 12u);
+    source.linkTo({});
+    EXPECT_EQ(source.viewMode(), DocumentWidget::ViewMode::Single);
+    EXPECT_EQ(shortStack.viewMode(), DocumentWidget::ViewMode::Single);
+}
+
+TEST(Viewer, LinkedRotatedImagesKeepTheSamePhysicalZoomWithUnequalPixelSpacing)
+{
+    ImageMetadata sourceMetadata, targetMetadata;
+    sourceMetadata.axes = {{"X", 1, 0, "mm"}, {"Y", 1, 0, "mm"}, {"Z", 1, 0, "mm"}};
+    targetMetadata.axes = {{"X", 2, 60, "mm"}, {"Y", 4, 0, "mm"}, {"Z", 8, 0, "mm"}};
+    targetMetadata.direction = {0, -1, 0, 1, 0, 0, 0, 0, 1};
+    DocumentWidget source(Image::allocate(PixelType::UInt8, {80, 80, 80}, sourceMetadata));
+    DocumentWidget target(Image::allocate(PixelType::UInt8, {80, 80, 80}, targetMetadata));
+    source.linkTo({&target});
+    source.viewer->setViewTransform(4, {20.5, 20.5});
+    EXPECT_NEAR(target.viewer->zoom(), 8, 1e-12);
+    const auto sourceStep = source.viewer->imageToWidget({21, 20}) - source.viewer->imageToWidget({20, 20});
+    const auto targetStep = target.viewer->imageToWidget({10, 9.75}) - target.viewer->imageToWidget({10, 10});
+    EXPECT_NEAR(std::hypot(sourceStep.x(), sourceStep.y()), std::hypot(targetStep.x(), targetStep.y()), 1e-12);
+    target.viewer->setViewTransform(6, {10.5, 10.5});
+    EXPECT_NEAR(source.viewer->zoom(), 3, 1e-12);
+
+    targetMetadata.direction = {0, 0, -1, 0, 1, 0, 1, 0, 0};
+    DocumentWidget rotatedStack(Image::allocate(PixelType::UInt8, {80, 80, 80}, targetMetadata));
+    source.linkTo({&rotatedStack});
+    source.viewer->setViewTransform(4, {20.5, 20.5});
+    EXPECT_NEAR(rotatedStack.viewer->zoom(), 8, 1e-12);
+    rotatedStack.viewer->setViewTransform(6, {10.5, 10.5});
+    EXPECT_NEAR(source.viewer->zoom(), 3, 1e-12);
+}
+
+TEST(Viewer, LinkedRotatedStacksTrackTheViewportCenterWhenPanningAndBrowsingSlices)
+{
+    ImageMetadata metadata;
+    metadata.axes = {{"X", 1, 0, "mm"}, {"Y", 1, 0, "mm"}, {"Z", 1, 0, "mm"}};
+    DocumentWidget source(Image::allocate(PixelType::UInt8, {80, 80, 80}, metadata));
+    metadata.axes[1].origin = 79;
+    metadata.direction = {1, 0, 0, 0, 0, -1, 0, 1, 0};
+    DocumentWidget target(Image::allocate(PixelType::UInt8, {80, 80, 80}, metadata));
+    DocumentWidget clipped(Image::allocate(PixelType::UInt8, {80, 80, 3}, metadata));
+    source.linkTo({&target, &clipped});
+    source.viewer->setViewTransform(4, {20.5, 20.5});
+    source.setPosition(20, 20, 10);
+    EXPECT_EQ(target.viewer->slice(), 59u);
+    EXPECT_EQ(target.viewer->viewCenter(), QPointF(20.5, 10.5));
+
+    source.viewer->setViewTransform(4, {20.5, 30.5});
+    EXPECT_EQ(target.viewer->slice(), 49u);
+    EXPECT_EQ(clipped.viewer->slice(), 2u);
+    EXPECT_EQ(source.viewer->slice(), 10u);
+    EXPECT_EQ(source.viewer->viewCenter(), QPointF(20.5, 30.5));
+    source.viewer->setSlice(15);
+    EXPECT_EQ(target.viewer->slice(), 49u);
+    EXPECT_EQ(target.viewer->viewCenter(), QPointF(20.5, 15.5));
+    EXPECT_EQ(clipped.viewer->viewCenter(), QPointF(20.5, 15.5));
+
+    target.viewer->setViewTransform(4, {25.5, 18.5});
+    EXPECT_EQ(source.viewer->slice(), 18u);
+    EXPECT_EQ(source.viewer->viewCenter(), QPointF(25.5, 30.5));
+    target.findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly)->setValue(44);
+    EXPECT_EQ(source.viewer->slice(), 18u);
+    EXPECT_EQ(source.viewer->viewCenter(), QPointF(25.5, 35.5));
+    EXPECT_EQ(target.viewer->slice(), 44u);
 }
 
 TEST(Viewer, OrthogonalViewsNavigateTheSameVoxelAndKeepOriginalModelAndXYSelections)
@@ -262,8 +381,9 @@ TEST(Viewer, EachWindowHasExactlyOneSliderForItsPlane)
     document.replaceImage(Image::allocate(PixelType::UInt16, {3, 2, 2}), "Shrink");
     EXPECT_EQ(slices[0]->maximum(), 1); EXPECT_EQ(slices[1]->maximum(), 1); EXPECT_EQ(slices[2]->maximum(), 2);
     for (auto *slice : slices) EXPECT_EQ(slice->value(), 1);
-    document.setViewMode(DocumentWidget::ViewMode::Linked);
-    auto *linkedSlice = document.views()[1]->window()->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly);
+    DocumentWidget other(Image::allocate(PixelType::UInt16, {3, 2, 2}));
+    document.linkTo({&other});
+    auto *linkedSlice = other.findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly);
     ASSERT_NE(linkedSlice, nullptr);
     EXPECT_EQ(linkedSlice->accessibleName(), "Z slice");
     linkedSlice->setValue(0);
@@ -352,7 +472,8 @@ TEST(Viewer, OrthogonalViewsDecodeLazyStorageAndRetirePendingPlanes)
     EXPECT_EQ(document->image.data(), nullptr);
     EXPECT_EQ(document->views()[1]->image().storageKind(), storage->kind());
     document->setPosition(3, 4, 1);
-    document->setViewMode(DocumentWidget::ViewMode::Linked);
+    DocumentWidget other(Image::allocate(PixelType::UInt8, {16, 16, 6}));
+    document->linkTo({&other});
     document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
     document->setPosition(7, 8, 4);
     QPointer<QWidget> xzWindow(document->views()[1]->window());

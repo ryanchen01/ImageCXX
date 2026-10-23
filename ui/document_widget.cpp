@@ -1,4 +1,7 @@
 #include "document_widget.h"
+#include "io/io_detail.h"
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QHBoxLayout>
 #include <QScopedValueRollback>
 #include <cmath>
@@ -17,6 +20,66 @@
 #include <limits>
 
 namespace imagecxx {
+namespace {
+std::optional<std::array<double, 3>> mapPosition(const Image &source, const Image &target,
+                                               std::array<double, 3> position)
+{
+    const auto calibration = [](const Image &image) {
+        std::array<std::array<double, 4>, 3> matrix{};
+        const auto &metadata = image.metadata();
+        const auto dimensions = std::size_t(std::sqrt(metadata.direction.size()));
+        const auto embedded = QJsonDocument::fromJson(metadata.attributes.value(
+            QStringLiteral("ImageCXX.EmbeddedPlaneOrigin")).toUtf8()).array();
+        for (std::size_t row = 0; row < 3; ++row) {
+            matrix[row][3] = row < metadata.axes.size() ? metadata.axes[row].origin
+                : embedded.size() == 3 ? embedded[int(row)].toDouble() : 0;
+            for (std::size_t column = 0; column < 3; ++column) {
+                const double direction = row < dimensions && column < dimensions
+                    ? metadata.direction[row * dimensions + column] : double(row == column);
+                matrix[row][column] = direction * (column < metadata.axes.size() ? metadata.axes[column].spacing : 1);
+            }
+        }
+        return matrix;
+    };
+    const auto from = calibration(source);
+    auto system = calibration(target);
+    for (std::size_t row = 0; row < 3; ++row) {
+        const auto &sourceMetadata = source.metadata();
+        const auto &targetMetadata = target.metadata();
+        const QString sourceUnit = row < sourceMetadata.axes.size() ? sourceMetadata.axes[row].unit
+            : sourceMetadata.attributes.value("ImageCXX.EmbeddedPlaneZUnit", sourceMetadata.axes[0].unit);
+        const QString targetUnit = row < targetMetadata.axes.size() ? targetMetadata.axes[row].unit
+            : targetMetadata.attributes.value("ImageCXX.EmbeddedPlaneZUnit", targetMetadata.axes[0].unit);
+        double factor = 1;
+        if (sourceUnit != targetUnit) {
+            try { factor = detail::spatialUnitToMillimeters(sourceUnit) / detail::spatialUnitToMillimeters(targetUnit); }
+            catch (const std::exception &) { return std::nullopt; }
+        }
+        double world = from[row][3];
+        for (std::size_t column = 0; column < 3; ++column) world += from[row][column] * position[column];
+        system[row][3] = world * factor - system[row][3];
+    }
+    // Solve in doubles so patient positions retain precision at small pixel sizes.
+    for (std::size_t column = 0; column < 3; ++column) {
+        auto pivot = column;
+        for (auto row = column + 1; row < 3; ++row)
+            if (std::abs(system[row][column]) > std::abs(system[pivot][column])) pivot = row;
+        if (std::abs(system[pivot][column]) < 1e-15) return std::nullopt;
+        std::swap(system[column], system[pivot]);
+        const double divisor = system[column][column];
+        for (auto &value : system[column]) value /= divisor;
+        for (std::size_t row = 0; row < 3; ++row) if (row != column) {
+            const double multiplier = system[row][column];
+            for (std::size_t entry = 0; entry < 4; ++entry)
+                system[row][entry] -= multiplier * system[column][entry];
+        }
+    }
+    std::array<double, 3> result{system[0][3], system[1][3], system[2][3]};
+    if (!std::all_of(result.begin(), result.end(), [](double value) { return std::isfinite(value); })) return std::nullopt;
+    return result;
+}
+} // namespace
+
 DocumentWidget::DocumentWidget(Image source, QWidget *parent) : ImageWindow(parent),
     image(std::move(source))
 {
@@ -37,6 +100,7 @@ DocumentWidget::DocumentWidget(Image source, QWidget *parent) : ImageWindow(pare
 
 DocumentWidget::~DocumentWidget()
 {
+    unlink();
     synchronizing_ = true;
     while (views_.size() > 1) delete views_.takeLast()->window();
 }
@@ -86,8 +150,9 @@ void DocumentWidget::connectViewer(ImageViewer *view, int index)
     if (index > 0) connect(view, &ImageViewer::loadFailed, this, &DocumentWidget::viewError);
     connect(view, &ImageViewer::sliceChanged, this, [this, index](std::size_t z, std::size_t c, std::size_t t) {
         if (synchronizing_) return;
-        spatial_[viewAxes(index)[2]] = z;
-        setPosition(spatial_[0], spatial_[1], spatial_[2], c, t);
+        auto position = spatial_;
+        position[viewAxes(index)[2]] = z;
+        setPosition(position[0], position[1], position[2], c, t);
     });
     connect(view, &ImageViewer::positionPicked, this, [this, index](QPointF point) {
         const auto axes = viewAxes(index);
@@ -142,6 +207,28 @@ void DocumentWidget::synchronizeTransform(ImageViewer *source, int index)
 {
     if (synchronizing_) return;
     QScopedValueRollback guard(synchronizing_, true);
+    if (std::none_of(linkedDocuments_.begin(), linkedDocuments_.end(), [](const auto &document) {
+        return document && document->synchronizing_;
+    })) for (auto &document : linkedDocuments_) if (document) {
+        const auto center = source->viewCenter();
+        const auto mapped = mapPosition(image, document->image,
+            {center.x() - .5, center.y() - .5, double(source->slice())});
+        const auto next = mapPosition(image, document->image,
+            {center.x() + .5, center.y() - .5, double(source->slice())});
+        if (mapped && next) {
+            const auto &metadata = document->image.metadata().axes;
+            const auto spacing = [&metadata](std::size_t axis) {
+                return axis < metadata.size() && metadata[axis].unit == metadata[0].unit
+                    ? metadata[axis].spacing / metadata[0].spacing : 1.0;
+            };
+            const double step = std::hypot((*next)[0] - (*mapped)[0],
+                ((*next)[1] - (*mapped)[1]) * spacing(1), ((*next)[2] - (*mapped)[2]) * spacing(2));
+            const auto slice = std::size_t(std::clamp(std::round((*mapped)[2]), 0.0, double(document->image.depth() - 1)));
+            document->setPosition(document->spatial_[0], document->spatial_[1], slice,
+                document->viewer->channel(), document->viewer->time());
+            document->viewer->setViewTransform(source->zoom() / step, {(*mapped)[0] + .5, (*mapped)[1] + .5});
+        }
+    }
     const auto axes = viewAxes(index);
     center_[axes[0]] = source->viewCenter().x();
     center_[axes[1]] = source->viewCenter().y();
@@ -172,9 +259,39 @@ void DocumentWidget::synchronizeTransform(ImageViewer *source, int index)
     }
 }
 
+void DocumentWidget::linkTo(QList<DocumentWidget *> documents)
+{
+    documents.removeAll(this);
+    documents.removeAll(nullptr);
+    for (auto *document : documents) {
+        if (!mapPosition(image, document->image, {}) || !mapPosition(document->image, image, {})) {
+            emit viewError(tr("These images have incompatible spatial units or an invalid spatial direction."));
+            return;
+        }
+    }
+    setViewMode(ViewMode::Single);
+    for (auto *document : documents) document->setViewMode(ViewMode::Single);
+    if (documents.isEmpty()) return;
+    documents.append(this);
+    for (auto *document : documents) {
+        document->linkedDocuments_.clear();
+        for (auto *other : documents)
+            if (other != document && !document->linkedDocuments_.contains(other)) document->linkedDocuments_.append(other);
+        document->viewMode_ = ViewMode::Linked;
+    }
+    setPosition(spatial_[0], spatial_[1], spatial_[2], viewer->channel(), viewer->time());
+    synchronizeTransform(viewer, 0);
+    for (auto *document : documents) {
+        document->showViews();
+        emit document->changed();
+    }
+}
+
 void DocumentWidget::setViewMode(ViewMode mode)
 {
+    if (mode == ViewMode::Linked) return;
     if (mode == ViewMode::Orthogonal && image.depth() < 2) return;
+    unlink();
     if (mode == viewMode_) {
         showViews();
         emit changed();
@@ -187,7 +304,7 @@ void DocumentWidget::setViewMode(ViewMode mode)
             delete views_.takeLast()->window();
         }
         viewMode_ = mode;
-        const int count = mode == ViewMode::Single ? 1 : mode == ViewMode::Orthogonal ? 3 : 2;
+        const int count = mode == ViewMode::Single ? 1 : 3;
         for (int i = 1; i < count; ++i) {
             // Sibling windows can stack independently of the document's XY view.
             auto *window = new ImageWindow(parentWidget());
@@ -196,7 +313,7 @@ void DocumentWidget::setViewMode(ViewMode mode)
             window->installEventFilter(this);
             auto *view = window->viewer;
             addNavigationControls(view, i, static_cast<QVBoxLayout *>(window->layout()));
-            view->setObjectName(mode == ViewMode::Orthogonal ? (i == 1 ? "xzView" : "yzView") : "linkedView");
+            view->setObjectName(i == 1 ? "xzView" : "yzView");
             const auto axes = viewAxes(i);
             view->setImage(mode == ViewMode::Orthogonal ? image.permutedSpatialAxes(axes) : image);
             view->setTool(mode == ViewMode::Orthogonal && viewer->tool() != ImageViewer::Tool::Pan
@@ -215,18 +332,37 @@ void DocumentWidget::setViewMode(ViewMode mode)
         for (int i = 0; i < views_.size(); ++i) {
             const auto axes = viewAxes(i);
             const auto &metadata = image.metadata().axes;
-            const double aspect = mode == ViewMode::Orthogonal && metadata[axes[0]].unit == metadata[axes[1]].unit
+            const double aspect = metadata[axes[0]].unit == metadata[axes[1]].unit
                 ? metadata[axes[1]].spacing / metadata[axes[0]].spacing : 1.0;
             views_[i]->setPixelAspectRatio(aspect);
             views_[i]->setToolTip(mode == ViewMode::Orthogonal
                 ? tr("Pointer tool: click or drag to move the intersection. Pan tool: drag to pan. Wheel to browse. Ctrl+wheel to zoom. Edit selections in XY.")
-                : tr("Wheel to browse. Ctrl+wheel to zoom. Drag with the Pan tool to pan. Windows stay synchronized."));
-            if (i > 0) static_cast<ImageWindow *>(views_[i]->window())->resizeToImage(aspect);
+                : tr("Wheel to browse. Ctrl+wheel to zoom. Drag with the Pan tool to pan."));
+            if (i > 0) {
+                auto *window = static_cast<ImageWindow *>(views_[i]->window());
+                window->setScreen(screen());
+                window->resizeToImage(aspect);
+                window->move(frameGeometry().topLeft() + QPoint(28 * i, 28 * i));
+            }
         }
         for (auto *view : views_) view->fitToWindow();
     }
     synchronizeDisplay(viewer);
     refreshRois();
+    emit changed();
+}
+
+void DocumentWidget::unlink()
+{
+    if (linkedDocuments_.isEmpty()) return;
+    const auto documents = linkedDocuments_;
+    linkedDocuments_.clear();
+    viewMode_ = ViewMode::Single;
+    for (auto &other : documents) if (other) {
+        other->linkedDocuments_.clear();
+        other->viewMode_ = ViewMode::Single;
+        emit other->changed();
+    }
     emit changed();
 }
 
@@ -242,9 +378,25 @@ void DocumentWidget::showViews()
 void DocumentWidget::setPosition(std::size_t x, std::size_t y, std::size_t z, std::size_t channel, std::size_t time)
 {
     if (image.empty() || synchronizing_) return;
-    QScopedValueRollback guard(synchronizing_, true);
-    spatial_ = {std::min(x, image.width() - 1), std::min(y, image.height() - 1), std::min(z, image.depth() - 1)};
-    updateNavigation(std::min(channel, image.channels() - 1), std::min(time, image.frames() - 1));
+    const bool sliceChanged = spatial_[2] != std::min(z, image.depth() - 1);
+    {
+        QScopedValueRollback guard(synchronizing_, true);
+        spatial_ = {std::min(x, image.width() - 1), std::min(y, image.height() - 1), std::min(z, image.depth() - 1)};
+        updateNavigation(std::min(channel, image.channels() - 1), std::min(time, image.frames() - 1));
+        if (std::none_of(linkedDocuments_.begin(), linkedDocuments_.end(), [](const auto &document) {
+            return document && document->synchronizing_;
+        })) for (auto &document : linkedDocuments_) if (document) {
+            if (const auto mapped = mapPosition(image, document->image,
+                {double(spatial_[0]), double(spatial_[1]), double(spatial_[2])})) {
+                std::array<std::size_t, 3> position;
+                for (std::size_t axis = 0; axis < 3; ++axis)
+                    position[axis] = std::size_t(std::clamp(std::round((*mapped)[axis]), 0.0,
+                        double(document->image.dimension(axis) - 1)));
+                document->setPosition(position[0], position[1], position[2], viewer->channel(), viewer->time());
+            }
+        }
+    }
+    if (sliceChanged && !linkedDocuments_.isEmpty()) synchronizeTransform(viewer, 0);
     emit displayChanged();
 }
 
@@ -258,7 +410,7 @@ void DocumentWidget::updateNavigation(std::size_t channel, std::size_t time)
             ? std::optional<QPointF>{{double(spatial_[axes[0]]) + .5, double(spatial_[axes[1]]) + .5}} : std::nullopt);
         const QStringList names{QStringLiteral("X"), QStringLiteral("Y"), QStringLiteral("Z")};
         const QString label = orthogonal ? tr("%1%2  ·  %3 %4/%5").arg(names[int(axes[0])], names[int(axes[1])], names[int(axes[2])])
-            .arg(spatial_[axes[2]] + 1).arg(image.dimension(axes[2])) : tr("Linked XY view");
+            .arg(spatial_[axes[2]] + 1).arg(image.dimension(axes[2])) : QString{};
         views_[i]->setViewLabel(orthogonal ? label : QString{});
         if (i > 0) {
             views_[i]->window()->setProperty("viewLabel", label);
@@ -371,8 +523,7 @@ void DocumentWidget::refresh()
                 ? image.permutedSpatialAxes(viewAxes(i)) : image, !view->image().empty());
             const auto axes = viewAxes(i);
             const auto &metadata = image.metadata().axes;
-            view->setPixelAspectRatio(viewMode_ == ViewMode::Orthogonal
-                && metadata[axes[0]].unit == metadata[axes[1]].unit
+            view->setPixelAspectRatio(metadata[axes[0]].unit == metadata[axes[1]].unit
                 ? metadata[axes[1]].spacing / metadata[axes[0]].spacing : 1.0);
         }
         updateNavigation(std::min(oldC, image.channels() - 1), std::min(oldT, image.frames() - 1));
@@ -383,7 +534,7 @@ void DocumentWidget::refresh()
 
 bool DocumentWidget::event(QEvent *event)
 {
-    const bool handled = QWidget::event(event);
+    const bool handled = ImageWindow::event(event);
     if (event->type() == QEvent::WindowActivate) emit activated();
     if (event->type() == QEvent::Show) {
         for (int i = 1; i < views_.size(); ++i) {
@@ -414,6 +565,7 @@ void DocumentWidget::closeEvent(QCloseEvent *event)
         if (prompt.exec() != QMessageBox::Discard) { event->ignore(); return; }
     }
     for (int i = 1; i < views_.size(); ++i) views_[i]->window()->hide();
+    unlink();
     emit closing();
     event->accept();
 }

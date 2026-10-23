@@ -861,7 +861,8 @@ TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
                         const auto offset = x + image.width() * (y + image.height() * (z + image.depth() * (c + image.channels()*t)));
                         pixels[offset] = std::uint16_t(value * (1 + c*.08) + t*80);
                     }
-    auto *other = window.addDocument(Image::allocate(PixelType::UInt8, {8, 8}));
+    auto otherMetadata = metadata; otherMetadata.axes.resize(2);
+    auto *other = window.addDocument(Image::allocate(PixelType::UInt8, {8, 8}, otherMetadata));
     auto *document = window.addDocument(image);
     EXPECT_TRUE(window.findChild<QAction *>("view.orthogonal")->isEnabled());
     orthogonal->trigger();
@@ -961,13 +962,18 @@ TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
     EXPECT_EQ(document->views()[2]->slice(), 80u);
     screenshot("orthogonal-menu-navigation.png");
     QCoreApplication::sendEvent(document, &activated);
+    QTimer::singleShot(0, &window, [] {
+        auto *picker = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        ASSERT_NE(picker, nullptr);
+        auto *images = picker->findChild<QListWidget *>("linkedImages");
+        ASSERT_NE(images, nullptr);
+        images->item(0)->setCheckState(Qt::Checked); picker->accept();
+    });
     window.commands().execute("view.linked"); settle();
-    EXPECT_EQ(document->views().size(), 2);
-    EXPECT_NE(document->viewer->window(), document->views()[1]->window());
-    document->views()[1]->window()->resize(480, 420);
-    document->views()[1]->window()->move(660, 160);
-    auto *linkedWindow = document->views()[1]->window();
-    linkedWindow->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly)->setValue(28);
+    EXPECT_EQ(document->views().size(), 1);
+    EXPECT_EQ(other->viewMode(), DocumentWidget::ViewMode::Linked);
+    EXPECT_EQ(window.documents().size(), 2);
+    document->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly)->setValue(28);
     window.panel("display")->findChild<QSpinBox *>("displayChannel")->setValue(2);
     window.panel("display")->findChild<QSpinBox *>("displayTime")->setValue(2);
     EXPECT_EQ(document->viewer->slice(), 28u);
@@ -993,7 +999,6 @@ TEST(Desktop, SynchronizedWindowsUseNormalImageSizingForTheirCalibratedPlanes)
     ImageMetadata metadata;
     metadata.axes = {{"X", .5, 0, "mm"}, {"Y", 1, 0, "mm"}, {"Z", 2, 0, "mm"}};
     auto *document = window.addDocument(Image::allocate(PixelType::UInt8, {400, 280, 80}, metadata));
-    const auto xySize = document->size();
     document->resize(640, 600);
     document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
     ASSERT_EQ(document->views().size(), 3);
@@ -1001,9 +1006,105 @@ TEST(Desktop, SynchronizedWindowsUseNormalImageSizingForTheirCalibratedPlanes)
     EXPECT_EQ(document->views()[2]->window()->size(), yzSize);
     for (auto *view : document->views())
         EXPECT_EQ(view->window()->minimumSize(), document->minimumSize());
-    document->setViewMode(DocumentWidget::ViewMode::Linked);
-    ASSERT_EQ(document->views().size(), 2);
-    EXPECT_EQ(document->views()[1]->window()->size(), xySize);
+    document->setViewMode(DocumentWidget::ViewMode::Single);
+    EXPECT_EQ(document->size(), QSize(640, 600));
+}
+
+TEST(Desktop, LinkedViewChecklistReopensWithTheGroupAndCanAddOrRemoveImages)
+{
+    MainWindow window;
+    auto *action = window.findChild<QAction *>("view.linked");
+    auto *first = window.addDocument(Image::allocate(PixelType::UInt8, {10, 8, 6}));
+    EXPECT_FALSE(action->isEnabled());
+    auto *second = window.addDocument(Image::allocate(PixelType::UInt8, {10, 8, 6}));
+    auto *third = window.addDocument(Image::allocate(PixelType::UInt8, {10, 8, 6}));
+    EXPECT_TRUE(action->isEnabled());
+    QTimer::singleShot(0, &window, [] {
+        auto *picker = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        ASSERT_NE(picker, nullptr); picker->reject();
+    });
+    window.commands().execute("view.linked");
+    EXPECT_EQ(third->viewMode(), DocumentWidget::ViewMode::Single);
+    QTimer::singleShot(0, &window, [] {
+        auto *picker = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        ASSERT_NE(picker, nullptr);
+        auto *images = picker->findChild<QListWidget *>("linkedImages");
+        ASSERT_NE(images, nullptr); ASSERT_EQ(images->count(), 2);
+        EXPECT_NE(images->item(0)->text(), images->item(1)->text());
+        images->item(1)->setCheckState(Qt::Checked); picker->accept();
+    });
+    window.commands().execute("view.linked");
+    EXPECT_EQ(first->viewMode(), DocumentWidget::ViewMode::Single);
+    EXPECT_EQ(second->viewMode(), DocumentWidget::ViewMode::Linked);
+    EXPECT_EQ(third->viewMode(), DocumentWidget::ViewMode::Linked);
+    QEvent activated(QEvent::WindowActivate); QCoreApplication::sendEvent(third, &activated);
+    QTimer::singleShot(0, &window, [] {
+        auto *picker = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        ASSERT_NE(picker, nullptr);
+        auto *images = picker->findChild<QListWidget *>("linkedImages");
+        ASSERT_NE(images, nullptr);
+        EXPECT_EQ(images->item(0)->checkState(), Qt::Unchecked);
+        EXPECT_EQ(images->item(1)->checkState(), Qt::Checked);
+        images->item(0)->setCheckState(Qt::Checked); picker->accept();
+    });
+    window.commands().execute("view.linked");
+    EXPECT_EQ(window.documents().size(), 3);
+    third->viewer->setSlice(4);
+    EXPECT_EQ(second->viewer->slice(), 4u); EXPECT_EQ(first->viewer->slice(), 4u);
+    QCoreApplication::sendEvent(first, &activated);
+    QTimer::singleShot(0, &window, [] {
+        auto *picker = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        ASSERT_NE(picker, nullptr);
+        auto *images = picker->findChild<QListWidget *>("linkedImages");
+        ASSERT_NE(images, nullptr);
+        EXPECT_EQ(images->item(0)->checkState(), Qt::Checked);
+        EXPECT_EQ(images->item(1)->checkState(), Qt::Checked);
+        images->item(1)->setCheckState(Qt::Unchecked); picker->accept();
+    });
+    window.commands().execute("view.linked");
+    EXPECT_EQ(third->viewMode(), DocumentWidget::ViewMode::Single);
+    first->viewer->setSlice(2);
+    EXPECT_EQ(second->viewer->slice(), 2u); EXPECT_EQ(third->viewer->slice(), 4u);
+    QCoreApplication::sendEvent(first, &activated);
+    QTimer::singleShot(0, &window, [] {
+        auto *picker = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        ASSERT_NE(picker, nullptr);
+        auto *images = picker->findChild<QListWidget *>("linkedImages");
+        ASSERT_NE(images, nullptr);
+        images->item(0)->setCheckState(Qt::Unchecked); picker->accept();
+    });
+    window.commands().execute("view.linked");
+    EXPECT_EQ(first->viewMode(), DocumentWidget::ViewMode::Single);
+    EXPECT_EQ(second->viewMode(), DocumentWidget::ViewMode::Single);
+}
+
+TEST(Desktop, ShowingWindowsKeepsTheirFramesAndTitleBarsOnScreen)
+{
+    MainWindow window;
+    window.move(-5000, -5000); window.show();
+    QCoreApplication::processEvents();
+    EXPECT_TRUE(window.screen()->availableGeometry().contains(window.frameGeometry()));
+    auto *document = window.addDocument(Image::allocate(PixelType::UInt8, {80, 60, 8}));
+    bool ready = false;
+    QObject::connect(document->viewer, &ImageViewer::sliceReady, &window, [&] { ready = true; });
+    QElapsedTimer timer; timer.start();
+    while (!ready && timer.elapsed() < 5000) { QCoreApplication::processEvents(); QThread::msleep(2); }
+    ASSERT_TRUE(ready);
+    document->hide();
+    document->move(0, -5000); document->resize(5000, 5000); document->show();
+    QCoreApplication::processEvents();
+    EXPECT_TRUE(document->screen()->availableGeometry().contains(document->frameGeometry()));
+    document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    for (auto *view : document->views()) {
+        auto *imageWindow = view->window();
+        imageWindow->hide(); imageWindow->move(5000, -5000); imageWindow->show();
+        QCoreApplication::processEvents();
+        EXPECT_TRUE(imageWindow->screen()->availableGeometry().contains(imageWindow->frameGeometry()));
+    }
+    auto *panel = window.panel("display");
+    panel->hide(); panel->move(5000, -5000); panel->show();
+    QCoreApplication::processEvents();
+    EXPECT_TRUE(panel->screen()->availableGeometry().contains(panel->frameGeometry()));
 }
 
 TEST(Desktop, DisplayChannelTimeSelectorsSynchronizeViewsAndFollowTheActiveDocument)
