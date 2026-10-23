@@ -8,6 +8,7 @@
 #include <limits>
 #include <atomic>
 #include <cmath>
+#include <cstring>
 #include <QApplication>
 #include <QAction>
 #include <QKeyEvent>
@@ -21,6 +22,7 @@
 #include <QClipboard>
 #include <QColorDialog>
 #include <QImage>
+#include <QBuffer>
 #include <QCoreApplication>
 #include <QDockWidget>
 #include <QTabWidget>
@@ -29,6 +31,7 @@
 #include <QSlider>
 #include <QElapsedTimer>
 #include <QStandardItemModel>
+#include <QStatusBar>
 #include <QTableView>
 #include <QTemporaryDir>
 #include <QThread>
@@ -268,6 +271,262 @@ TEST(Shortcuts, ClipboardImportKeepsSixteenBitGrayscale)
     ASSERT_NE(window.activeDocument(), nullptr);
     EXPECT_EQ(window.activeDocument()->image.pixelType(), PixelType::UInt16);
     EXPECT_DOUBLE_EQ(window.activeDocument()->image.sample(2, 1), 45000);
+}
+
+TEST(Clipboard, CopyPublishesPngAtNativeSizeWithAMinimumOf320OnOneAxis)
+{
+    MainWindow window;
+    const std::vector<std::pair<QSize, QSize>> sizes{
+        {{2, 2}, {320, 320}}, {{3, 2}, {320, 213}}, {{320, 320}, {320, 320}},
+        {{640, 480}, {640, 480}}, {{640, 100}, {640, 100}}, {{100, 640}, {100, 640}},
+        {{4096, 1}, {4096, 1}}, {{1, 4096}, {1, 4096}}};
+    for (const auto &[sourceSize, pngSize] : sizes) {
+        SCOPED_TRACE(std::to_string(sourceSize.width()) + "x" + std::to_string(sourceSize.height()));
+        auto image = Image::allocate(PixelType::UInt16, {std::size_t(sourceSize.width()), std::size_t(sourceSize.height())});
+        image.setValue(std::array<std::size_t, 2>{0, 0}, 1200);
+        image.setValue(std::array<std::size_t, 2>{image.width() - 1, image.height() - 1}, 65000);
+        auto *doc = window.addDocument(image);
+        doc->viewer->setWindow(1200, 65000);
+        doc->viewer->setZoom(2);
+        window.commands().execute("edit.copy");
+        ASSERT_TRUE(finishJobs(window));
+        const auto *mime = QApplication::clipboard()->mimeData(); ASSERT_NE(mime, nullptr);
+        ASSERT_TRUE(mime->hasFormat("image/png"));
+        const auto bytes = mime->data("image/png");
+        EXPECT_TRUE(bytes.startsWith(QByteArray::fromHex("89504e470d0a1a0a")));
+        const auto png = QImage::fromData(bytes, "PNG"); ASSERT_FALSE(png.isNull());
+        EXPECT_EQ(png.size(), pngSize);
+        EXPECT_EQ(QApplication::clipboard()->image().size(), pngSize);
+        EXPECT_EQ(png.pixelColor(0, 0), QColor(Qt::black));
+        EXPECT_EQ(png.pixelColor(png.width() - 1, png.height() - 1), QColor(Qt::white));
+        EXPECT_EQ(doc->revision, 0u);
+    }
+}
+
+TEST(Clipboard, TypedSelectionSurvivesSourceEditsAndWindowClosure)
+{
+    for (const auto type : {PixelType::UInt8, PixelType::UInt16, PixelType::Int16, PixelType::Float32,
+                           PixelType::Float64, PixelType::RGB8, PixelType::RGBA8}) {
+        SCOPED_TRACE(pixelTypeName(type).toStdString());
+        MainWindow destination;
+        Image expected;
+        {
+            MainWindow source;
+            auto image = Image::allocate(type, {5, 4, 2, 2, 2});
+            image.metadata().sourcePath = "source.tif";
+            image.metadata().axes[0].spacing = .25;
+            image.metadata().intensityScale = 2;
+            for (std::size_t y = 0; y < 4; ++y) for (std::size_t x = 0; x < 5; ++x)
+                for (std::size_t c = 0; c < componentCount(type); ++c)
+                    image.setValue(std::array<std::size_t, 5>{x, y, 1, 1, 1}, 10 * y + x + c + .123456789, c);
+            auto *doc = source.addDocument(image);
+            doc->viewer->setSlice(1, 1, 1);
+            Roi roi; roi.points = {{1, 1}, {4, 3}}; roi.z = roi.channel = roi.time = 1;
+            doc->setSelection(roi);
+            expected = image.region(std::array<std::size_t, 5>{1, 1, 1, 1, 1},
+                                    std::array<std::size_t, 5>{3, 2, 1, 1, 1}).clone();
+            source.commands().execute("edit.copy");
+            doc->replaceImage(Image::allocate(type, {1, 1}), "Replace source");
+        }
+        destination.commands().execute("edit.paste");
+        auto *pasted = destination.activeDocument(); ASSERT_NE(pasted, nullptr);
+        EXPECT_EQ(pasted->image.shape(), (std::vector<std::size_t>{3, 2}));
+        EXPECT_EQ(pasted->image.pixelType(), type);
+        EXPECT_EQ(std::memcmp(pasted->image.data(), expected.data(), expected.byteCount()), 0);
+        EXPECT_DOUBLE_EQ(pasted->image.metadata().axes[0].spacing, .25);
+        EXPECT_DOUBLE_EQ(pasted->image.metadata().intensityScale, 2);
+        EXPECT_TRUE(pasted->image.metadata().sourcePath.isEmpty());
+        EXPECT_TRUE(pasted->modified);
+    }
+}
+
+TEST(Clipboard, TypedCopyIsAvailableWhilePngWaitsForAWorker)
+{
+    std::atomic<bool> release{false};
+    MainWindow window;
+    for (int i = 0; i < 2; ++i) window.jobs().submit("Hold worker", [&](auto stop, auto) {
+        while (!release.load() && !stop.stop_requested()) QThread::msleep(1);
+    }, {});
+    auto image = Image::allocate(PixelType::UInt16, {2, 1});
+    image.setValue(std::array<std::size_t, 2>{0, 0}, 1000);
+    image.setValue(std::array<std::size_t, 2>{1, 0}, 50000);
+    auto *source = window.addDocument(image);
+    source->viewer->setWindow(1000, 50000);
+    window.commands().execute("edit.copy");
+    ASSERT_FALSE(QApplication::clipboard()->mimeData()->hasFormat("image/png"));
+    window.commands().execute("edit.pasteSpecial", {{"destination", "New image"}});
+    ASSERT_EQ(window.documents().size(), 2);
+    EXPECT_DOUBLE_EQ(window.activeDocument()->image.sample(1, 0), 50000);
+    source->viewer->setWindow(0, 1);
+    source->replaceImage(Image::allocate(PixelType::UInt16, {1, 1}), "Replace source");
+    bool timerRan = false;
+    QTimer::singleShot(0, &window, [&] { timerRan = true; });
+    QCoreApplication::processEvents();
+    EXPECT_TRUE(timerRan);
+    EXPECT_FALSE(QApplication::clipboard()->mimeData()->hasFormat("image/png"));
+    release.store(true);
+    ASSERT_TRUE(finishJobs(window));
+    const auto png = QImage::fromData(QApplication::clipboard()->mimeData()->data("image/png"), "PNG");
+    ASSERT_EQ(png.size(), QSize(320, 160));
+    EXPECT_EQ(png.pixelColor(0, 0), QColor(Qt::black));
+    EXPECT_EQ(png.pixelColor(319, 0), QColor(Qt::white));
+}
+
+TEST(Clipboard, PngExportFailureKeepsTheTypedCopy)
+{
+    MainWindow window;
+    QString failure;
+    QObject::connect(window.statusBar(), &QStatusBar::messageChanged, &window, [&](const QString &message) {
+        if (message.contains("PNG export unavailable")) failure = message;
+    });
+    auto image = Image::allocate(PixelType::UInt8, {8192, 4096});
+    image.setValue(std::array<std::size_t, 2>{0, 0}, 37);
+    auto *source = window.addDocument(image);
+    window.commands().execute("edit.copy");
+    ASSERT_TRUE(finishJobs(window));
+    EXPECT_TRUE(failure.contains("clipboard memory limit"));
+    EXPECT_FALSE(QApplication::clipboard()->mimeData()->hasFormat("image/png"));
+    window.commands().execute("edit.pasteSpecial", {{"destination", "New image"}});
+    ASSERT_EQ(window.documents().size(), 2);
+    EXPECT_EQ(window.activeDocument()->image.shape(), image.shape());
+    EXPECT_EQ(window.activeDocument()->image.pixelType(), PixelType::UInt8);
+    EXPECT_DOUBLE_EQ(window.activeDocument()->image.sample(0, 0), 37);
+    EXPECT_EQ(source->revision, 0u);
+}
+
+TEST(Clipboard, PendingExportsDoNotReplaceNewCopiesOrExternalClipboardContent)
+{
+    for (int scenario = 0; scenario < 3; ++scenario) {
+        SCOPED_TRACE(scenario);
+        std::atomic<bool> release{false};
+        MainWindow window;
+        for (int i = 0; i < 2; ++i) window.jobs().submit("Hold worker", [&](auto stop, auto) {
+            while (!release.load() && !stop.stop_requested()) QThread::msleep(1);
+        }, {});
+        auto image = Image::allocate(PixelType::UInt16, {2, 1});
+        image.setValue(std::array<std::size_t, 2>{1, 0}, 50000);
+        auto *source = window.addDocument(image);
+        window.commands().execute("edit.copy");
+        if (scenario == 0) {
+            auto newer = Image::allocate(PixelType::UInt16, {3, 2});
+            newer.setValue(std::array<std::size_t, 2>{1, 0}, 999);
+            source->replaceImage(newer, "New pixels");
+            window.commands().execute("edit.copy");
+        } else if (scenario == 1) {
+            QApplication::clipboard()->setText("New clipboard content");
+        } else {
+            window.jobs().cancelAll();
+        }
+        release.store(true);
+        ASSERT_TRUE(finishJobs(window));
+        if (scenario == 1) {
+            EXPECT_EQ(QApplication::clipboard()->text(), "New clipboard content");
+            EXPECT_FALSE(QApplication::clipboard()->mimeData()->hasFormat("image/png"));
+        } else {
+            EXPECT_EQ(QApplication::clipboard()->mimeData()->hasFormat("image/png"), scenario == 0);
+            window.commands().execute("edit.pasteSpecial", {{"destination", "New image"}});
+            const auto *pasted = window.activeDocument(); ASSERT_NE(pasted, source);
+            EXPECT_EQ(pasted->image.pixelType(), PixelType::UInt16);
+            EXPECT_EQ(pasted->image.width(), scenario == 0 ? 3u : 2u);
+            EXPECT_DOUBLE_EQ(pasted->image.sample(1, 0), scenario == 0 ? 999 : 50000);
+        }
+    }
+}
+
+TEST(Clipboard, CutOfAThinImageKeepsNativePngDimensionsAndSupportsUndo)
+{
+    MainWindow window;
+    auto image = Image::allocate(PixelType::UInt16, {4096, 1});
+    std::fill_n(reinterpret_cast<std::uint16_t *>(image.mutableData()), 4096, std::uint16_t{1200});
+    auto *source = window.addDocument(image);
+    window.commands().execute("edit.cut");
+    ASSERT_TRUE(finishJobs(window));
+    const auto png = QImage::fromData(QApplication::clipboard()->mimeData()->data("image/png"), "PNG");
+    EXPECT_EQ(png.size(), QSize(4096, 1));
+    EXPECT_DOUBLE_EQ(source->image.sample(0, 0), 0);
+    window.commands().execute("edit.undo");
+    EXPECT_DOUBLE_EQ(source->image.sample(0, 0), 1200);
+    window.commands().execute("edit.pasteSpecial", {{"destination", "New image"}});
+    ASSERT_NE(window.activeDocument(), source);
+    EXPECT_EQ(window.activeDocument()->image.shape(), image.shape());
+    EXPECT_DOUBLE_EQ(window.activeDocument()->image.sample(0, 0), 1200);
+}
+
+TEST(Clipboard, PasteSpecialChoosesTypedOrSystemPixelsInANewImage)
+{
+    MainWindow window;
+    auto image = Image::allocate(PixelType::UInt16, {2, 1});
+    image.setValue(std::array<std::size_t, 2>{0, 0}, 1000);
+    image.setValue(std::array<std::size_t, 2>{1, 0}, 50000);
+    auto *source = window.addDocument(image);
+    source->viewer->setWindow(1000, 50000);
+    window.commands().execute("edit.copy");
+    window.commands().execute("edit.pasteSpecial", {{"destination", "New image"}});
+    ASSERT_EQ(window.documents().size(), 2);
+    auto *typed = window.activeDocument(); ASSERT_NE(typed, source);
+    EXPECT_EQ(typed->image.pixelType(), PixelType::UInt16);
+    EXPECT_EQ(typed->image.shape(), image.shape());
+    EXPECT_DOUBLE_EQ(typed->image.sample(1, 0), 50000);
+    ASSERT_TRUE(finishJobs(window));
+
+    bool inspected = false;
+    QTimer::singleShot(0, &window, [&] {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        if (!dialog) return;
+        auto *source = dialog->findChild<QComboBox *>("source");
+        auto *destination = dialog->findChild<QComboBox *>("destination");
+        EXPECT_NE(source, nullptr); EXPECT_NE(destination, nullptr);
+        if (source && destination) {
+            source->setCurrentText("System image");
+            destination->setCurrentText("New image");
+            inspected = true;
+        }
+        dialog->accept();
+    });
+    window.executeCommand("edit.pasteSpecial");
+    ASSERT_TRUE(inspected);
+    ASSERT_EQ(window.documents().size(), 3);
+    const auto *rendered = window.activeDocument();
+    EXPECT_EQ(rendered->image.pixelType(), PixelType::RGBA8);
+    EXPECT_EQ(rendered->image.shape(), (std::vector<std::size_t>{320, 160}));
+    EXPECT_DOUBLE_EQ(rendered->image.sample(0, 0), 0);
+    EXPECT_DOUBLE_EQ(rendered->image.sample(319, 0), 255);
+    EXPECT_EQ(source->revision, 0u); EXPECT_EQ(typed->revision, 0u);
+}
+
+TEST(Clipboard, ExternalPngReplacesTypedCopyAndPastesIntoCurrentPlaneWithUndo)
+{
+    MainWindow window;
+    auto *source = window.addDocument(Image::allocate(PixelType::UInt16, {1, 1}));
+    window.commands().execute("edit.copy");
+    QImage raster(3, 2, QImage::Format_RGBA8888);
+    raster.fill(QColor(12, 34, 56, 78));
+    QBuffer png; ASSERT_TRUE(png.open(QIODevice::WriteOnly)); ASSERT_TRUE(raster.save(&png, "PNG"));
+    auto *mime = new QMimeData;
+    mime->setData("image/png", png.data());
+    QApplication::clipboard()->setMimeData(mime);
+    auto *target = window.addDocument(Image::allocate(PixelType::RGBA8, {4, 4, 2, 2, 2}));
+    target->viewer->setSlice(1, 1, 1);
+    Roi roi; roi.points = {{-1, 1}, {2, 3}}; roi.z = roi.channel = roi.time = 1;
+    target->setSelection(roi);
+    window.commands().execute("edit.paste");
+    QApplication::clipboard()->setText("Later clipboard content");
+    target->viewer->setSlice(0, 0, 0);
+    ASSERT_TRUE(finishJobs(window));
+    const std::array<double, 4> expected{12, 34, 56, 78};
+    for (std::size_t c = 0; c < 4; ++c) {
+        EXPECT_DOUBLE_EQ(target->image.sample(0, 1, 1, 1, 1, c), expected[c]);
+        EXPECT_DOUBLE_EQ(target->image.sample(1, 2, 1, 1, 1, c), expected[c]);
+        EXPECT_DOUBLE_EQ(target->image.sample(2, 1, 1, 1, 1, c), 0);
+        EXPECT_DOUBLE_EQ(target->image.sample(0, 1, 0, 0, 0, c), 0);
+    }
+    EXPECT_EQ(source->revision, 0u);
+    QEvent activate(QEvent::WindowActivate); QCoreApplication::sendEvent(target, &activate);
+    window.commands().execute("edit.undo");
+    EXPECT_DOUBLE_EQ(target->image.sample(0, 1, 1, 1, 1, 3), 0);
+    const auto revision = target->revision;
+    window.commands().execute("edit.paste");
+    EXPECT_FALSE(window.jobs().busy()); EXPECT_EQ(target->revision, revision);
 }
 
 TEST(Shortcuts, FillCopyPasteInvertAndUndoPreserveScientificValues)

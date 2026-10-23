@@ -12,6 +12,7 @@
 #include <QPlainTextEdit>
 #include <QApplication>
 #include <QCheckBox>
+#include <QBuffer>
 #include <QClipboard>
 #include <QColorDialog>
 #include <QImage>
@@ -70,6 +71,32 @@
 using namespace imagecxx;
 
 namespace {
+// Keep scientific pixels in process while offering PNG to other applications.
+class ImageMimeData : public QMimeData {
+public:
+    ImageMimeData() { setData("application/x-imagecxx-image", {}); }
+    std::shared_ptr<const Image> image;
+};
+
+Image imageFromRaster(QImage raster)
+{
+    if (raster.isNull()) return {};
+    PixelType type;
+    if (raster.format() == QImage::Format_Grayscale16) type = PixelType::UInt16;
+    else if (raster.isGrayscale() && !raster.hasAlphaChannel()) {
+        type = PixelType::UInt8; raster = raster.convertToFormat(QImage::Format_Grayscale8);
+    } else if (raster.hasAlphaChannel()) {
+        type = PixelType::RGBA8; raster = raster.convertToFormat(QImage::Format_RGBA8888);
+    } else {
+        type = PixelType::RGB8; raster = raster.convertToFormat(QImage::Format_RGB888);
+    }
+    if (raster.isNull()) throw std::runtime_error("Cannot convert clipboard image");
+    auto image = Image::allocate(type, {std::size_t(raster.width()), std::size_t(raster.height())});
+    auto *data = image.mutableData(); const auto rowBytes = image.width() * bytesPerPixel(type);
+    for (int y = 0; y < raster.height(); ++y) std::memcpy(data + y * rowBytes, raster.constScanLine(y), rowBytes);
+    return image;
+}
+
 Image cropToBounds(const Image &image, const QRectF &bounds)
 {
     const auto clipped = bounds.normalized().toAlignedRect().intersected(QRect(0, 0, int(image.width()), int(image.height())));
@@ -80,16 +107,20 @@ Image cropToBounds(const Image &image, const QRectF &bounds)
     return image.region(start, extent);
 }
 
-QImage displayRaster(const Image &image, double minimum, double maximum)
+QImage displayRaster(const Image &image, double minimum, double maximum, std::stop_token stop = {})
 {
     QImage raster(int(image.width()), int(image.height()), QImage::Format_RGBA8888);
+    if (raster.isNull()) throw std::runtime_error("Cannot allocate display image");
     const auto components = componentCount(image.pixelType());
-    for (int y = 0; y < raster.height(); ++y) for (int x = 0; x < raster.width(); ++x) {
-        auto *pixel = raster.scanLine(y) + 4 * x;
-        for (int c = 0; c < 4; ++c) {
-            double value = c == 3 && components != 4 ? 255 : image.sample(x, y, 0, 0, 0, components >= 3 ? c : 0);
-            if (c < 3 && components < 3) value = maximum > minimum ? 255 * (value - minimum) / (maximum - minimum) : 0;
-            pixel[c] = uchar(std::clamp(std::isfinite(value) ? value : 0., 0., 255.));
+    for (int y = 0; y < raster.height(); ++y) {
+        if (stop.stop_requested()) return {};
+        for (int x = 0; x < raster.width(); ++x) {
+            auto *pixel = raster.scanLine(y) + 4 * x;
+            for (int c = 0; c < 4; ++c) {
+                double value = c == 3 && components != 4 ? 255 : image.sample(x, y, 0, 0, 0, components >= 3 ? c : 0);
+                if (c < 3 && components < 3) value = maximum > minimum ? 255 * (value - minimum) / (maximum - minimum) : 0;
+                pixel[c] = uchar(std::clamp(std::isfinite(value) ? value : 0., 0., 255.));
+            }
         }
     }
     return raster;
@@ -707,62 +738,75 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                 image = cropToBounds(image, roi->bounds());
                 if (image.empty()) return;
             }
-            clipboard_ = image.clone();
-            if (QApplication::keyboardModifiers().testFlag(Qt::AltModifier)) {
-                QApplication::clipboard()->setImage(displayRaster(image, doc->viewer->windowMinimum(), doc->viewer->windowMaximum()));
-            }
+            auto mime = std::make_unique<ImageMimeData>();
+            mime->image = std::make_shared<Image>(image.clone());
+            const std::weak_ptr<const Image> snapshot = mime->image;
+            const auto minimum = doc->viewer->windowMinimum(), maximum = doc->viewer->windowMaximum();
+            const QPointer<ImageMimeData> pending = mime.get();
+            const std::stop_source cancellation;
+            connect(mime.get(), &QObject::destroyed, this, [cancellation] { cancellation.request_stop(); });
+            QApplication::clipboard()->setMimeData(mime.release());
+            auto output = std::make_shared<std::pair<QImage, QByteArray>>();
+            jobs_.submit(tr("Preparing clipboard PNG"), [snapshot, minimum, maximum, output, cancellation](auto stop, auto progress) {
+                std::stop_callback cancelled(stop, [cancellation] { cancellation.request_stop(); });
+                const auto token = cancellation.get_token();
+                const auto held = snapshot.lock();
+                if (!held || token.stop_requested()) return;
+                const auto &image = *held;
+                // Include the source raster, scaled raster, encoded PNG capacity and codec working buffers.
+                const long double scale = std::max(1.L, 320.L / std::max(image.width(), image.height()));
+                const auto width = std::ceil(image.width() * scale), height = std::ceil(image.height() * scale);
+                const auto required = 4.L * image.width() * image.height() + 12.L * width * height + 8 * 1024 * 1024;
+                constexpr std::size_t exportBudget = 512 * 1024 * 1024;
+                if (width > std::numeric_limits<int>::max() || height > std::numeric_limits<int>::max() || required > exportBudget)
+                    throw std::length_error("PNG export exceeds the clipboard memory limit.");
+                detail::checkMemoryBudget(std::size_t(required), detail::availableMemoryBytes());
+                auto &[raster, bytes] = *output;
+                raster = displayRaster(image, minimum, maximum, token);
+                if (token.stop_requested()) return;
+                progress(.5);
+                if (raster.width() < 320 && raster.height() < 320)
+                    raster = raster.scaled(QSize(320, 320), Qt::KeepAspectRatio, Qt::FastTransformation);
+                if (token.stop_requested()) return;
+                QBuffer png(&bytes);
+                if (!png.open(QIODevice::WriteOnly) || !raster.save(&png, "PNG"))
+                    throw std::runtime_error("Cannot encode clipboard PNG");
+                progress(1);
+            }, [this, pending, output, cancellation](auto error) {
+                if (!pending || cancellation.stop_requested() || QApplication::clipboard()->mimeData() != pending.data()) return;
+                if (error) {
+                    QString reason;
+                    try { std::rethrow_exception(error); }
+                    catch (const std::exception &exception) { reason = QString::fromUtf8(exception.what()); }
+                    catch (...) { reason = tr("Unknown error."); }
+                    statusBar()->showMessage(tr("Image copied internally. PNG export unavailable: %1").arg(reason), 15000);
+                    return;
+                }
+                auto ready = std::make_unique<ImageMimeData>();
+                ready->image = pending->image;
+                ready->setData("image/png", output->second);
+                ready->setImageData(output->first);
+                QApplication::clipboard()->setMimeData(ready.release());
+            });
             if (cut) executeCommand("edit.clear");
         }});
     }
-    commands_.add({"edit.paste", tr("Paste"), "Edit", QKeySequence("V"), true, {}, [this](const QVariantMap &) {
-        auto *doc = activeDocument(); if (!doc || clipboard_.empty()) return;
-        if (doc->image.shape().size() > 5) { showError(tr("Pixel editing supports up to five dimensions.")); return; }
-        if (clipboard_.pixelType() != doc->image.pixelType()) { showError(tr("Clipboard and image pixel types must match.")); return; }
-        const Image input = doc->image, clipboard = clipboard_;
-        const QPointer<DocumentWidget> target = doc;
-        const auto revision = doc->revision;
-        const auto z = doc->viewer->slice(), c = doc->viewer->channel(), t = doc->viewer->time();
-        auto output = std::make_shared<Image>();
-        const auto roi = selectedRoi();
-        const auto origin = roi ? roi->bounds().topLeft().toPoint() : QPoint(0, 0);
-        jobs_.submit(tr("Paste"), [input, clipboard, output, origin, z, c, t](auto stop, auto progress) {
-            *output = input.clone();
-            const auto pixelBytes = bytesPerPixel(input.pixelType());
-            auto *destination = output->mutableData() + (z + input.depth() * (c + input.channels() * t))
-                * input.width() * input.height() * pixelBytes;
-            const auto left = std::max<qint64>(0, origin.x()), top = std::max<qint64>(0, origin.y());
-            const auto right = std::min<qint64>(input.width(), qint64(origin.x()) + qint64(clipboard.width()));
-            const auto bottom = std::min<qint64>(input.height(), qint64(origin.y()) + qint64(clipboard.height()));
-            for (auto y = top; y < bottom && right > left; ++y) {
-                if (stop.stop_requested()) throw std::runtime_error("Paste cancelled");
-                std::memcpy(destination + (y * input.width() + left) * pixelBytes,
-                    clipboard.data() + ((y - origin.y()) * clipboard.width() + left - origin.x()) * pixelBytes,
-                    (right - left) * pixelBytes);
-                progress(double(y - top + 1) / (bottom - top));
-            }
-        }, [this, target, revision, output](auto error) {
-            if (showJobError(error)) return;
-            if (target && target->revision == revision) target->replaceImage(*output, tr("Paste"));
-            else {
-                output->metadata().sourcePath.clear();
-                addDocument(*output)->modified = true;
-            }
-            updatePanels();
-        });
+    commands_.add({"edit.paste", tr("Paste"), "Edit", QKeySequence("V"), false, {}, [this](const QVariantMap &) {
+        pasteImage(false, false);
+    }});
+    commands_.add({"edit.pasteSpecial", tr("Paste special..."), "Edit", {}, false,
+        {{"source", tr("Source"), ParameterKind::Choice, "Automatic", 0, 0, {"Automatic", "System image"}},
+         {"destination", tr("Destination"), ParameterKind::Choice, "Current image", 0, 0, {"Current image", "New image"}}},
+        [this](const QVariantMap &parameters) {
+            pasteImage(parameters["source"].toString() == "System image", parameters["destination"].toString() == "New image");
     }});
     for (const bool capture : {false, true}) {
         commands_.add({capture ? "file.capture" : "file.clipboard", capture ? tr("Capture screen") : tr("New image from clipboard"),
             "File", QKeySequence(capture ? "Shift+G" : "Shift+V"), false, {}, [this, capture](const QVariantMap &) {
-            auto raster = capture ? screen()->grabWindow(0).toImage() : QApplication::clipboard()->image();
-            if (raster.isNull()) return;
-            PixelType type = PixelType::RGBA8;
-            if (raster.format() == QImage::Format_Grayscale16) type = PixelType::UInt16;
-            else if (raster.isGrayscale()) { type = PixelType::UInt8; raster = raster.convertToFormat(QImage::Format_Grayscale8); }
-            else raster = raster.convertToFormat(QImage::Format_RGBA8888);
-            ImageMetadata metadata; metadata.name = capture ? tr("Screen") : tr("Clipboard");
-            auto image = Image::allocate(type, {std::size_t(raster.width()), std::size_t(raster.height())}, metadata);
-            auto *data = image.mutableData(); const auto rowBytes = image.width() * bytesPerPixel(type);
-            for (int y = 0; y < raster.height(); ++y) std::memcpy(data + y * rowBytes, raster.constScanLine(y), rowBytes);
+            if (!capture) { pasteImage(true, true); return; }
+            auto image = imageFromRaster(screen()->grabWindow(0).toImage());
+            if (image.empty()) return;
+            image.metadata().name = tr("Screen");
             addDocument(std::move(image))->modified = true; updatePanels();
         }});
     }
@@ -1326,6 +1370,65 @@ DocumentWidget *MainWindow::addDocument(Image image)
     });
     setActiveDocument(document);
     return document;
+}
+
+void MainWindow::pasteImage(bool systemImage, bool newImage)
+{
+    const auto *mime = QApplication::clipboard()->mimeData();
+    if (!mime) return;
+    Image clipboard;
+    if (const auto *native = dynamic_cast<const ImageMimeData *>(mime); native && !systemImage) {
+        clipboard = *native->image;
+    } else {
+        QImage raster;
+        if (mime->hasFormat("image/png")) raster.loadFromData(mime->data("image/png"), "PNG");
+        if (raster.isNull()) raster = QApplication::clipboard()->image();
+        clipboard = imageFromRaster(std::move(raster));
+    }
+    if (clipboard.empty()) return;
+    auto *doc = activeDocument();
+    if (newImage || !doc) {
+        clipboard.metadata().name = tr("Clipboard");
+        clipboard.metadata().sourcePath.clear();
+        addDocument(std::move(clipboard))->modified = true;
+        updatePanels();
+        return;
+    }
+    if (doc->image.shape().size() > 5) { showError(tr("Pixel editing supports up to five dimensions.")); return; }
+    if (clipboard.pixelType() != doc->image.pixelType()) {
+        showError(tr("Clipboard and image pixel types must match. Use Paste special to paste into a new image.")); return;
+    }
+    const Image input = doc->image;
+    const QPointer<DocumentWidget> target = doc;
+    const auto revision = doc->revision;
+    const auto z = doc->viewer->slice(), c = doc->viewer->channel(), t = doc->viewer->time();
+    auto output = std::make_shared<Image>();
+    const auto roi = selectedRoi();
+    const auto origin = roi ? roi->bounds().topLeft().toPoint() : QPoint(0, 0);
+    jobs_.submit(tr("Paste"), [input, clipboard, output, origin, z, c, t](auto stop, auto progress) {
+        *output = input.clone();
+        const auto pixelBytes = bytesPerPixel(input.pixelType());
+        auto *destination = output->mutableData() + (z + input.depth() * (c + input.channels() * t))
+            * input.width() * input.height() * pixelBytes;
+        const auto left = std::max<qint64>(0, origin.x()), top = std::max<qint64>(0, origin.y());
+        const auto right = std::min<qint64>(input.width(), qint64(origin.x()) + qint64(clipboard.width()));
+        const auto bottom = std::min<qint64>(input.height(), qint64(origin.y()) + qint64(clipboard.height()));
+        for (auto y = top; y < bottom && right > left; ++y) {
+            if (stop.stop_requested()) throw std::runtime_error("Paste cancelled");
+            std::memcpy(destination + (y * input.width() + left) * pixelBytes,
+                clipboard.data() + ((y - origin.y()) * clipboard.width() + left - origin.x()) * pixelBytes,
+                (right - left) * pixelBytes);
+            progress(double(y - top + 1) / (bottom - top));
+        }
+    }, [this, target, revision, output](auto error) {
+        if (showJobError(error)) return;
+        if (target && target->revision == revision) target->replaceImage(*output, tr("Paste"));
+        else {
+            output->metadata().sourcePath.clear();
+            addDocument(*output)->modified = true;
+        }
+        updatePanels();
+    });
 }
 
 void MainWindow::importRaw(const QString &path)

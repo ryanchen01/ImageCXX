@@ -81,11 +81,11 @@ private:
     QMenu *windowMenu_ = nullptr;
     bool loadingPanels_ = false;
     QMap<QKeySequence, QAction *> shortcutActions_;
-    imagecxx::Image clipboard_;
     QColor drawingColor_ = Qt::white;
     QString repeatCommand_;
     QVariantMap repeatParameters_;
     void importRaw(const QString &path);
+    void pasteImage(bool systemImage, bool newImage);
     void openFiles(const QStringList &paths);
     void setActiveDocument(imagecxx::DocumentWidget *document);
     void clearDocuments();
