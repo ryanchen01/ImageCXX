@@ -52,6 +52,51 @@ TEST(ImageModel, ViewsRetainStridesAndDetachOnMutation) {
     EXPECT_EQ(image.value(index), 50000);
 }
 
+TEST(ImageModel, SpatialPermutationsShareTypedStorageAndPreserveChannelTimeAndGeometry) {
+    for (const auto type : {PixelType::UInt8, PixelType::UInt16, PixelType::Int16, PixelType::Float32,
+                           PixelType::Float64, PixelType::RGB8, PixelType::RGBA8}) {
+        ImageMetadata metadata;
+        metadata.axes = {{"X", .5, 10, "mm"}, {"Y", 1, 20, "mm"}, {"Z", 2, 30, "mm"}, {"C"}, {"T"}};
+        metadata.direction = {0, -1, 0, 1, 0, 0, 0, 0, 1};
+        auto image = Image::allocate(type, {5, 4, 3, 2, 2}, metadata);
+        for (std::size_t t = 0; t < 2; ++t)
+            for (std::size_t c = 0; c < 2; ++c)
+                for (std::size_t z = 0; z < 3; ++z)
+                    for (std::size_t y = 0; y < 4; ++y)
+                        for (std::size_t x = 0; x < 5; ++x)
+                            for (std::size_t component = 0; component < componentCount(type); ++component)
+                                image.setValue(std::array{x, y, z, c, t}, x + 5*y + 20*z + 60*c + 120*t + component*3, component);
+        auto xz = image.permutedSpatialAxes({0, 2, 1});
+        auto yz = image.permutedSpatialAxes({1, 2, 0});
+        EXPECT_EQ(xz.data(), image.data()); EXPECT_EQ(yz.data(), image.data());
+        EXPECT_EQ(xz.pixelType(), type); EXPECT_EQ(yz.pixelType(), type);
+        EXPECT_EQ(xz.shape(), (std::vector<std::size_t>{5, 3, 4, 2, 2}));
+        EXPECT_EQ(yz.shape(), (std::vector<std::size_t>{4, 3, 5, 2, 2}));
+        EXPECT_EQ(xz.strides()[1], image.strides()[2]);
+        EXPECT_EQ(yz.metadata().axes[0].name, "Y");
+        EXPECT_DOUBLE_EQ(xz.metadata().axes[1].spacing, 2);
+        EXPECT_DOUBLE_EQ(xz.metadata().axes[1].origin, 30);
+        EXPECT_EQ(xz.metadata().direction, (std::vector<double>{0, 0, -1, 0, 1, 0, 1, 0, 0}));
+        auto plane = xz.slice(2, 1, 1).materialized();
+        for (std::size_t z = 0; z < 3; ++z)
+            for (std::size_t x = 0; x < 5; ++x)
+                for (std::size_t component = 0; component < componentCount(type); ++component) {
+                    EXPECT_EQ(plane.sample(x, z, 0, 0, 0, component), image.sample(x, 2, z, 1, 1, component));
+                    EXPECT_EQ(yz.sample(2, z, x, 1, 1, component), image.sample(x, 2, z, 1, 1, component));
+                }
+        const auto original = image.sample(1, 2, 1);
+        xz.setValue(std::array<std::size_t, 5>{1, 1, 2, 0, 0}, 17);
+        EXPECT_EQ(image.sample(1, 2, 1), original);
+        EXPECT_EQ(xz.sample(1, 1, 2), 17);
+        EXPECT_THROW(image.permutedSpatialAxes({0, 0, 2}), std::invalid_argument);
+    }
+    auto image = Image::allocate(PixelType::Float64, {5, 4, 3});
+    image.setValue(std::array<std::size_t, 3>{3, 2, 1}, 1.000000000000003);
+    auto region = image.region(std::array<std::size_t, 3>{1, 1, 0}, std::array<std::size_t, 3>{4, 3, 3});
+    EXPECT_DOUBLE_EQ(region.permutedSpatialAxes({1, 2, 0}).sample(1, 1, 2), 1.000000000000003);
+    EXPECT_THROW(Image::allocate(PixelType::UInt8, {3, 2}).permutedSpatialAxes({0, 2, 1}), std::invalid_argument);
+}
+
 TEST(ImageModel, MappedFilesStayReadOnlyAndEditsDetach) {
     QTemporaryFile file;
     ASSERT_TRUE(file.open());

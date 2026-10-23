@@ -545,6 +545,182 @@ TEST(Desktop, StartsCompactAndOpensIndependentImageAndToolWindows)
     EXPECT_TRUE(window.isVisible());
 }
 
+TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
+{
+    MainWindow window;
+    auto *toolbar = window.findChild<QToolBar *>("imageTools");
+    auto *orthogonal = window.findChild<QAction *>("view.orthogonal");
+    ASSERT_NE(toolbar, nullptr); ASSERT_NE(orthogonal, nullptr);
+    EXPECT_FALSE(toolbar->actions().contains(orthogonal));
+    EXPECT_EQ(toolbar->widgetForAction(orthogonal), nullptr);
+    EXPECT_FALSE(orthogonal->isEnabled());
+    bool inMenu = false;
+    for (auto *menu : window.findChildren<QMenu *>()) if (menu->actions().contains(orthogonal)) inMenu = true;
+    EXPECT_TRUE(inMenu);
+    ImageMetadata metadata;
+    metadata.name = "Calibration phantom";
+    metadata.axes = {{"X", .6, 0, "mm"}, {"Y", .6, 0, "mm"}, {"Z", 1.2, 0, "mm"}, {"C"}, {"T"}};
+    auto image = Image::allocate(PixelType::UInt16, {128, 112, 64, 2, 2}, metadata);
+    auto *pixels = reinterpret_cast<std::uint16_t *>(image.mutableData());
+    for (std::size_t t = 0; t < 2; ++t)
+        for (std::size_t c = 0; c < 2; ++c)
+            for (std::size_t z = 0; z < image.depth(); ++z)
+                for (std::size_t y = 0; y < image.height(); ++y)
+                    for (std::size_t x = 0; x < image.width(); ++x) {
+                        const double dx = (double(x) - 63.5) / 53, dy = (double(y) - 55.5) / 46, dz = (double(z) - 31.5) / 27;
+                        const double radius = std::sqrt(dx*dx + dy*dy + dz*dz);
+                        double value = radius < 1 ? 1500 + 220 * std::sin(dx*24) * std::cos(dy*20) * std::cos(dz*16) : 0;
+                        if (radius > .91 && radius < 1) value = 3300;
+                        if (std::pow((dx + .32) / .22, 2) + std::pow(dy / .38, 2) + std::pow(dz / .5, 2) < 1) value = 600;
+                        if (std::pow((dx - .3) / .2, 2) + std::pow((dy + .12) / .24, 2) + std::pow((dz - .08) / .3, 2) < 1) value = 2600;
+                        const auto offset = x + image.width() * (y + image.height() * (z + image.depth() * (c + image.channels()*t)));
+                        pixels[offset] = std::uint16_t(value * (1 + c*.08) + t*80);
+                    }
+    auto *other = window.addDocument(Image::allocate(PixelType::UInt8, {8, 8}));
+    auto *document = window.addDocument(image);
+    EXPECT_TRUE(window.findChild<QAction *>("view.orthogonal")->isEnabled());
+    orthogonal->trigger();
+    EXPECT_EQ(document->viewMode(), DocumentWidget::ViewMode::Orthogonal);
+    EXPECT_TRUE(window.findChild<QAction *>("view.orthogonal")->isChecked());
+    for (auto *view : document->views())
+        EXPECT_TRUE(view->window()->findChildren<QComboBox *>(QString{}, Qt::FindDirectChildrenOnly).isEmpty());
+    EXPECT_EQ(window.documents().size(), 2);
+    EXPECT_EQ(other->viewMode(), DocumentWidget::ViewMode::Single);
+    document->setPosition(64, 56, 32, 0, 0);
+    document->viewer->setWindow(0, 3600);
+    document->viewer->setScaleBarVisible(true);
+    document->viewer->setLinearInterpolation(true);
+    // Place windows for review captures only. The application leaves placement to the user.
+    document->resize(600, 650); document->move(16, 160);
+    document->views()[1]->window()->resize(480, 300); document->views()[1]->window()->move(660, 160);
+    document->views()[2]->window()->resize(480, 300); document->views()[2]->window()->move(660, 520);
+
+    const auto capture = qEnvironmentVariable("IMAGECXX_VIEWS_CAPTURE_DIR");
+    const auto settle = [] {
+        QElapsedTimer timer; timer.start();
+        while (timer.elapsed() < 350) { QCoreApplication::processEvents(); QThread::msleep(2); }
+    };
+    const auto screenshot = [&](const QString &name) {
+        if (capture.isEmpty()) return;
+        ASSERT_NE(QApplication::platformName(), "offscreen");
+        QDir().mkpath(capture);
+        other->hide();
+        window.move(16, 16); window.show(); window.raise();
+        document->showViews();
+        for (auto *view : document->views()) view->window()->raise();
+        document->activateWindow(); settle();
+        window.repaint(); QCoreApplication::processEvents();
+        auto frame = window.frameGeometry().united(document->frameGeometry());
+        for (auto *view : document->views()) frame = frame.united(view->window()->frameGeometry());
+        EXPECT_TRUE(document->screen()->grabWindow(0, frame.x(), frame.y(), frame.width(), frame.height()).save(capture + "/" + name));
+    };
+    settle();
+    auto *xzWindow = document->views()[1]->window();
+    auto *yzWindow = document->views()[2]->window();
+    EXPECT_NE(xzWindow, yzWindow); EXPECT_NE(xzWindow, document);
+    QEvent activated(QEvent::WindowActivate);
+    QCoreApplication::sendEvent(other, &activated);
+    EXPECT_EQ(window.activeDocument(), other);
+    QCoreApplication::sendEvent(xzWindow, &activated);
+    EXPECT_EQ(window.activeDocument(), document);
+    sendKey(document->views()[1], Qt::Key_I);
+    EXPECT_TRUE(window.panel("properties")->isVisible());
+    window.panel("properties")->hide();
+    xzWindow->close();
+    EXPECT_FALSE(xzWindow->isVisible()); EXPECT_TRUE(window.documents().contains(document));
+    QCoreApplication::sendEvent(document, &activated);
+    window.findChild<QAction *>("view.orthogonal")->trigger();
+    EXPECT_TRUE(window.findChild<QAction *>("view.orthogonal")->isChecked());
+    EXPECT_EQ(document->views()[1]->window(), xzWindow);
+    EXPECT_TRUE(xzWindow->isVisible());
+    screenshot("orthogonal-menu-only.png");
+    document->viewer->window()->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly)->setValue(25);
+    xzWindow->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly)->setValue(50);
+    yzWindow->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly)->setValue(80);
+    EXPECT_EQ(document->views()[1]->slice(), 50u);
+    EXPECT_EQ(document->viewer->slice(), 25u);
+    EXPECT_EQ(document->views()[2]->slice(), 80u);
+    screenshot("orthogonal-menu-navigation.png");
+    QCoreApplication::sendEvent(document, &activated);
+    window.commands().execute("view.linked"); settle();
+    EXPECT_EQ(document->views().size(), 2);
+    EXPECT_NE(document->viewer->window(), document->views()[1]->window());
+    document->views()[1]->window()->resize(480, 420);
+    document->views()[1]->window()->move(660, 160);
+    auto *linkedWindow = document->views()[1]->window();
+    linkedWindow->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly)->setValue(28);
+    window.panel("display")->findChild<QSpinBox *>("displayChannel")->setValue(2);
+    window.panel("display")->findChild<QSpinBox *>("displayTime")->setValue(2);
+    EXPECT_EQ(document->viewer->slice(), 28u);
+    EXPECT_EQ(other->viewer->slice(), 0u); EXPECT_DOUBLE_EQ(other->viewer->gamma(), 1);
+    screenshot("linked-view-menu.png");
+    window.commands().execute("view.single");
+    EXPECT_EQ(document->views().size(), 1);
+    auto *flat = window.addDocument(Image::allocate(PixelType::UInt8, {8, 8}));
+    EXPECT_FALSE(window.findChild<QAction *>("view.orthogonal")->isEnabled());
+    EXPECT_EQ(flat->viewMode(), DocumentWidget::ViewMode::Single);
+    document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    QPointer<QWidget> retiredWindow(document->views()[1]->window());
+    document->close();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    EXPECT_TRUE(retiredWindow.isNull());
+}
+
+TEST(Desktop, DisplayChannelTimeSelectorsSynchronizeViewsAndFollowTheActiveDocument)
+{
+    MainWindow window;
+    auto *document = window.addDocument(Image::allocate(PixelType::UInt16, {10, 8, 6, 2, 4}));
+    document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    auto *channel = window.panel("display")->findChild<QSpinBox *>("displayChannel");
+    auto *time = window.panel("display")->findChild<QSpinBox *>("displayTime");
+    ASSERT_NE(channel, nullptr); ASSERT_NE(time, nullptr);
+    EXPECT_EQ(channel->maximum(), 2); EXPECT_EQ(time->maximum(), 4);
+    channel->setValue(2); time->setValue(3);
+    for (auto *view : document->views()) { EXPECT_EQ(view->channel(), 1u); EXPECT_EQ(view->time(), 2u); }
+    document->views()[1]->setSlice(3, 0, 3);
+    EXPECT_EQ(channel->value(), 1); EXPECT_EQ(time->value(), 4);
+    auto *flat = window.addDocument(Image::allocate(PixelType::UInt8, {4, 4}));
+    EXPECT_FALSE(channel->isEnabled()); EXPECT_FALSE(time->isEnabled());
+    EXPECT_EQ(channel->maximum(), 1); EXPECT_EQ(time->maximum(), 1);
+    QEvent activated(QEvent::WindowActivate); QCoreApplication::sendEvent(document, &activated);
+    EXPECT_TRUE(channel->isEnabled()); EXPECT_TRUE(time->isEnabled());
+    EXPECT_EQ(channel->value(), 1); EXPECT_EQ(time->value(), 4);
+    channel->setValue(2);
+    for (auto *view : document->views()) { EXPECT_EQ(view->channel(), 1u); EXPECT_EQ(view->time(), 3u); }
+    EXPECT_EQ(flat->viewer->channel(), 0u); EXPECT_EQ(flat->viewer->time(), 0u);
+    EXPECT_FALSE(document->modified);
+}
+
+TEST(Desktop, IntersectionNavigationPreservesDocumentPanels)
+{
+    MainWindow window;
+    auto *document = window.addDocument(Image::allocate(PixelType::UInt16, {10, 8, 6, 2, 3}));
+    document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    Roi roi; roi.name = "Saved selection"; roi.points = {{1, 1}, {4, 4}};
+    document->rois.push_back(roi); document->setSelection(roi);
+    auto *properties = window.panel("properties")->findChild<QTreeWidget *>();
+    auto *rois = window.panel("rois")->findChild<QListWidget *>();
+    auto *history = window.panel("history")->findChild<QListWidget *>();
+    ASSERT_NE(properties, nullptr); ASSERT_NE(rois, nullptr); ASSERT_NE(history, nullptr);
+    properties->topLevelItem(0)->setExpanded(true);
+    ASSERT_NE(rois->currentItem(), nullptr);
+    const auto selectedId = rois->currentItem()->data(Qt::UserRole);
+    int resets = 0;
+    for (auto *model : {properties->model(), rois->model(), history->model()})
+        QObject::connect(model, &QAbstractItemModel::modelReset, &window, [&] { ++resets; });
+    document->views()[1]->positionPicked({2.5, 1.5});
+    document->views()[1]->positionPicked({2.5, 1.5});
+    document->views()[2]->positionPicked({3.5, 4.5});
+    document->setPosition(2, 3, 4, 1, 2);
+    EXPECT_EQ(resets, 0);
+    EXPECT_TRUE(properties->topLevelItem(0)->isExpanded());
+    ASSERT_NE(rois->currentItem(), nullptr);
+    EXPECT_EQ(rois->currentItem()->data(Qt::UserRole), selectedId);
+    EXPECT_EQ(window.panel("display")->findChild<QSpinBox *>("displayChannel")->value(), 2);
+    EXPECT_EQ(window.panel("display")->findChild<QSpinBox *>("displayTime")->value(), 3);
+    for (auto *view : document->views()) { EXPECT_EQ(view->channel(), 1u); EXPECT_EQ(view->time(), 2u); }
+}
+
 TEST(Desktop, DisplaySlidersTrackValuesAutoRangeAndActiveDocument)
 {
     MainWindow window;
@@ -1610,11 +1786,14 @@ TEST(Desktop, SavingPixelsWithRoisClearsModifiedState)
     QTemporaryDir directory;
     MainWindow window;
     auto image = Image::allocate(PixelType::UInt16, {8, 8, 2});
+    image.metadata().name = "original.tif";
     auto *pixels = reinterpret_cast<std::uint16_t *>(image.mutableData());
     for (std::size_t i = 0; i < image.pixelCount(); ++i) pixels[i] = std::uint16_t(30000 + i * 17);
     auto *document = window.addDocument(image);
     Roi roi; roi.points = {{1, 1}, {5, 5}}; document->rois.push_back(roi);
     document->modified = true;
+    document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    for (auto *view : document->views()) EXPECT_TRUE(view->window()->windowTitle().contains("original.tif *"));
     const auto output = directory.filePath("saved.tif");
     QTimer::singleShot(0, &window, [output] {
         for (auto *widget : QApplication::topLevelWidgets()) if (auto *dialog = qobject_cast<QFileDialog *>(widget)) {
@@ -1636,6 +1815,10 @@ TEST(Desktop, SavingPixelsWithRoisClearsModifiedState)
             EXPECT_EQ(saved.sample(x, y, z), 30000 + ((z * 8 + y) * 8 + x) * 17);
     EXPECT_FALSE(document->modified);
     EXPECT_FALSE(document->title().endsWith(" *"));
+    for (auto *view : document->views()) {
+        EXPECT_TRUE(view->window()->windowTitle().startsWith("saved.tif"));
+        EXPECT_FALSE(view->window()->windowTitle().contains(" *"));
+    }
     EXPECT_EQ(document->rois.size(), 1u);
 }
 

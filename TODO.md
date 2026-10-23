@@ -10,7 +10,7 @@ Register new commands through the existing `CommandRegistry`, with Qt actions, m
 - [ ] Add selection properties beyond the existing ROI rename and drag/resize controls.
 - [ ] Add the overlay-add command. Use separate project-owned ROI/annotation models and the viewer's overlay layer.
 - [x] Add reslice. Use ITK for resampling and spatial transformations, preserve geometry and numeric types, and declare the operation's scope.
-- [ ] Add orthogonal views. Use `QSplitter` for synchronized views and keep image ownership in the model.
+- [x] Add orthogonal views as separate synchronized windows and keep image ownership in the model.
 - [ ] Add gel-lane analysis commands.
 - [ ] Add the ImageJ control panel command.
 - [ ] Add the remaining ImageJ tool modifiers. Keep text fields and modal dialogs' keyboard handling intact.
@@ -22,7 +22,7 @@ Register new commands through the existing `CommandRegistry`, with Qt actions, m
 
 ## Viewer, models and desktop tools
 
-- [ ] Add synchronized multi-view layouts with `QSplitter`. Independent image windows already exist.
+- [x] Add synchronized multi-view windows. Users place and resize linked windows freely; independent image documents remain separate.
 - [ ] Add a file-browser tool using `QAbstractItemModel` and Qt item views.
 - [ ] Add a separate project-owned annotation model and annotation tools in the overlay layer. ROI outlines, ROI names, masks, crosshairs and scale bars already exist.
 - [ ] Extend advanced channel/time workflows. Z/C/T browsing, animation and basic compositing already exist, but composite display currently uses at most four channels. Keep channel metadata and original pixel values in the model; apply blending in shaders.
