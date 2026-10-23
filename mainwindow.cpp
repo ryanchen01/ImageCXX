@@ -1590,11 +1590,27 @@ void MainWindow::importRaw(const QString &path)
 
 void MainWindow::openPaths(const QStringList &paths)
 {
+    QSet<QString> metaImagePayloads;
+    for (const auto &path : paths) {
+        const QFileInfo info(path);
+        if (info.suffix().compare("mhd", Qt::CaseInsensitive) != 0) continue;
+        QFile header(path);
+        if (!header.open(QIODevice::ReadOnly | QIODevice::Text)) continue;
+        while (!header.atEnd()) {
+            const auto line = QString::fromUtf8(header.readLine());
+            const auto separator = line.indexOf('=');
+            if (separator < 0 || line.left(separator).trimmed() != "ElementDataFile") continue;
+            const auto payload = QFileInfo(info.dir().filePath(line.mid(separator + 1).trimmed())).canonicalFilePath();
+            if (!payload.isEmpty()) metaImagePayloads.insert(payload);
+            break;
+        }
+    }
     QStringList pending;
     QSet<QString> explicitRaw;
     for (const auto &path : paths) {
         if (path.isEmpty()) continue;
         const QFileInfo info(path);
+        if (metaImagePayloads.contains(info.canonicalFilePath())) continue;
         const auto suffix = info.suffix().toLower();
         // Keep explicit raw layout dialogs immediate, including cancellation
         // followed by other files in the same selection.

@@ -1184,6 +1184,35 @@ TEST(Desktop, OpensTypedStackMeasuresAndUndoRedoRestoresValues)
     window.executeCommand("edit.redo"); EXPECT_DOUBLE_EQ(document->image.sample(0, 0), 42);
 }
 
+TEST(Desktop, SliceNavigationKeepsMetadataRoiAndHistoryItems)
+{
+    MainWindow window;
+    auto *document = window.addDocument(Image::allocate(PixelType::UInt16, {8, 8, 3, 2, 2}));
+    Roi roi; roi.name = "Saved patch"; roi.points = {{1, 1}, {3, 4}};
+    document->rois.push_back(roi); document->changed();
+    auto *properties = window.panel("properties")->findChild<QTreeWidget *>();
+    auto *rois = window.panel("rois")->findChild<QListWidget *>();
+    auto *history = window.panel("history")->findChild<QListWidget *>();
+    ASSERT_NE(properties, nullptr); ASSERT_NE(rois, nullptr); ASSERT_NE(history, nullptr);
+    properties->topLevelItem(0)->setExpanded(true);
+    const QPersistentModelIndex propertyIndex(properties->model()->index(0, 0));
+    const QPersistentModelIndex roiIndex(rois->model()->index(0, 0));
+    const QPersistentModelIndex historyIndex(history->model()->index(0, 0));
+    ASSERT_TRUE(propertyIndex.isValid()); ASSERT_TRUE(roiIndex.isValid()); ASSERT_TRUE(historyIndex.isValid());
+    document->viewer->setSlice(2, 1, 1);
+    EXPECT_TRUE(propertyIndex.isValid()); EXPECT_TRUE(roiIndex.isValid()); EXPECT_TRUE(historyIndex.isValid());
+    EXPECT_TRUE(properties->topLevelItem(0)->isExpanded());
+    const auto sliders = document->findChildren<QSlider *>();
+    ASSERT_EQ(sliders.size(), 1);
+    EXPECT_EQ(sliders[0]->value(), 2);
+    EXPECT_EQ(document->viewer->channel(), 1u); EXPECT_EQ(document->viewer->time(), 1u);
+    auto *position = document->findChild<QLabel *>("slicePosition");
+    ASSERT_NE(position, nullptr);
+    EXPECT_EQ(position->text(), "3/3");
+    document->setSelection(roi);
+    EXPECT_FALSE(propertyIndex.isValid()); // Document changes still refresh the panels.
+}
+
 TEST(Desktop, RoiMeasurementAndPixelEditsUseTheCurrentSliceAfterNavigation)
 {
     MainWindow window;
@@ -1354,6 +1383,47 @@ TEST(Desktop, FolderImportsDetachedImageWithoutPromptingForItsPayload)
     EXPECT_EQ(prompts, 0);
     ASSERT_EQ(window.documents().size(), 1);
     EXPECT_EQ(window.activeDocument()->image.metadata().sourcePath, header.fileName());
+}
+
+TEST(Desktop, DroppedMetaImagePayloadOpensOnlyThroughItsHeader)
+{
+    QTemporaryDir directory;
+    ASSERT_TRUE(QDir(directory.path()).mkpath("payloads"));
+    const auto dicom = writeImportSeries(directory.path(), 1).front();
+    const auto raw = directory.filePath("payloads/scan data.raw");
+    writeImage(Image::allocate(PixelType::UInt16, {4, 4, 1}), raw);
+    QFile header(directory.filePath("different-name.MHD"));
+    ASSERT_TRUE(header.open(QIODevice::WriteOnly));
+    header.write("ObjectType = Image\nNDims = 3\nBinaryData = True\nBinaryDataByteOrderMSB = False\n"
+                 "ElementSpacing = 1 1 1\nDimSize = 4 4 1\nElementType = MET_USHORT\n"
+                 "ElementDataFile = payloads/../payloads/scan data.raw\n");
+    header.close();
+    // A same-named raw file in another directory is still a separate image.
+    const auto unrelated = directory.filePath("scan data.raw");
+    writeImage(Image::allocate(PixelType::UInt16, {4, 4}), unrelated);
+    for (bool sidecar : {true, false}) {
+        if (!sidecar) ASSERT_TRUE(QFile::remove(raw + ".json"));
+        for (int mode : {0, 1, 2}) {
+            MainWindow window; window.show();
+            int prompts = 0;
+            QTimer dismiss;
+            QObject::connect(&dismiss, &QTimer::timeout, &window, [&] {
+                if (auto *dialog = window.findChild<QDialog *>("rawImportDialog")) { ++prompts; dialog->reject(); }
+            });
+            dismiss.start(1);
+            auto paths = mode == 0 ? QStringList{raw, dicom, header.fileName()}
+                                   : QStringList{header.fileName(), dicom, raw};
+            QSet<QString> expected{dicom, header.fileName()};
+            if (mode == 2) { paths.append(unrelated); expected.insert(unrelated); }
+            dropPaths(&window, paths);
+            ASSERT_TRUE(finishJobs(window));
+            EXPECT_EQ(prompts, 0);
+            ASSERT_EQ(window.documents().size(), expected.size());
+            QSet<QString> sources;
+            for (const auto *document : window.documents()) sources.insert(document->image.metadata().sourcePath);
+            EXPECT_EQ(sources, expected);
+        }
+    }
 }
 
 TEST(Desktop, ExcessiveDicomMemoryDoesNotBlockOrdinaryImages)

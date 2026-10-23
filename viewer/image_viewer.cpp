@@ -510,7 +510,8 @@ ImageViewer::ImageViewer(QWidget *parent) : QWidget(parent), d(std::make_unique<
                         auto result = std::make_shared<DecodedSlice>();
                         result->key = key;
                         const Image &image = request.image;
-                        const bool color = componentCount(image.pixelType()) > 1;
+                        const auto sourceComponents = componentCount(image.pixelType());
+                        const bool color = sourceComponents > 1;
                         result->mode = color ? 1 : key.composite ? 2 : 0;
                         result->channels = result->mode == 2 ? int(std::min<std::size_t>(4, image.channels())) : 1;
                         const std::size_t components = result->mode == 0 ? 1 : 4;
@@ -534,31 +535,65 @@ ImageViewer::ImageViewer(QWidget *parent) : QWidget(parent), d(std::make_unique<
                         std::vector<Image> planes;
                         for (int c = 0; c < result->channels; ++c)
                             planes.push_back(image.slice(key.z, result->mode == 2 ? std::size_t(c) : key.channel, key.time));
-                        for (std::size_t y = 0; y < image.height(); ++y) {
-                            if (stop.stop_requested() || request.serial != d->serial.load()) break;
-                            for (std::size_t x = 0; x < image.width(); ++x) {
-                                const auto offset = (y * image.width() + x) * components;
-                                for (std::size_t c = 0; c < components; ++c) {
-                                    double value = color && c == 3 && componentCount(image.pixelType()) == 3 ? 255.0
-                                        : color ? planes[0].sample(x, y, 0, 0, 0, c)
-                                        : c < std::size_t(result->channels) ? planes[c].sample(x, y) : 0.0;
-                                    if (c < std::size_t(color ? 3 : result->channels) && std::isfinite(value)) {
-                                        result->minimum = std::min(result->minimum, value);
-                                        result->maximum = std::max(result->maximum, value);
-                                    }
-                                    if (!std::isfinite(value)) value = 0;
-                                    if (color) {
-                                        const auto displayValue = std::uint8_t(std::clamp(value, 0.0, 255.0));
-                                        std::memcpy(result->pixels.data() + offset + c, &displayValue, sizeof(displayValue));
-                                    } else if (doublePrecision) {
-                                        std::memcpy(result->pixels.data() + (offset + c) * sizeof(double), &value, sizeof(double));
-                                    } else {
-                                        const float displayValue = float(std::clamp(value,
-                                            -double(std::numeric_limits<float>::max()), double(std::numeric_limits<float>::max())));
-                                        std::memcpy(result->pixels.data() + (offset + c) * sizeof(float), &displayValue, sizeof(float));
+                        const auto width = image.width(), height = image.height();
+                        auto *destination = result->pixels.data();
+                        const auto convert = [&](auto sample) {
+                            for (std::size_t y = 0; y < height; ++y) {
+                                if (stop.stop_requested() || request.serial != d->serial.load()) break;
+                                for (std::size_t x = 0; x < width; ++x) {
+                                    const auto offset = (y * width + x) * components;
+                                    for (std::size_t c = 0; c < components; ++c) {
+                                        double value = color && c == 3 && sourceComponents == 3 ? 255.0
+                                            : color || c < std::size_t(result->channels) ? sample(x, y, c) : 0.0;
+                                        if (c < std::size_t(color ? 3 : result->channels) && std::isfinite(value)) {
+                                            result->minimum = std::min(result->minimum, value);
+                                            result->maximum = std::max(result->maximum, value);
+                                        }
+                                        if (!std::isfinite(value)) value = 0;
+                                        if (color) {
+                                            const auto displayValue = std::uint8_t(std::clamp(value, 0.0, 255.0));
+                                            std::memcpy(destination + offset + c, &displayValue, sizeof(displayValue));
+                                        } else if (doublePrecision) {
+                                            std::memcpy(destination + (offset + c) * sizeof(double), &value, sizeof(double));
+                                        } else {
+                                            const float displayValue = float(std::clamp(value,
+                                                -double(std::numeric_limits<float>::max()), double(std::numeric_limits<float>::max())));
+                                            std::memcpy(destination + (offset + c) * sizeof(float), &displayValue, sizeof(float));
+                                        }
                                     }
                                 }
                             }
+                        };
+                        std::array<const std::byte *, 4> buffers{};
+                        bool direct = true;
+                        for (std::size_t c = 0; c < planes.size(); ++c) {
+                            if (!planes[c].contiguous() || !(buffers[c] = planes[c].data())) {
+                                direct = false;
+                                break;
+                            }
+                        }
+                        if (direct) {
+                            const auto convertBuffer = [&]<typename T>() {
+                                convert([&](std::size_t x, std::size_t y, std::size_t c) {
+                                    const auto offset = (y * width + x) * sourceComponents + (color ? c : 0);
+                                    T value;
+                                    // Mapped buffers and image views may start at unaligned addresses.
+                                    std::memcpy(&value, buffers[color ? 0 : c] + offset * sizeof(T), sizeof(T));
+                                    return double(value);
+                                });
+                            };
+                            switch (image.pixelType()) {
+                            case PixelType::UInt8: case PixelType::RGB8: case PixelType::RGBA8:
+                                convertBuffer.template operator()<std::uint8_t>(); break;
+                            case PixelType::UInt16: convertBuffer.template operator()<std::uint16_t>(); break;
+                            case PixelType::Int16: convertBuffer.template operator()<std::int16_t>(); break;
+                            case PixelType::Float32: convertBuffer.template operator()<float>(); break;
+                            case PixelType::Float64: convertBuffer.template operator()<double>(); break;
+                            }
+                        } else {
+                            convert([&](std::size_t x, std::size_t y, std::size_t c) {
+                                return color ? planes[0].sample(x, y, 0, 0, 0, c) : planes[c].sample(x, y);
+                            });
                         }
                         if (stop.stop_requested() || request.serial != d->serial.load()) break;
                         if (!std::isfinite(result->minimum)) { result->minimum = 0; result->maximum = 1; }

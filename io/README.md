@@ -21,6 +21,8 @@ NIfTI exports convert spatial units m/cm/mm/um/nm to millimeters and time units 
 DICOM imports native, RLE, JPEG and JPEG-LS encodings supported by DCMTK. Enhanced per-frame functional groups and unsupported compression fail explicitly. Single-file multiframe grayscale is read as a Z stack with shared geometry. Series import requires matching study/series/frame-of-reference identifiers, scalar encoding, calibration, orientation and spacing. It orders slices by patient coordinates and rejects duplicate positions, nonuniform spacing and shifted grids. Export writes one 2D secondary-capture image. Original stored pixel values stay separate from intensity calibration. MONOCHROME1 is retained in its metadata.
 
 Desktop imports recursively scan folders and deduplicate canonical file paths.
+When an MHD header and its referenced payload are selected together, only the
+header opens; the payload is not imported as a separate image.
 Discovery reads DICOM headers without decoding pixel data and groups single-frame
 scalar files by Study Instance UID and Series Instance UID. Multiframe and color
 files remain separate. Each group goes through the existing series validation;

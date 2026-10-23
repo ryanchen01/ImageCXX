@@ -6,6 +6,8 @@
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QThread>
+#include <QFile>
+#include <QTemporaryDir>
 #include <QWheelEvent>
 #include <QWindow>
 #include <QSlider>
@@ -19,6 +21,7 @@
 #include <numbers>
 #include <functional>
 #include <optional>
+#include <limits>
 #include <stdexcept>
 
 using namespace imagecxx;
@@ -556,6 +559,58 @@ TEST(Viewer, PublishesNewestLazySliceAndBoundsDecodedCache)
     EXPECT_LE(viewer.decodedCacheBytes(), oneSlice * 2);
     // A complete traversal would read 1536 samples before adjacent prefetching.
     EXPECT_LT(storage->reads.load(), 1000);
+}
+
+TEST(Viewer, ConvertsContiguousMappedAndStridedSlicesAcrossPixelTypes)
+{
+    QTemporaryDir directory;
+    ASSERT_TRUE(directory.isValid());
+    for (const auto type : {PixelType::UInt8, PixelType::UInt16, PixelType::Int16,
+                            PixelType::Float32, PixelType::Float64, PixelType::RGB8, PixelType::RGBA8}) {
+        SCOPED_TRACE(pixelTypeName(type).toStdString());
+        auto image = Image::allocate(type, {5, 4, 2, 3, 2});
+        for (std::size_t t = 0; t < 2; ++t) for (std::size_t c = 0; c < 3; ++c)
+            for (std::size_t z = 0; z < 2; ++z) for (std::size_t y = 0; y < 4; ++y)
+                for (std::size_t x = 0; x < 5; ++x) {
+                    const std::array<std::size_t, 5> index{x, y, z, c, t};
+                    const double value = double(x + 5 * y + 20 * z + 40 * c + 120 * t);
+                    for (std::size_t component = 0; component < componentCount(type); ++component)
+                        image.setValue(index, type == PixelType::Int16 ? value - 128
+                            : type == PixelType::Float32 ? value * .125 - 16
+                            : type == PixelType::Float64 ? 1e12 + value * .125
+                            : component == 3 ? 255 : value + component, component);
+                }
+        QFile file(directory.filePath(pixelTypeName(type)));
+        ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+        ASSERT_EQ(file.write("x", 1), 1);
+        ASSERT_EQ(file.write(reinterpret_cast<const char *>(image.data()), qint64(image.byteCount())), qint64(image.byteCount()));
+        file.close();
+        const auto mapped = Image::map(file.fileName(), type, image.shape(), 1);
+        const auto strided = image.region(std::array<std::size_t, 5>{1, 1, 0, 0, 0},
+                                          std::array<std::size_t, 5>{3, 2, 2, 3, 2});
+        for (const auto &input : {image, mapped, strided}) for (const bool composite : {false, true}) {
+            ImageViewer viewer;
+            bool loaded = false;
+            QString error;
+            QObject::connect(&viewer, &ImageViewer::loadingChanged, [&loaded](bool loading) { loaded = !loading; });
+            QObject::connect(&viewer, &ImageViewer::loadFailed, [&error](const QString &message) { error = message; });
+            viewer.setComposite(composite);
+            viewer.setImage(input);
+            viewer.setSlice(1, 2, 1);
+            ASSERT_TRUE(waitFor([&] { return loaded || !error.isEmpty(); }));
+            ASSERT_TRUE(error.isEmpty()) << error.toStdString();
+            double minimum = std::numeric_limits<double>::infinity(), maximum = -minimum;
+            for (std::size_t c = composite ? 0 : 2; c < 3; ++c)
+                for (std::size_t y = 0; y < input.height(); ++y)
+                    for (std::size_t x = 0; x < input.width(); ++x) {
+                        const auto value = input.sample(x, y, 1, c, 1);
+                        minimum = std::min(minimum, value); maximum = std::max(maximum, value);
+                    }
+            if (componentCount(type) > 1) { minimum = 0; maximum = 255; }
+            EXPECT_DOUBLE_EQ(viewer.sliceRange().first, minimum);
+            EXPECT_DOUBLE_EQ(viewer.sliceRange().second, maximum);
+        }
+    }
 }
 
 TEST(Viewer, OversizedDecodedSliceReportsFailure)
