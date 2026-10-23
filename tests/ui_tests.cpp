@@ -12,6 +12,8 @@
 #include <QApplication>
 #include <QAction>
 #include <QKeyEvent>
+#include <QContextMenuEvent>
+#include <QMouseEvent>
 #include <QMenu>
 #include <QSet>
 #include <QSettings>
@@ -22,6 +24,7 @@
 #include <QClipboard>
 #include <QColorDialog>
 #include <QImage>
+#include <QJsonArray>
 #include <QBuffer>
 #include <QCoreApplication>
 #include <QDockWidget>
@@ -1283,6 +1286,263 @@ TEST(Desktop, OpensTypedStackMeasuresAndUndoRedoRestoresValues)
     EXPECT_DOUBLE_EQ(document->image.sample(0, 0), 42);
     window.executeCommand("edit.undo"); EXPECT_DOUBLE_EQ(document->image.sample(0, 0), 1000);
     window.executeCommand("edit.redo"); EXPECT_DOUBLE_EQ(document->image.sample(0, 0), 42);
+}
+
+TEST(Desktop, ImagePropertiesShowDicomTagNamesWithoutChangingMetadata)
+{
+    QTemporaryDir directory;
+    ASSERT_TRUE(directory.isValid());
+    ImageMetadata metadata;
+    metadata.axes = {{"X", 1, 0, "mm"}, {"Y", 1, 0, "mm"}};
+    metadata.attributes.insert("DICOM.0010,0010", "Example^Patient");
+    const auto path = directory.filePath("properties.dcm");
+    writeDicom(Image::allocate(PixelType::UInt16, {4, 4}, metadata), path);
+    DcmFileFormat file;
+    ASSERT_TRUE(file.loadFile(QFile::encodeName(path).constData()).good());
+    for (int index = 0; index < 2; ++index) {
+        DcmItem *series = nullptr, *reference = nullptr;
+        ASSERT_TRUE(file.getDataset()->findOrCreateSequenceItem(DCM_ReferencedSeriesSequence, series, index).good());
+        ASSERT_TRUE(series->findOrCreateSequenceItem(DCM_ReferencedImageSequence, reference).good());
+        ASSERT_TRUE(reference->putAndInsertString(DCM_ReferencedSOPInstanceUID, index == 0 ? "1.2.3" : "1.2.4").good());
+    }
+    ASSERT_TRUE(file.getDataset()->insert(new DcmSequenceOfItems(DCM_ReferencedStudySequence)).good());
+    ASSERT_TRUE(file.saveFile(QFile::encodeName(path).constData(), EXS_LittleEndianExplicit).good());
+    auto image = readDicom(path);
+    image.metadata().attributes.insert("DICOM.7777,1234", "Private value");
+    image.metadata().attributes.insert("DICOM.0010,invalid", "Malformed key");
+    image.metadata().attributes.insert("Experiment", "Example");
+    const auto attributes = image.metadata().attributes;
+
+    MainWindow window;
+    auto *document = window.addDocument(image);
+    auto *properties = window.panel("properties")->findChild<QTreeWidget *>();
+    ASSERT_NE(properties, nullptr);
+    const QMap<QString, QString> expected{{"(0010,0010) Patient Name", "Example^Patient"},
+        {"(0008,0016) SOP Class UID", attributes.value("DICOM.0008,0016")},
+        {"(0028,0010) Rows", "4"}, {"(7777,1234)", "Private value"}};
+    for (auto it = expected.cbegin(); it != expected.cend(); ++it) {
+        const auto items = properties->findItems(it.key(), Qt::MatchExactly, 0);
+        ASSERT_EQ(items.size(), 1) << it.key().toStdString();
+        EXPECT_EQ(items.front()->text(1), it.value());
+    }
+    EXPECT_EQ(document->image.metadata().attributes, attributes);
+    const auto sequences = properties->findItems("(0008,1115) Referenced Series Sequence", Qt::MatchExactly, 0);
+    ASSERT_EQ(sequences.size(), 1);
+    auto *sequence = sequences.front();
+    ASSERT_EQ(sequence->childCount(), 2);
+    EXPECT_TRUE(sequence->isExpanded());
+    for (int index = 0; index < 2; ++index) {
+        auto *item = sequence->child(index);
+        EXPECT_EQ(item->text(0), QString("Item %1").arg(index + 1));
+        EXPECT_TRUE(item->isExpanded());
+        ASSERT_EQ(item->childCount(), 1);
+        auto *nested = item->child(0);
+        EXPECT_EQ(nested->text(0), "(0008,1140) Referenced Image Sequence");
+        EXPECT_TRUE(nested->isExpanded());
+        ASSERT_EQ(nested->childCount(), 1);
+        auto *reference = nested->child(0);
+        EXPECT_TRUE(reference->isExpanded());
+        ASSERT_EQ(reference->childCount(), 1);
+        EXPECT_EQ(reference->child(0)->text(0), "(0008,1155) Referenced SOP Instance UID");
+        EXPECT_EQ(reference->child(0)->text(1), index == 0 ? "1.2.3" : "1.2.4");
+    }
+    const auto empty = properties->findItems("(0008,1110) Referenced Study Sequence", Qt::MatchExactly, 0);
+    ASSERT_EQ(empty.size(), 1);
+    EXPECT_EQ(empty.front()->childCount(), 0);
+    EXPECT_EQ(empty.front()->childIndicatorPolicy(), QTreeWidgetItem::ShowIndicator);
+    EXPECT_TRUE(empty.front()->isExpanded());
+    sequence->setExpanded(false);
+    EXPECT_FALSE(sequence->isExpanded());
+    sequence->setExpanded(true);
+    EXPECT_TRUE(sequence->isExpanded());
+    EXPECT_EQ(document->image.metadata().dicomSequences, image.metadata().dicomSequences);
+}
+
+TEST(Desktop, NiftiPropertiesShowOnlyReadableHeaderFields)
+{
+    QTemporaryDir directory;
+    ASSERT_TRUE(directory.isValid());
+    for (const auto &extension : {QStringLiteral("nii"), QStringLiteral("nii.gz")}) {
+        ImageMetadata metadata;
+        metadata.axes = {{"X", .5, 0, "mm"}, {"Y", .75, 0, "mm"}, {"Z", 1, 0, "mm"}};
+        metadata.attributes.insert("ITK_FileNotes", "Example header");
+        const auto path = directory.filePath("properties." + extension);
+        writeImage(Image::allocate(PixelType::UInt16, {4, 4, 2}, metadata), path);
+        auto image = readImage(path);
+        ASSERT_TRUE(image.metadata().attributes.contains("nifti_type"));
+        image.metadata().attributes.insert("Experiment", "Unrelated metadata");
+        if (extension == "nii.gz") image.metadata().sourcePath.clear();
+        const auto attributes = image.metadata().attributes;
+
+        MainWindow window;
+        auto *document = window.addDocument(image);
+        auto *properties = window.panel("properties")->findChild<QTreeWidget *>();
+        ASSERT_NE(properties, nullptr);
+        const QMap<QString, QString> expected{{"Data Type (datatype)", "512"},
+            {"Bits per Voxel (bitpix)", "16"}, {"Description (descrip)", "Example header"},
+            {"Grid Spacing (pixdim[1])", attributes.value("pixdim[1]")},
+            {"Q-form Code (qform_code)", attributes.value("qform_code")}};
+        for (auto it = expected.cbegin(); it != expected.cend(); ++it) {
+            const auto items = properties->findItems(it.key(), Qt::MatchExactly, 0);
+            ASSERT_EQ(items.size(), 1) << it.key().toStdString();
+            EXPECT_EQ(items.front()->text(1), it.value());
+        }
+        for (const auto &label : {"Name", "Pixel type", "Axis X", "Intensity scale", "Experiment", "ITK_FileNotes", "nifti_type"})
+            EXPECT_TRUE(properties->findItems(label, Qt::MatchExactly, 0).empty()) << label;
+        EXPECT_EQ(document->image.metadata().attributes, attributes);
+    }
+}
+
+TEST(Desktop, PropertySearchMatchesNamesTagsAndValuesAndKeepsSequenceParents)
+{
+    ImageMetadata metadata;
+    metadata.attributes = {{"DICOM.0028,0030", "4.418060\\4.418060"}, {"DICOM.0010,0010", "Example^Patient"}};
+    metadata.dicomSequences = {{"DICOM.0008,1115", QJsonArray{
+        QJsonObject{{"DICOM.0008,103e", "Needle^Value"}}, QJsonObject{{"DICOM.0008,103e", "Other value"}}}}};
+    MainWindow window;
+    auto *document = window.addDocument(Image::allocate(PixelType::UInt16, {4, 4}, metadata));
+    auto *properties = window.panel("properties")->findChild<QTreeWidget *>();
+    auto *search = window.panel("properties")->findChild<QLineEdit *>("propertiesSearch");
+    ASSERT_NE(properties, nullptr); ASSERT_NE(search, nullptr);
+    const auto spacingItems = properties->findItems("(0028,0030) Pixel Spacing", Qt::MatchExactly, 0);
+    const auto patientItems = properties->findItems("(0010,0010) Patient Name", Qt::MatchExactly, 0);
+    const auto sequences = properties->findItems("(0008,1115) Referenced Series Sequence", Qt::MatchExactly, 0);
+    ASSERT_EQ(spacingItems.size(), 1); ASSERT_EQ(patientItems.size(), 1); ASSERT_EQ(sequences.size(), 1);
+    auto *spacing = spacingItems.front();
+    auto *patient = patientItems.front();
+    auto *sequence = sequences.front();
+    ASSERT_EQ(sequence->childCount(), 2);
+    for (const auto &query : {"00280030", "pixel spacing", "PiXeL_sPaCiNg", "(0028,0030)", "4.4"}) {
+        search->setText(query);
+        EXPECT_FALSE(spacing->isHidden()) << query;
+        EXPECT_TRUE(patient->isHidden()) << query;
+        EXPECT_TRUE(sequence->isHidden()) << query;
+    }
+    search->setText("EXAM-PLE_patIENT");
+    EXPECT_FALSE(patient->isHidden()); EXPECT_TRUE(spacing->isHidden());
+    sequence->setExpanded(false);
+    search->setText("needle value");
+    EXPECT_FALSE(sequence->isHidden()); EXPECT_TRUE(sequence->isExpanded());
+    EXPECT_FALSE(sequence->child(0)->isHidden()); EXPECT_TRUE(sequence->child(0)->isExpanded());
+    EXPECT_TRUE(sequence->child(1)->isHidden()); EXPECT_TRUE(spacing->isHidden());
+    search->setText("referenced SERIES");
+    EXPECT_FALSE(sequence->isHidden());
+    EXPECT_FALSE(sequence->child(0)->isHidden()); EXPECT_FALSE(sequence->child(1)->isHidden());
+    search->setText("no such property");
+    for (int index = 0; index < properties->topLevelItemCount(); ++index)
+        EXPECT_TRUE(properties->topLevelItem(index)->isHidden());
+    for (const auto &query : {" -- () ", ""}) {
+        search->setText(query);
+        EXPECT_FALSE(spacing->isHidden()); EXPECT_FALSE(patient->isHidden()); EXPECT_FALSE(sequence->isHidden());
+        EXPECT_FALSE(sequence->child(0)->isHidden()); EXPECT_FALSE(sequence->child(1)->isHidden());
+    }
+    search->setText("pixel spacing");
+    document->changed();
+    const auto refreshed = properties->findItems("(0028,0030) Pixel Spacing", Qt::MatchExactly, 0);
+    ASSERT_EQ(refreshed.size(), 1);
+    EXPECT_FALSE(refreshed.front()->isHidden());
+    EXPECT_EQ(search->text(), "pixel spacing");
+    const auto refreshedPatients = properties->findItems("(0010,0010) Patient Name", Qt::MatchExactly, 0);
+    ASSERT_EQ(refreshedPatients.size(), 1); EXPECT_TRUE(refreshedPatients.front()->isHidden());
+
+    ImageMetadata nifti;
+    nifti.attributes = {{"nifti_type", "1"}, {"pixdim[1]", "0.75"}, {"datatype", "512"}};
+    window.addDocument(Image::allocate(PixelType::UInt16, {4, 4}, nifti));
+    EXPECT_EQ(search->text(), "pixel spacing");
+    search->setText("PIXDIM_1");
+    const auto gridSpacing = properties->findItems("Grid Spacing (pixdim[1])", Qt::MatchExactly, 0);
+    ASSERT_EQ(gridSpacing.size(), 1); EXPECT_FALSE(gridSpacing.front()->isHidden());
+    const auto dataType = properties->findItems("Data Type (datatype)", Qt::MatchExactly, 0);
+    ASSERT_EQ(dataType.size(), 1); EXPECT_TRUE(dataType.front()->isHidden());
+    search->setText("5.12");
+    EXPECT_FALSE(dataType.front()->isHidden()); EXPECT_TRUE(gridSpacing.front()->isHidden());
+}
+
+TEST(Desktop, PropertyRowsSupportMultipleSelectionAndContextAndKeyboardCopy)
+{
+    const QString description = "A, \"quoted\" value\nsecond line";
+    const QString spacing = "4.418060\\4.418060";
+    const QString firstCsv = "\"(0008,103e) Series Description\",\"A, \"\"quoted\"\" value\nsecond line\"";
+    const QString middleCsv = "\"(0010,0010) Patient Name\",\"Example^Patient\"";
+    const QString lastCsv = "\"(0028,0030) Pixel Spacing\",\"4.418060\\4.418060\"";
+    ImageMetadata metadata;
+    metadata.attributes = {{"DICOM.0008,103e", description}, {"DICOM.0010,0010", "Example^Patient"}, {"DICOM.0028,0030", spacing}};
+    MainWindow window;
+    window.addDocument(Image::allocate(PixelType::UInt16, {4, 4}, metadata));
+    window.panel("properties")->resize(640, 400);
+    window.showPanel("properties");
+    QCoreApplication::processEvents();
+    auto *properties = window.panel("properties")->findChild<QTreeWidget *>();
+    auto *search = window.panel("properties")->findChild<QLineEdit *>("propertiesSearch");
+    ASSERT_NE(properties, nullptr); ASSERT_NE(search, nullptr);
+    ASSERT_EQ(properties->topLevelItemCount(), 3);
+    auto *first = properties->topLevelItem(0);
+    auto *middle = properties->topLevelItem(1);
+    auto *last = properties->topLevelItem(2);
+    const auto clickRow = [&](QTreeWidgetItem *item, Qt::MouseButton button, Qt::KeyboardModifiers modifiers = {}) {
+        const auto position = properties->visualItemRect(item).center();
+        const auto global = properties->viewport()->mapToGlobal(position);
+        for (const auto type : {QEvent::MouseButtonPress, QEvent::MouseButtonRelease}) {
+            QMouseEvent event(type, position, global, button,
+                type == QEvent::MouseButtonPress ? button : Qt::NoButton, modifiers);
+            QCoreApplication::sendEvent(properties->viewport(), &event);
+        }
+    };
+    const auto contextCopy = [&](QTreeWidgetItem *item, int actionIndex, bool multiple) {
+        clickRow(item, Qt::RightButton);
+        QTimer::singleShot(0, properties, [&, actionIndex, multiple] {
+            auto *menu = properties->findChild<QMenu *>();
+            EXPECT_NE(menu, nullptr);
+            if (!menu) return;
+            const QStringList labels = multiple ? QStringList{"Copy Rows", "Copy Properties", "Copy Values"}
+                                               : QStringList{"Copy Row", "Copy Property", "Copy Value"};
+            EXPECT_EQ(menu->actions().size(), 3);
+            if (menu->actions().size() != 3) { menu->close(); return; }
+            for (int index = 0; index < 3; ++index) EXPECT_EQ(menu->actions()[index]->text(), labels[index]);
+            menu->setActiveAction(menu->actions()[actionIndex]);
+            sendKey(menu, Qt::Key_Return);
+        });
+        const auto position = properties->visualItemRect(item).center();
+        QContextMenuEvent event(QContextMenuEvent::Mouse, position, properties->viewport()->mapToGlobal(position));
+        QCoreApplication::sendEvent(properties->viewport(), &event);
+        return QApplication::clipboard()->text();
+    };
+
+    clickRow(first, Qt::LeftButton);
+    EXPECT_EQ(contextCopy(first, 0, false), firstCsv);
+    EXPECT_EQ(contextCopy(first, 1, false), "(0008,103e) Series Description");
+    EXPECT_EQ(contextCopy(first, 2, false), description);
+    sendKey(properties, Qt::Key_C, Qt::ControlModifier);
+    EXPECT_EQ(QApplication::clipboard()->text(), firstCsv);
+    clickRow(first, Qt::LeftButton);
+    sendKey(properties, Qt::Key_Down, Qt::ShiftModifier);
+    sendKey(properties, Qt::Key_Down, Qt::ShiftModifier);
+    EXPECT_EQ(properties->selectedItems().size(), 3);
+    clickRow(middle, Qt::LeftButton, Qt::ControlModifier);
+    EXPECT_EQ(properties->selectedItems().size(), 2);
+    clickRow(last, Qt::LeftButton);
+    clickRow(first, Qt::LeftButton, Qt::ControlModifier);
+    ASSERT_EQ(properties->selectedItems().size(), 2);
+    EXPECT_EQ(contextCopy(first, 0, true), firstCsv + '\n' + lastCsv);
+    EXPECT_EQ(contextCopy(first, 1, true), "(0008,103e) Series Description\n(0028,0030) Pixel Spacing");
+    EXPECT_EQ(contextCopy(first, 2, true), description + '\n' + spacing);
+    sendKey(properties, Qt::Key_C, Qt::ControlModifier);
+    EXPECT_EQ(QApplication::clipboard()->text(), firstCsv + '\n' + lastCsv);
+    EXPECT_EQ(contextCopy(middle, 0, false), middleCsv);
+    EXPECT_EQ(contextCopy(middle, 1, false), "(0010,0010) Patient Name");
+    EXPECT_EQ(contextCopy(middle, 2, false), "Example^Patient");
+
+    properties->clearSelection(); first->setSelected(true); last->setSelected(true);
+    search->setText("pixel spacing");
+    EXPECT_EQ(contextCopy(last, 0, false), lastCsv);
+    sendKey(properties, Qt::Key_C, Qt::ControlModifier);
+    EXPECT_EQ(QApplication::clipboard()->text(), lastCsv);
+    search->selectAll();
+    sendKey(search, Qt::Key_C, Qt::ControlModifier);
+    EXPECT_EQ(QApplication::clipboard()->text(), "pixel spacing");
+    properties->clearSelection();
+    sendKey(properties, Qt::Key_C, Qt::ControlModifier);
+    EXPECT_EQ(QApplication::clipboard()->text(), "pixel spacing");
 }
 
 TEST(Desktop, SliceNavigationKeepsMetadataRoiAndHistoryItems)

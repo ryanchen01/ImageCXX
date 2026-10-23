@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QMap>
+#include <QJsonObject>
 #include <QString>
 #include <QStringList>
 #include <array>
@@ -44,6 +45,8 @@ struct ImageMetadata {
     double intensityOffset = 0.0;
     QString intensityUnit;
     QMap<QString, QString> attributes;
+    // Sequence tags map to arrays of items, whose tags contain strings or nested sequences.
+    QJsonObject dicomSequences;
 };
 
 // Storage owns bytes independently from image views. Providers may load regions lazily.

@@ -79,7 +79,7 @@ QJsonObject imageDescription(const Image &image)
             {"name", metadata.name}, {"axes", axes}, {"channels", channels},
             {"direction", direction}, {"intensityScale", metadata.intensityScale},
             {"intensityOffset", metadata.intensityOffset}, {"intensityUnit", metadata.intensityUnit},
-            {"attributes", attributes}};
+            {"attributes", attributes}, {"dicomSequences", metadata.dicomSequences}};
 }
 
 ImageMetadata descriptionMetadata(const QJsonObject &object)
@@ -103,6 +103,7 @@ ImageMetadata descriptionMetadata(const QJsonObject &object)
     const auto attributes = object.value("attributes").toObject();
     for (auto it = attributes.begin(); it != attributes.end(); ++it)
         metadata.attributes.insert(it.key(), it.value().toString());
+    metadata.dicomSequences = object.value("dicomSequences").toObject();
     return metadata;
 }
 } // namespace detail

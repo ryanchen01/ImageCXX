@@ -3,6 +3,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
+#include <QJsonArray>
 #include <QColor>
 #include <QDir>
 #include <QTemporaryDir>
@@ -321,6 +322,41 @@ TEST(ImageIo, DicomPreservesSignedValuesCalibrationAndPatientGeometry)
     EXPECT_EQ(loaded.metadata().direction, original.metadata().direction);
     EXPECT_EQ(loaded.metadata().intensityScale, 2);
     EXPECT_EQ(loaded.metadata().intensityOffset, -100);
+}
+
+TEST(ImageIo, DicomSequenceHierarchySurvivesImportAndTiffSave)
+{
+    QTemporaryDir directory;
+    ASSERT_TRUE(directory.isValid());
+    const auto path = directory.filePath("sequences.dcm");
+    const auto original = fixture(PixelType::UInt16, {5, 3, 1});
+    writeImage(original, path);
+    DcmFileFormat file;
+    ASSERT_TRUE(file.loadFile(QFile::encodeName(path).constData()).good());
+    const QByteArray text(40000, 'a');
+    QJsonArray expectedItems;
+    for (int index = 0; index < 2; ++index) {
+        DcmItem *item = nullptr, *nested = nullptr;
+        ASSERT_TRUE(file.getDataset()->findOrCreateSequenceItem(DCM_ReferencedSeriesSequence, item, index).good());
+        ASSERT_TRUE(item->putAndInsertString(DCM_TextValue, text.constData()).good());
+        ASSERT_TRUE(item->findOrCreateSequenceItem(DCM_ReferencedImageSequence, nested).good());
+        const auto uid = QByteArray("1.2.3.") + QByteArray::number(index + 1);
+        ASSERT_TRUE(nested->putAndInsertString(DCM_ReferencedSOPInstanceUID, uid.constData()).good());
+        expectedItems.append(QJsonObject{{"DICOM.0040,a160", QString::fromLatin1(text)},
+            {"DICOM.0008,1140", QJsonArray{QJsonObject{{"DICOM.0008,1155", QString::fromLatin1(uid)}}}}});
+    }
+    ASSERT_TRUE(file.getDataset()->insert(new DcmSequenceOfItems(DCM_ReferencedStudySequence)).good());
+    ASSERT_TRUE(file.saveFile(QFile::encodeName(path).constData(), EXS_LittleEndianExplicit).good());
+
+    const auto loaded = readImage(path);
+    const QJsonObject expected{{"DICOM.0008,1115", expectedItems}, {"DICOM.0008,1110", QJsonArray{}}};
+    EXPECT_EQ(loaded.metadata().dicomSequences, expected);
+    EXPECT_FALSE(loaded.metadata().attributes.contains("DICOM.0008,1115"));
+    EXPECT_FALSE(loaded.metadata().attributes.contains("DICOM.0008,1155"));
+    expectPixels(loaded, original);
+    const auto tiff = directory.filePath("sequences.tif");
+    writeImage(loaded, tiff);
+    EXPECT_EQ(readImage(tiff).metadata().dicomSequences, expected);
 }
 
 TEST(ImageIo, DicomSeriesOrdersPhysicalPositionsAndRejectsMixedSeries)

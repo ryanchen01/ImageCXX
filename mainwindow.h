@@ -9,6 +9,7 @@
 class QMenu;
 class QActionGroup;
 class QTreeWidget;
+class QLineEdit;
 class QListWidget;
 class QTableView;
 class QStandardItemModel;
@@ -48,6 +49,7 @@ private:
     QMap<QString, QWidget *> panels_;
     QMap<QString, QByteArray> panelGeometries_;
     QTreeWidget *metadata_;
+    QLineEdit *metadataSearch_;
     QListWidget *rois_;
     QListWidget *history_;
     QTableView *resultsView_;
@@ -90,6 +92,7 @@ private:
     void setActiveDocument(imagecxx::DocumentWidget *document);
     void clearDocuments();
     void updatePanels();
+    void filterProperties();
     void updateDisplayControls();
     void updateRecentFiles();
     void updateWindowMenu();

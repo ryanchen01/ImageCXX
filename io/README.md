@@ -9,7 +9,7 @@ The adapters return project-owned `Image` buffers. Reads and writes accept cance
 | libtiff TIFF/BigTIFF | All model types, contiguous sample layout, strips or tiles | ImageCXX description preserves full metadata and shape; ImageJ descriptions import C/Z/T ordering and calibration; ordinary TIFF resolution is imported | Decoded RAM |
 | ITK MHA/MHD, NRRD/NHDR | All model types supported by the corresponding ITK codec | Spatial geometry and ImageCXX metadata | Decoded RAM |
 | ITK NIfTI, compressed NIfTI | Supported scalar and RGB(A) types | Stored samples and type, standard intensity slope/intercept, spatial geometry and conventional T/C axis order; arbitrary attributes, intensity unit labels and channel descriptions do not round-trip through NIfTI | Decoded RAM |
-| DCMTK DICOM | UInt8, UInt16, Int16 grayscale; RGB8 | Patient geometry, rescale slope/intercept and top-level textual tags; UTF-8 conversion | Decoded RAM |
+| DCMTK DICOM | UInt8, UInt16, Int16 grayscale; RGB8 | Patient geometry, rescale slope/intercept, textual tags and nested sequences; UTF-8 conversion | Decoded RAM |
 | Raw binary | All model types, X-fastest | Explicit import options or adjacent `.json` sidecar; byte order and header offset supported | Read-only mapping when native byte order permits; RAM otherwise |
 
 Opening or dropping a `.raw` or `.bin` file without an adjacent `.json` sidecar shows the raw import dialog for image type, width, height, image count, header offset and byte order. Image count is an upper limit: import reads up to that many complete images after the header and ignores an incomplete trailing image. With channel/time dimensions, each Z position must contain all specified channels and frames. Advanced settings retain channel/time dimensions, spacing and memory mapping. File → Import raw binary uses the same dialog for any extension. Invalid layouts remain editable, and cancelling skips that file. Files with sidecars open directly. Confirming the dialog saves all options, including the requested image-count limit and whether Advanced is expanded, for later imports and app restarts. Cancelling preserves the last confirmed settings.
@@ -18,7 +18,15 @@ High-bit-depth color rasters fail explicitly because the model currently support
 
 NIfTI exports convert spatial units m/cm/mm/um/nm to millimeters and time units s/ms/us/min to seconds. Unsupported or uncalibrated units fail explicitly. Standard NIfTI slope/intercept fields use float32 precision. Reading keeps original stored samples and applies calibration through `ImageMetadata`, avoiding ITK's default integer-to-float promotion. NIfTI color samples require identity intensity calibration because the format ignores color scaling.
 
+For images with NIfTI metadata, Image Properties shows only available header fields with readable labels and their original field names, such as `Data Type (datatype)`. Built-in properties and ITK internal metadata are hidden.
+
+The search field in Image Properties matches names, tags and values, ignoring spaces, symbols and capitalization. Matching nested tags keep their parent sequences visible; matching a sequence shows its contents. Clearing the search restores all rows and keeps the selected row in view.
+
+Use Shift or Ctrl/Command to select multiple property rows. Right-click to copy rows as CSV without a header, or copy properties or values as separate lines. Right-clicking an unselected row copies only that row. Ctrl/Command+C in the tree copies selected rows as CSV, in tree order.
+
 DICOM imports native, RLE, JPEG and JPEG-LS encodings supported by DCMTK. Enhanced per-frame functional groups and unsupported compression fail explicitly. Single-file multiframe grayscale is read as a Z stack with shared geometry. Series import requires matching study/series/frame-of-reference identifiers, scalar encoding, calibration, orientation and spacing. It orders slices by patient coordinates and rejects duplicate positions, nonuniform spacing and shifted grids. Export writes one 2D secondary-capture image. Original stored pixel values stay separate from intensity calibration. MONOCHROME1 is retained in its metadata.
+
+For images with DICOM metadata, Image Properties shows only the DICOM tags, including sequences with their nested items and tags. Labels put the numeric tag first, such as `(0010,0010) Patient Name`. All rows start expanded and sequences can be collapsed. Sequence metadata is retained in ImageCXX descriptions when saving formats such as TIFF and PNG; DICOM export still copies only top-level textual tags.
 
 Desktop imports recursively scan folders and deduplicate canonical file paths.
 When an MHD header and its referenced payload are selected together, only the

@@ -69,6 +69,30 @@ QString dicomTagName(const DcmTag &tag)
     return QStringLiteral("DICOM.%1,%2").arg(tag.getGTag(), 4, 16, QLatin1Char('0')).arg(tag.getETag(), 4, 16, QLatin1Char('0'));
 }
 
+QJsonObject dicomAttributes(DcmItem &dataset, std::stop_token stop)
+{
+    detail::checkIo(stop, {}, 0);
+    QJsonObject attributes;
+    for (unsigned long i = 0; i < dataset.card(); ++i) {
+        detail::checkIo(stop, {}, 0);
+        auto *element = dataset.getElement(i);
+        const auto &tag = element->getTag();
+        if (tag.getGTag() == 0x7fe0) continue;
+        if (element->ident() == EVR_SQ) {
+            auto *sequence = static_cast<DcmSequenceOfItems *>(element);
+            QJsonArray items;
+            for (unsigned long index = 0; index < sequence->card(); ++index)
+                items.append(dicomAttributes(*sequence->getItem(index), stop));
+            attributes.insert(dicomTagName(tag), items);
+        } else if (element->getLength() <= 65536) {
+            OFString value;
+            if (element->getOFStringArray(value).good())
+                attributes.insert(dicomTagName(tag), QString::fromUtf8(value.c_str()));
+        }
+    }
+    return attributes;
+}
+
 double dicomNumber(DcmItem *dataset, const DcmTagKey &tag, double fallback, unsigned long position = 0)
 {
     double value = fallback;
@@ -160,12 +184,10 @@ Image readDicom(const QString &path, std::stop_token stop, IoProgress progress)
         throw std::runtime_error("DICOM intensity calibration is invalid");
     OFString unit;
     if (dataset->findAndGetOFString(DCM_RescaleType, unit).good()) metadata.intensityUnit = QString::fromLatin1(unit.c_str());
-    for (unsigned long i = 0; i < dataset->card(); ++i) {
-        auto *element = dataset->getElement(i);
-        const auto &tag = element->getTag();
-        if (tag.getGTag() == 0x7fe0 || element->getLength() > 65536 || element->ident() == EVR_SQ) continue;
-        OFString value;
-        if (element->getOFStringArray(value).good()) metadata.attributes.insert(dicomTagName(tag), QString::fromUtf8(value.c_str()));
+    const auto attributes = dicomAttributes(*dataset, stop);
+    for (auto it = attributes.begin(); it != attributes.end(); ++it) {
+        if (it.value().isArray()) metadata.dicomSequences.insert(it.key(), it.value());
+        else metadata.attributes.insert(it.key(), it.value().toString());
     }
     auto image = Image::allocate(type, {columns, rows, static_cast<std::size_t>(frames)}, metadata);
     detail::checkIo(stop, progress, 0.2);
