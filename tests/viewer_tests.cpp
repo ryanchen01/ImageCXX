@@ -526,7 +526,7 @@ TEST(Viewer, DragCreatesRoiInOriginalImageCoordinates)
     viewer.setImage(Image::allocate(PixelType::UInt8, {64, 48, 3}));
     viewer.setSlice(2);
     viewer.setZoom(4);
-    viewer.setTool(ImageViewer::Tool::Rectangle);
+    EXPECT_EQ(viewer.tool(), ImageViewer::Tool::Rectangle);
     std::optional<Roi> roi;
     QObject::connect(&viewer, &ImageViewer::roiCreated, [&roi](const Roi &created) { roi = created; });
     const QPointF begin = viewer.imageToWidget({4, 5});

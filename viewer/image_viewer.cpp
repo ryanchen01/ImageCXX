@@ -355,7 +355,7 @@ public:
     std::optional<QPointF> navigationCrosshair;
     QString viewLabel;
     bool pickingPosition = false;
-    Tool tool = Tool::Pan;
+    Tool tool = Tool::Rectangle;
     std::vector<Roi> rois;
     std::optional<Roi> draft, selection, dragOriginal;
     bool editing = false;
