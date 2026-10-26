@@ -183,11 +183,44 @@ Image readDicom(const QString &path, std::stop_token stop, IoProgress progress)
     if (!std::isfinite(metadata.intensityScale) || !std::isfinite(metadata.intensityOffset) || metadata.intensityScale == 0)
         throw std::runtime_error("DICOM intensity calibration is invalid");
     OFString unit;
-    if (dataset->findAndGetOFString(DCM_RescaleType, unit).good()) metadata.intensityUnit = QString::fromLatin1(unit.c_str());
+    if (dataset->findAndGetOFString(DCM_RescaleType, unit).good()) metadata.intensityUnit = QString::fromUtf8(unit.c_str());
     const auto attributes = dicomAttributes(*dataset, stop);
     for (auto it = attributes.begin(); it != attributes.end(); ++it) {
         if (it.value().isArray()) metadata.dicomSequences.insert(it.key(), it.value());
         else metadata.attributes.insert(it.key(), it.value().toString());
+    }
+    // Keep source metadata out of the derived object's active DICOM modules.
+    // Private OB storage has no short-text length limit and cannot change the IOD.
+    for (Uint16 slot = 0x10; slot <= 0xff; ++slot) {
+        OFString creator;
+        const DcmTagKey creatorKey(0x7777, slot);
+        if (dataset->findAndGetOFString(creatorKey, creator).bad() || creator != "IMAGECXX_METADATA") continue;
+        const DcmTagKey payloadKey(0x7777, (slot << 8) | 1);
+        const Uint8 *data = nullptr;
+        unsigned long length = 0;
+        dicomCheck(dataset->findAndGetUint8Array(payloadKey, data, &length));
+        QByteArray bytes(reinterpret_cast<const char *>(data), length);
+        if (bytes.endsWith('\0')) bytes.chop(1); // DICOM even-length padding.
+        const auto object = detail::parseImageDescription(bytes);
+        const auto saved = detail::descriptionMetadata(object);
+        metadata.originalMetadata = saved.originalMetadata.isEmpty() ? object : saved.originalMetadata;
+        metadata.originalMetadata.remove("originalMetadata");
+        metadata.channels = saved.channels;
+        if (metadata.intensityScale == QString::number(saved.intensityScale, 'g', 12).toDouble())
+            metadata.intensityScale = saved.intensityScale;
+        if (metadata.intensityOffset == QString::number(saved.intensityOffset, 'g', 12).toDouble())
+            metadata.intensityOffset = saved.intensityOffset;
+        for (std::size_t axis = 0; axis < std::min(metadata.axes.size(), saved.axes.size()); ++axis)
+            metadata.axes[axis].name = saved.axes[axis].name;
+        for (auto it = saved.attributes.cbegin(); it != saved.attributes.cend(); ++it)
+            if (!metadata.attributes.contains(it.key())) metadata.attributes.insert(it.key(), it.value());
+        auto sequences = saved.dicomSequences;
+        for (auto it = metadata.dicomSequences.begin(); it != metadata.dicomSequences.end(); ++it)
+            sequences.insert(it.key(), it.value());
+        metadata.dicomSequences = std::move(sequences);
+        metadata.attributes.remove(dicomTagName(DcmTag(creatorKey)));
+        metadata.attributes.remove(dicomTagName(DcmTag(payloadKey)));
+        break;
     }
     auto image = Image::allocate(type, {columns, rows, static_cast<std::size_t>(frames)}, metadata);
     detail::checkIo(stop, progress, 0.2);
@@ -391,7 +424,22 @@ void writeDicom(const Image &input, const QString &path, std::stop_token stop, I
     dicomCheck(dataset->putAndInsertString(DCM_ImageOrientationPatient, orientation.join('\\').toLatin1().constData()));
     dicomCheck(dataset->putAndInsertString(DCM_RescaleSlope, QString::number(metadata.intensityScale, 'g', 12).toLatin1().constData()));
     dicomCheck(dataset->putAndInsertString(DCM_RescaleIntercept, QString::number(metadata.intensityOffset, 'g', 12).toLatin1().constData()));
-    if (!metadata.intensityUnit.isEmpty()) dicomCheck(dataset->putAndInsertString(DCM_RescaleType, metadata.intensityUnit.toLatin1().constData()));
+    if (!metadata.intensityUnit.isEmpty()) dicomCheck(dataset->putAndInsertString(DCM_RescaleType, metadata.intensityUnit.toUtf8().constData()));
+    Uint16 archiveSlot = 0x10;
+    for (; archiveSlot <= 0xff; ++archiveSlot) {
+        bool occupied = dataset->tagExists(DcmTagKey(0x7777, archiveSlot));
+        for (unsigned long i = 0; !occupied && i < dataset->card(); ++i) {
+            const auto &tag = dataset->getElement(i)->getTag();
+            occupied = tag.getGTag() == 0x7777 && (tag.getETag() >> 8) == archiveSlot;
+        }
+        if (!occupied) break;
+    }
+    if (archiveSlot > 0xff) throw std::runtime_error("No private DICOM block available to preserve ImageCXX metadata");
+    const auto description = QJsonDocument(detail::imageDescription(image)).toJson(QJsonDocument::Compact);
+    if (description.size() > UINT32_MAX - 1) throw std::runtime_error("DICOM metadata exceeds the format length limit");
+    dicomCheck(dataset->putAndInsertString(DcmTag(DcmTagKey(0x7777, archiveSlot), EVR_LO), "IMAGECXX_METADATA"));
+    dicomCheck(dataset->putAndInsertUint8Array(DcmTag(DcmTagKey(0x7777, (archiveSlot << 8) | 1), EVR_OB),
+        reinterpret_cast<const Uint8 *>(description.constData()), static_cast<unsigned long>(description.size())));
     detail::checkIo(stop, progress, 0.3);
     if (bits == 8) dicomCheck(dataset->putAndInsertUint8Array(DCM_PixelData, reinterpret_cast<const Uint8 *>(image.data()), static_cast<unsigned long>(image.byteCount())));
     else dicomCheck(dataset->putAndInsertUint16Array(DCM_PixelData, reinterpret_cast<const Uint16 *>(image.data()), static_cast<unsigned long>(image.pixelCount())));

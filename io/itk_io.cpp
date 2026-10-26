@@ -17,9 +17,11 @@
 #include <itkNiftiImageIO.h>
 #include <itkNrrdImageIO.h>
 #include <nifti1.h>
+#include <nifti1_io.h>
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 
 namespace imagecxx {
@@ -42,16 +44,31 @@ Image readScientific(const QString &path, std::stop_token stop, IoProgress progr
         io->SetFileName(QFile::encodeName(path).toStdString());
         io->ReadImageInformation();
         const auto &dictionary = io->GetMetaDataDictionary();
+        QJsonObject niftiDescription;
         double intensityScale = 1, intensityOffset = 0;
         if (auto *nifti = dynamic_cast<itk::NiftiImageIO *>(io.GetPointer())) {
-            std::string slope, intercept, datatype;
-            itk::ExposeMetaData<std::string>(dictionary, "scl_slope", slope);
-            itk::ExposeMetaData<std::string>(dictionary, "scl_inter", intercept);
+            std::unique_ptr<nifti_image, decltype(&nifti_image_free)> header(
+                nifti_image_read(QFile::encodeName(path).constData(), 0), nifti_image_free);
+            if (!header) throw std::runtime_error("Cannot read NIfTI metadata extensions");
+            for (int index = 0; index < header->num_ext; ++index) {
+                const auto &extension = header->ext_list[index];
+                if (extension.ecode != NIFTI_ECODE_COMMENT || extension.esize < 8) continue;
+                QByteArray bytes(extension.edata, extension.esize - 8);
+                if (!bytes.startsWith("ImageCXX\n")) continue;
+                const auto padding = bytes.indexOf('\0');
+                if (padding >= 0) bytes.truncate(padding);
+                const auto decoded = QByteArray::fromBase64Encoding(bytes.mid(9), QByteArray::AbortOnBase64DecodingErrors);
+                if (!decoded) throw std::runtime_error("Invalid ImageCXX NIfTI metadata encoding");
+                niftiDescription = detail::parseImageDescription(decoded.decoded);
+                break;
+            }
+            std::string datatype;
             itk::ExposeMetaData<std::string>(dictionary, "datatype", datatype);
-            bool slopeOk = false, interceptOk = false;
-            intensityScale = QString::fromStdString(slope).toDouble(&slopeOk);
-            intensityOffset = QString::fromStdString(intercept).toDouble(&interceptOk);
-            if (!slopeOk || !interceptOk || !std::isfinite(intensityScale) || !std::isfinite(intensityOffset))
+            // ITK's dictionary strings round these values to six significant
+            // digits. Read the binary header to retain its full precision.
+            intensityScale = header->scl_slope;
+            intensityOffset = header->scl_inter;
+            if (!std::isfinite(intensityScale) || !std::isfinite(intensityOffset))
                 throw std::runtime_error("Invalid NIfTI intensity calibration");
             if (intensityScale == 0) { intensityScale = 1; intensityOffset = 0; }
             if (io->GetNumberOfComponents() > 1) { intensityScale = 1; intensityOffset = 0; }
@@ -103,10 +120,9 @@ Image readScientific(const QString &path, std::stop_token stop, IoProgress progr
             if (itk::ExposeMetaData<std::string>(dictionary, key, value))
                 metadata.attributes.insert(QString::fromStdString(key), QString::fromStdString(value));
         }
-        std::string description;
-        const bool ownMetadata = itk::ExposeMetaData<std::string>(dictionary, "ImageCXX", description);
+        const bool ownMetadata = metadata.attributes.contains("ImageCXX");
         if (ownMetadata) {
-            const auto object = QJsonDocument::fromJson(QByteArray::fromStdString(description)).object();
+            const auto object = detail::parseImageDescriptionText(metadata.attributes);
             metadata = detail::descriptionMetadata(object);
             const auto savedShape = object.value("shape").toArray();
             std::vector<std::size_t> originalShape;
@@ -132,6 +148,23 @@ Image readScientific(const QString &path, std::stop_token stop, IoProgress progr
         if (dimensions == 5 && !ownMetadata) {
             std::swap(shape[3], shape[4]);
             std::swap(metadata.axes[3], metadata.axes[4]);
+        }
+        if (!niftiDescription.isEmpty()) {
+            const auto saved = detail::descriptionMetadata(niftiDescription);
+            metadata.originalMetadata = saved.originalMetadata.isEmpty() ? niftiDescription : saved.originalMetadata;
+            metadata.originalMetadata.remove("originalMetadata");
+            metadata.name = saved.name;
+            metadata.channels = saved.channels;
+            if (metadata.intensityScale == static_cast<double>(static_cast<float>(saved.intensityScale)))
+                metadata.intensityScale = saved.intensityScale;
+            if (metadata.intensityOffset == static_cast<double>(static_cast<float>(saved.intensityOffset)))
+                metadata.intensityOffset = saved.intensityOffset;
+            metadata.intensityUnit = saved.intensityUnit;
+            metadata.dicomSequences = saved.dicomSequences;
+            for (std::size_t axis = 0; axis < std::min(metadata.axes.size(), saved.axes.size()); ++axis)
+                metadata.axes[axis].name = saved.axes[axis].name;
+            for (auto it = saved.attributes.cbegin(); it != saved.attributes.cend(); ++it)
+                if (!metadata.attributes.contains(it.key())) metadata.attributes.insert(it.key(), it.value());
         }
         auto image = Image::allocate(type, shape, metadata);
         io->SetIORegion(region);
@@ -168,7 +201,7 @@ void writeScientific(const Image &input, const QString &path, std::stop_token st
         QTemporaryDir staging(QDir(parent).filePath(".imagecxx-XXXXXX"));
         if (!staging.isValid()) throw std::runtime_error("Cannot create temporary image output");
         const auto suffix = path.toLower().endsWith(".nii.gz") ? QString("nii.gz") : QFileInfo(path).suffix();
-        const auto stagedPath = staging.filePath("image." + suffix);
+        auto stagedPath = staging.filePath("image." + suffix);
         io->SetFileName(QFile::encodeName(stagedPath).toStdString());
         auto shape = image.shape();
         auto axes = image.metadata().axes;
@@ -228,11 +261,17 @@ void writeScientific(const Image &input, const QString &path, std::stop_token st
         case PixelType::Float64: io->SetComponentType(itk::IOComponentEnum::DOUBLE); break;
         }
         auto &dictionary = io->GetMetaDataDictionary();
-        for (auto it = image.metadata().attributes.cbegin(); it != image.metadata().attributes.cend(); ++it)
-            itk::EncapsulateMetaData<std::string>(dictionary, it.key().toStdString(), it.value().toStdString());
-        if (!nifti)
-            itk::EncapsulateMetaData<std::string>(dictionary, "ImageCXX", QJsonDocument(detail::imageDescription(image)).toJson(QJsonDocument::Compact).toStdString());
-        else {
+        if (nifti) {
+            // ITK uses known dictionary fields such as descrip and intent_name
+            // for the native header. The extension retains arbitrary fields too.
+            for (auto it = image.metadata().attributes.cbegin(); it != image.metadata().attributes.cend(); ++it)
+                itk::EncapsulateMetaData<std::string>(dictionary, it.key().toStdString(), it.value().toStdString());
+        }
+        if (!nifti) {
+            const auto text = detail::imageDescriptionText(image);
+            for (auto it = text.cbegin(); it != text.cend(); ++it)
+                itk::EncapsulateMetaData<std::string>(dictionary, it.key().toStdString(), it.value().toStdString());
+        } else {
             const auto scale = image.metadata().intensityScale, offset = image.metadata().intensityOffset;
             if (components > 1 && (scale != 1 || offset != 0))
                 throw std::runtime_error("NIfTI color pixels require identity intensity calibration; use TIFF to retain color calibration");
@@ -246,15 +285,53 @@ void writeScientific(const Image &input, const QString &path, std::stop_token st
         io->SetUseCompression(true);
         io->WriteImageInformation();
         detail::checkIo(stop, progress, 0.1);
+        std::vector<std::byte> ordered;
+        const auto *pixels = image.data();
         if (nifti && image.channels() > 1 && image.frames() > 1) {
-            std::vector<std::byte> ordered(image.byteCount());
+            ordered.resize(image.byteCount());
             const auto volumeBytes = image.width() * image.height() * image.depth() * bytesPerPixel(image.pixelType());
             for (std::size_t c = 0; c < image.channels(); ++c)
                 for (std::size_t t = 0; t < image.frames(); ++t)
                     std::copy_n(image.data() + (c + image.channels() * t) * volumeBytes, volumeBytes,
                                 ordered.data() + (t + image.frames() * c) * volumeBytes);
-            io->Write(ordered.data());
-        } else io->Write(image.data());
+            pixels = ordered.data();
+        }
+        io->Write(pixels);
+        if (nifti) {
+            // Borrow the existing stored samples, including conventional T/C order.
+            // niftilib writes the extension without rescaling or another image buffer.
+            const auto freeHeader = [](nifti_image *header) {
+                if (header) { header->data = nullptr; nifti_image_free(header); }
+            };
+            std::unique_ptr<nifti_image, decltype(freeHeader)> header(
+                nifti_image_read(QFile::encodeName(stagedPath).constData(), 0), freeHeader);
+            if (!header) throw std::runtime_error("Cannot read staged NIfTI header");
+            const auto description = QByteArray("ImageCXX\n") +
+                QJsonDocument(detail::imageDescription(image)).toJson(QJsonDocument::Compact).toBase64();
+            if (description.size() > INT_MAX - 16 ||
+                nifti_add_extension(header.get(), description.constData(), static_cast<int>(description.size()), NIFTI_ECODE_COMMENT) != 0)
+                throw std::runtime_error("Cannot preserve NIfTI metadata extension");
+            const auto extendedPath = staging.filePath("metadata." + suffix);
+            if (nifti_set_filenames(header.get(), QFile::encodeName(extendedPath).constData(), 0, 1) != 0)
+                throw std::runtime_error("Cannot name NIfTI output");
+            header->data = const_cast<std::byte *>(pixels);
+            detail::checkIo(stop, {}, 0);
+            if (nifti_image_write_status(header.get()) != 0)
+                throw std::runtime_error("Cannot write NIfTI output with metadata");
+            stagedPath = extendedPath;
+        } else {
+            auto verification = scientificAdapter(stagedPath);
+            verification->SetFileName(QFile::encodeName(stagedPath).toStdString());
+            verification->ReadImageInformation();
+            QMap<QString, QString> stored;
+            for (const auto &key : verification->GetMetaDataDictionary().GetKeys()) {
+                std::string value;
+                if (itk::ExposeMetaData<std::string>(verification->GetMetaDataDictionary(), key, value))
+                    stored.insert(QString::fromStdString(key), QString::fromStdString(value));
+            }
+            if (detail::parseImageDescriptionText(stored) != detail::imageDescription(image))
+                throw std::runtime_error("Scientific image codec did not preserve ImageCXX metadata");
+        }
         detail::checkIo(stop, progress, 0.85);
         if (suffix.compare("mhd", Qt::CaseInsensitive) == 0 || suffix.compare("nhdr", Qt::CaseInsensitive) == 0) {
             QFile header(stagedPath);

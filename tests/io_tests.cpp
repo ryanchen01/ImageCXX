@@ -1,9 +1,11 @@
 #include "io/image_io.h"
+#include "io/io_detail.h"
 
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QColor>
 #include <QDir>
 #include <QTemporaryDir>
@@ -357,6 +359,149 @@ TEST(ImageIo, DicomSequenceHierarchySurvivesImportAndTiffSave)
     const auto tiff = directory.filePath("sequences.tif");
     writeImage(loaded, tiff);
     EXPECT_EQ(readImage(tiff).metadata().dicomSequences, expected);
+    const auto exported = directory.filePath("exported.dcm");
+    writeImage(loaded, exported);
+    EXPECT_EQ(readImage(exported).metadata().dicomSequences, expected);
+    DcmFileFormat derived;
+    ASSERT_TRUE(derived.loadFile(QFile::encodeName(exported).constData()).good());
+    OFString sopClass;
+    ASSERT_TRUE(derived.getDataset()->findAndGetOFString(DCM_SOPClassUID, sopClass).good());
+    EXPECT_EQ(sopClass, UID_SecondaryCaptureImageStorage);
+    EXPECT_FALSE(derived.getDataset()->tagExists(DCM_ReferencedSeriesSequence));
+    EXPECT_FALSE(derived.getDataset()->tagExists(DCM_ReferencedStudySequence));
+}
+
+TEST(ImageIo, EverySaveFormatPreservesLargeUnicodeAndNestedMetadata)
+{
+    QTemporaryDir directory;
+    ASSERT_TRUE(directory.isValid());
+    auto original = fixture(PixelType::UInt8, {5, 3});
+    original.metadata().direction = {1, 0, 0, 1};
+    original.metadata().intensityScale = 2.123456789123456;
+    original.metadata().intensityOffset = -100.1234567891234;
+    original.metadata().axes[0].name = "Horizontal";
+    const auto text = QString::fromUtf8("A line\nwith  spaces, accents é and 患者 ") + QString(50000, QChar(0x60a3));
+    original.metadata().attributes.insert("Long Unicode value", text);
+    original.metadata().dicomSequences = {{"DICOM.0008,1115", QJsonArray{
+        QJsonObject{{"DICOM.0040,a160", text}, {"DICOM.0008,1140", QJsonArray{
+            QJsonObject{{"DICOM.0008,1155", "1.2.3.4"}}}}},
+        QJsonObject{{"DICOM.0040,a160", "Second item"}}}}, {"DICOM.0008,1110", QJsonArray{}}};
+    original.metadata().originalMetadata = detail::imageDescription(original);
+    original.metadata().originalMetadata.remove("originalMetadata");
+    for (const auto *extension : {"tif", "tiff", "png", "jpg", "jpeg", "mha", "mhd", "nrrd", "nhdr", "nii", "nii.gz", "dcm", "dicom", "raw", "bin"}) {
+        SCOPED_TRACE(extension);
+        const auto path = directory.filePath(QString("metadata.") + extension);
+        ASSERT_NO_THROW(writeImage(original, path));
+        const auto loaded = readImage(path);
+        EXPECT_EQ(loaded.metadata().dicomSequences, original.metadata().dicomSequences);
+        EXPECT_EQ(loaded.metadata().originalMetadata, original.metadata().originalMetadata);
+        for (auto it = original.metadata().attributes.cbegin(); it != original.metadata().attributes.cend(); ++it)
+            EXPECT_EQ(loaded.metadata().attributes.value(it.key()), it.value()) << it.key().toStdString();
+        ASSERT_EQ(loaded.metadata().channels.size(), original.metadata().channels.size());
+        EXPECT_EQ(loaded.metadata().channels[0].name, original.metadata().channels[0].name);
+        EXPECT_EQ(loaded.metadata().channels[0].color, original.metadata().channels[0].color);
+        EXPECT_EQ(loaded.metadata().axes[0].name, original.metadata().axes[0].name);
+        EXPECT_DOUBLE_EQ(loaded.metadata().intensityScale, original.metadata().intensityScale);
+        EXPECT_DOUBLE_EQ(loaded.metadata().intensityOffset, original.metadata().intensityOffset);
+        EXPECT_EQ(loaded.metadata().intensityUnit, original.metadata().intensityUnit);
+        if (QString(extension) != "jpg" && QString(extension) != "jpeg") expectPixels(loaded, original);
+    }
+}
+
+TEST(ImageIo, DicomPrivateArchiveRetainsCompleteSourceMetadataWithoutChangingDerivedModules)
+{
+    QTemporaryDir directory;
+    auto original = fixture(PixelType::UInt16, {5, 3, 1});
+    original.metadata().attributes.insert("DICOM.0008,0016", UID_MRImageStorage);
+    original.metadata().attributes.insert("DICOM.7777,0010", "ANOTHER_CREATOR");
+    original.metadata().dicomSequences = {{"DICOM.0008,1110", QJsonArray{}}};
+    const auto path = directory.filePath("derived.dcm");
+    writeDicom(original, path);
+    DcmFileFormat file;
+    ASSERT_TRUE(file.loadFile(QFile::encodeName(path).constData()).good());
+    OFString value;
+    ASSERT_TRUE(file.getDataset()->findAndGetOFString(DCM_SOPClassUID, value).good());
+    EXPECT_EQ(value, UID_SecondaryCaptureImageStorage);
+    ASSERT_TRUE(file.getDataset()->findAndGetOFString(DcmTagKey(0x7777, 0x0010), value).good());
+    EXPECT_EQ(value, "ANOTHER_CREATOR");
+    ASSERT_TRUE(file.getDataset()->findAndGetOFString(DcmTagKey(0x7777, 0x0011), value).good());
+    EXPECT_EQ(value, "IMAGECXX_METADATA");
+    const Uint8 *data = nullptr;
+    unsigned long length = 0;
+    ASSERT_TRUE(file.getDataset()->findAndGetUint8Array(DcmTagKey(0x7777, 0x1101), data, &length).good());
+    QByteArray bytes(reinterpret_cast<const char *>(data), length);
+    if (bytes.endsWith('\0')) bytes.chop(1);
+    EXPECT_EQ(detail::parseImageDescription(bytes), detail::imageDescription(original));
+    const auto reloaded = readDicom(path);
+    EXPECT_EQ(reloaded.metadata().attributes.value("DICOM.0008,0016"), UID_SecondaryCaptureImageStorage);
+    EXPECT_EQ(reloaded.metadata().dicomSequences, original.metadata().dicomSequences);
+    EXPECT_FALSE(reloaded.metadata().attributes.contains("DICOM.7777,0011"));
+    auto sourceMetadata = detail::imageDescription(original);
+    sourceMetadata.remove("originalMetadata");
+    EXPECT_EQ(reloaded.metadata().originalMetadata, sourceMetadata);
+    const auto second = directory.filePath("second.dcm");
+    writeDicom(reloaded, second);
+    EXPECT_EQ(readDicom(second).metadata().originalMetadata, sourceMetadata);
+}
+
+TEST(ImageIo, UnrepresentableMetadataDoesNotReplaceExistingFiles)
+{
+    QTemporaryDir directory;
+    auto original = fixture(PixelType::UInt8, {5, 3});
+    original.metadata().direction = {1, 0, 0, 1};
+    for (const auto *extension : {"tif", "png", "jpg", "mha", "mhd", "nrrd", "nhdr", "nii", "nii.gz", "dcm", "raw"}) {
+        SCOPED_TRACE(extension);
+        const auto path = directory.filePath(QString("existing.") + extension);
+        writeImage(original, path);
+        QFile file(path);
+        ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+        const auto before = file.readAll();
+        file.close();
+        auto invalid = original;
+        invalid.metadata().axes[0].origin = std::numeric_limits<double>::quiet_NaN();
+        EXPECT_THROW(writeImage(invalid, path), std::runtime_error);
+        ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+        EXPECT_EQ(file.readAll(), before);
+    }
+    // BMP's codec drops text. Its encoded output must never replace the destination.
+    const auto path = directory.filePath("unsupported.bmp");
+    QFile destination(path);
+    ASSERT_TRUE(destination.open(QIODevice::WriteOnly));
+    ASSERT_EQ(destination.write("previous contents"), 17);
+    destination.close();
+    EXPECT_THROW(writeImage(original, path), std::runtime_error);
+    ASSERT_TRUE(destination.open(QIODevice::ReadOnly));
+    EXPECT_EQ(destination.readAll(), "previous contents");
+}
+
+TEST(ImageIo, LegacyUnchunkedRasterAndScientificMetadataStillLoads)
+{
+    QTemporaryDir directory;
+    const auto original = fixture(PixelType::UInt8, {5, 3});
+    auto description = detail::imageDescription(original);
+    description.remove("originalMetadata");
+    const auto json = QJsonDocument(description).toJson(QJsonDocument::Compact);
+    const auto png = directory.filePath("legacy.png");
+    QImage raster(5, 3, QImage::Format_Grayscale8);
+    raster.fill(0);
+    raster.setText("ImageCXX", QString::fromUtf8(json));
+    ASSERT_TRUE(raster.save(png));
+    const auto loaded = readImage(png);
+    EXPECT_EQ(loaded.metadata().attributes, original.metadata().attributes);
+    EXPECT_DOUBLE_EQ(loaded.metadata().intensityOffset, original.metadata().intensityOffset);
+
+    const auto mha = directory.filePath("legacy.mha");
+    QFile file(mha);
+    ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+    const auto header = QByteArray("ObjectType = Image\nNDims = 2\nBinaryData = True\nBinaryDataByteOrderMSB = False\n"
+        "DimSize = 5 3\nElementType = MET_UCHAR\nImageCXX = ") + json + "\nElementDataFile = LOCAL\n";
+    ASSERT_EQ(file.write(header), header.size());
+    ASSERT_EQ(file.write(reinterpret_cast<const char *>(original.data()), original.byteCount()), original.byteCount());
+    file.close();
+    const auto scientific = readImage(mha);
+    expectPixels(scientific, original);
+    EXPECT_EQ(scientific.metadata().attributes, original.metadata().attributes);
+    EXPECT_EQ(scientific.metadata().intensityUnit, original.metadata().intensityUnit);
 }
 
 TEST(ImageIo, DicomSeriesOrdersPhysicalPositionsAndRejectsMixedSeries)

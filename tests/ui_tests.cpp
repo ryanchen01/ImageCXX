@@ -777,6 +777,27 @@ TEST(Desktop, OverlappingSavesAreRejectedAndReservationsReleaseAfterCancellation
     }
 }
 
+TEST(Desktop, DicomSaveRetainsNestedMetadataAfterDocumentIsMarkedClean)
+{
+    QTemporaryDir directory;
+    ImageMetadata metadata;
+    metadata.axes = {{"X", 1, 0, "mm"}, {"Y", 1, 0, "mm"}};
+    metadata.attributes.insert("Experiment", "Preserve this too");
+    metadata.dicomSequences = {{"DICOM.0008,1115", QJsonArray{QJsonObject{
+        {"DICOM.0008,1140", QJsonArray{QJsonObject{{"DICOM.0008,1155", "1.2.3"}}}}}}}};
+    MainWindow window;
+    auto *document = window.addDocument(Image::allocate(PixelType::UInt16, {4, 4}, metadata));
+    document->modified = true;
+    const auto path = directory.filePath("saved.dcm");
+    ASSERT_TRUE(saveImage(window, path).isEmpty());
+    ASSERT_TRUE(finishJobs(window));
+    EXPECT_FALSE(document->modified);
+    EXPECT_EQ(document->image.metadata().sourcePath, path);
+    const auto saved = readImage(path);
+    EXPECT_EQ(saved.metadata().dicomSequences, metadata.dicomSequences);
+    EXPECT_EQ(saved.metadata().attributes.value("Experiment"), "Preserve this too");
+}
+
 TEST(Desktop, StartsCompactAndOpensIndependentImageAndToolWindows)
 {
     MainWindow window; window.show(); QCoreApplication::processEvents();

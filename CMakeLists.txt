@@ -34,7 +34,7 @@ target_include_directories(imagecxx_processing SYSTEM PRIVATE ${ITK_INCLUDE_DIRS
 target_link_directories(imagecxx_processing INTERFACE ${ITK_LIBRARY_DIRS})
 
 add_library(imagecxx_io STATIC io/image_io.cpp io/image_import.cpp io/itk_io.cpp io/dicom_io.cpp)
-target_link_libraries(imagecxx_io PUBLIC imagecxx_core PRIVATE TIFF::TIFF ${ITK_LIBRARIES} DCMTK::dcmdata DCMTK::dcmjpeg DCMTK::dcmjpls)
+target_link_libraries(imagecxx_io PUBLIC imagecxx_core PRIVATE TIFF::TIFF ${ITK_LIBRARIES} ITKniftiio DCMTK::dcmdata DCMTK::dcmjpeg DCMTK::dcmjpls)
 target_include_directories(imagecxx_io SYSTEM PRIVATE ${ITK_INCLUDE_DIRS} ${DCMTK_INCLUDE_DIRS})
 target_link_directories(imagecxx_io INTERFACE ${ITK_LIBRARY_DIRS})
 

@@ -4,11 +4,11 @@ The adapters return project-owned `Image` buffers. Reads and writes accept cance
 
 | Adapter | Pixel types | Metadata | Storage |
 | --- | --- | --- | --- |
-| Qt PNG | UInt8/UInt16 grayscale, RGB8, RGBA8 | ImageCXX text preserves axes, calibration, channels and attributes | Decoded RAM |
-| Qt JPEG | UInt8 grayscale, RGB8 | JPEG encoding is lossy; plugin metadata support varies | Decoded RAM |
+| Qt PNG | UInt8/UInt16 grayscale, RGB8, RGBA8 | ImageCXX text preserves axes, calibration, channels, attributes and sequence metadata | Decoded RAM |
+| Qt JPEG | UInt8 grayscale, RGB8 | Lossy pixels; chunked ImageCXX text preserves metadata and is verified before publishing | Decoded RAM |
 | libtiff TIFF/BigTIFF | All model types, contiguous sample layout, strips or tiles | ImageCXX description preserves full metadata and shape; ImageJ descriptions import C/Z/T ordering and calibration; ordinary TIFF resolution is imported | Decoded RAM |
 | ITK MHA/MHD, NRRD/NHDR | All model types supported by the corresponding ITK codec | Spatial geometry and ImageCXX metadata | Decoded RAM |
-| ITK NIfTI, compressed NIfTI | Supported scalar and RGB(A) types | Stored samples and type, standard intensity slope/intercept, spatial geometry and conventional T/C axis order; arbitrary attributes, intensity unit labels and channel descriptions do not round-trip through NIfTI | Decoded RAM |
+| ITK NIfTI, compressed NIfTI | Supported scalar and RGB(A) types | Stored samples and type, standard intensity slope/intercept, spatial geometry and conventional T/C axis order; an ImageCXX comment extension retains full metadata | Decoded RAM |
 | DCMTK DICOM | UInt8, UInt16, Int16 grayscale; RGB8 | Patient geometry, rescale slope/intercept, textual tags and nested sequences; UTF-8 conversion | Decoded RAM |
 | Raw binary | All model types, X-fastest | Explicit import options or adjacent `.json` sidecar; byte order and header offset supported | Read-only mapping when native byte order permits; RAM otherwise |
 
@@ -18,6 +18,10 @@ High-bit-depth color rasters fail explicitly because the model currently support
 
 NIfTI exports convert spatial units m/cm/mm/um/nm to millimeters and time units s/ms/us/min to seconds. Unsupported or uncalibrated units fail explicitly. Standard NIfTI slope/intercept fields use float32 precision. Reading keeps original stored samples and applies calibration through `ImageMetadata`, avoiding ITK's default integer-to-float promotion. NIfTI color samples require identity intensity calibration because the format ignores color scaling.
 
+Every supported save format retains the metadata held by `ImageMetadata`, including nested DICOM sequences, channel descriptions and arbitrary attributes. TIFF and raw sidecars use ImageCXX JSON. PNG, JPEG, MetaImage and NRRD use numbered base64 text records, avoiding text normalization and header-line limits. Readers also accept legacy unchunked ImageCXX JSON. NIfTI uses an ASCII `ImageCXX` comment extension. Raster and scientific text encodings are checked before the destination is replaced; a codec that drops metadata causes the save to fail. Non-finite numeric metadata is rejected rather than converted to JSON null.
+
+Native DICOM and NIfTI geometry still uses their standard coordinate units. Raster saves still flatten singleton stack axes into a plane. When these representations normalize or replace metadata, `ImageMetadata::originalMetadata` retains the complete source snapshot, including original units, precision, shape and replaced tags. This snapshot survives subsequent saves in every supported format without nesting a new history on each save. `sourcePath` remains the location of the file being read, rather than a saved copy of the previous path.
+
 For images with NIfTI metadata, Image Properties shows only available header fields with readable labels and their original field names, such as `Data Type (datatype)`. Built-in properties and ITK internal metadata are hidden.
 
 The search field in Image Properties matches names, tags and values, ignoring spaces, symbols and capitalization. Matching nested tags keep their parent sequences visible; matching a sequence shows its contents. Clearing the search restores all rows and keeps the selected row in view.
@@ -26,7 +30,7 @@ Use Shift or Ctrl/Command to select multiple property rows. Right-click to copy 
 
 DICOM imports native, RLE, JPEG and JPEG-LS encodings supported by DCMTK. Enhanced per-frame functional groups and unsupported compression fail explicitly. Single-file multiframe grayscale is read as a Z stack with shared geometry. Series import requires matching study/series/frame-of-reference identifiers, scalar encoding, calibration, orientation and spacing. It orders slices by patient coordinates and rejects duplicate positions, nonuniform spacing and shifted grids. Export writes one 2D secondary-capture image. Original stored pixel values stay separate from intensity calibration. MONOCHROME1 is retained in its metadata.
 
-For images with DICOM metadata, Image Properties shows only the DICOM tags, including sequences with their nested items and tags. Labels put the numeric tag first, such as `(0010,0010) Patient Name`. All rows start expanded and sequences can be collapsed. Sequence metadata is retained in ImageCXX descriptions when saving formats such as TIFF and PNG; DICOM export still copies only top-level textual tags.
+For images with DICOM metadata, Image Properties shows only the DICOM tags, including sequences with their nested items and tags. Labels put the numeric tag first, such as `(0010,0010) Patient Name`. All rows start expanded and sequences can be collapsed. DICOM export copies top-level textual tags into the active secondary-capture object and retains the complete ImageCXX metadata in a private OB element under the `IMAGECXX_METADATA` private creator in group `7777`. It reserves an unused private block instead of replacing another creator's data. Imported sequences are restored from this archive rather than inserted into unrelated secondary-capture modules. Native attributes and sequences take precedence if another application edits the DICOM file; the original snapshot retains replaced source values. Other DICOM readers can read the secondary-capture pixels normally, but need ImageCXX archive support to recover the preserved source metadata. Removing private elements or application-specific metadata extensions also removes their archived metadata.
 
 Desktop imports recursively scan folders and deduplicate canonical file paths.
 When an MHD header and its referenced payload are selected together, only the

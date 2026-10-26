@@ -16,6 +16,7 @@
 #include <tiffio.h>
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -64,6 +65,13 @@ void atomicCopy(const QString &source, const QString &destination,
 QJsonObject imageDescription(const Image &image)
 {
     const auto &metadata = image.metadata();
+    if (!std::isfinite(metadata.intensityScale) || !std::isfinite(metadata.intensityOffset))
+        throw std::runtime_error("Cannot preserve non-finite intensity metadata");
+    for (const auto &axis : metadata.axes)
+        if (!std::isfinite(axis.spacing) || !std::isfinite(axis.origin))
+            throw std::runtime_error("Cannot preserve non-finite axis metadata");
+    for (double value : metadata.direction)
+        if (!std::isfinite(value)) throw std::runtime_error("Cannot preserve non-finite direction metadata");
     QJsonArray shape, axes, channels, direction;
     for (auto size : image.shape()) shape.append(static_cast<qint64>(size));
     for (const auto &axis : metadata.axes)
@@ -79,7 +87,58 @@ QJsonObject imageDescription(const Image &image)
             {"name", metadata.name}, {"axes", axes}, {"channels", channels},
             {"direction", direction}, {"intensityScale", metadata.intensityScale},
             {"intensityOffset", metadata.intensityOffset}, {"intensityUnit", metadata.intensityUnit},
-            {"attributes", attributes}, {"dicomSequences", metadata.dicomSequences}};
+            {"attributes", attributes}, {"dicomSequences", metadata.dicomSequences},
+            {"originalMetadata", metadata.originalMetadata}};
+}
+
+QJsonObject parseImageDescription(const QByteArray &bytes)
+{
+    const auto document = QJsonDocument::fromJson(bytes);
+    const auto object = document.object();
+    if (!document.isObject() || object.value("version").toInt() != 1 ||
+        !object.value("attributes").isObject() || !object.value("shape").isArray())
+        throw std::runtime_error("Invalid or unsupported ImageCXX metadata");
+    return object;
+}
+
+QMap<QString, QString> imageDescriptionText(const Image &image)
+{
+    const auto encoded = QJsonDocument(imageDescription(image)).toJson(QJsonDocument::Compact).toBase64();
+    // Short ASCII records also fit MetaImage's header-line limit and JPEG COM.
+    constexpr qsizetype chunkSize = 3000;
+    const auto count = (encoded.size() + chunkSize - 1) / chunkSize;
+    QMap<QString, QString> result{{"ImageCXX", QString("base64-chunks:%1").arg(count)}};
+    for (qsizetype index = 0; index < count; ++index)
+        result.insert(QString("ImageCXX.%1").arg(index, 8, 10, QLatin1Char('0')),
+            QString::fromLatin1(encoded.mid(index * chunkSize, chunkSize)));
+    return result;
+}
+
+QJsonObject parseImageDescriptionText(const QMap<QString, QString> &values)
+{
+    const auto text = values.value("ImageCXX");
+    if (text.isEmpty()) return {};
+    if (!text.startsWith("base64-chunks:")) return parseImageDescription(text.toUtf8());
+    bool ok = false;
+    const auto count = text.mid(14).toInt(&ok);
+    if (!ok || count <= 0 || count > values.size())
+        throw std::runtime_error("Invalid ImageCXX metadata chunks");
+    QByteArray bytes;
+    for (int index = 0; index < count; ++index) {
+        const auto chunk = values.value(QString("ImageCXX.%1").arg(index, 8, 10, QLatin1Char('0')));
+        if (chunk.isEmpty()) throw std::runtime_error("Missing ImageCXX metadata chunk");
+        bytes.append(chunk.toLatin1());
+    }
+    const auto decoded = QByteArray::fromBase64Encoding(bytes, QByteArray::AbortOnBase64DecodingErrors);
+    if (!decoded) throw std::runtime_error("Invalid ImageCXX metadata encoding");
+    return parseImageDescription(decoded.decoded);
+}
+
+QJsonObject rasterImageDescription(const QImage &image)
+{
+    QMap<QString, QString> values;
+    for (const auto &key : image.textKeys()) values.insert(key, image.text(key));
+    return parseImageDescriptionText(values);
 }
 
 ImageMetadata descriptionMetadata(const QJsonObject &object)
@@ -104,6 +163,7 @@ ImageMetadata descriptionMetadata(const QJsonObject &object)
     for (auto it = attributes.begin(); it != attributes.end(); ++it)
         metadata.attributes.insert(it.key(), it.value().toString());
     metadata.dicomSequences = object.value("dicomSequences").toObject();
+    metadata.originalMetadata = object.value("originalMetadata").toObject();
     return metadata;
 }
 } // namespace detail
@@ -230,7 +290,7 @@ Image readImage(const QString &path, const std::optional<RawImportOptions> &raw,
         if (description) {
             const QByteArray text(description);
             if (text.startsWith("ImageCXX\n")) {
-                const auto object = QJsonDocument::fromJson(text.mid(QByteArrayLiteral("ImageCXX\n").size())).object();
+                const auto object = detail::parseImageDescription(text.mid(QByteArrayLiteral("ImageCXX\n").size()));
                 std::vector<std::size_t> savedShape;
                 std::size_t savedPages = 1;
                 const auto dimensions = object.value("shape").toArray();
@@ -362,7 +422,7 @@ Image readImage(const QString &path, const std::optional<RawImportOptions> &raw,
         else if (raster.format() == QImage::Format_Grayscale8 || (raster.format() == QImage::Format_Indexed8 && raster.isGrayscale())) { type = PixelType::UInt8; raster = raster.convertToFormat(QImage::Format_Grayscale8); }
         else if (raster.hasAlphaChannel()) { type = PixelType::RGBA8; raster = raster.convertToFormat(QImage::Format_RGBA8888); }
         else { type = PixelType::RGB8; raster = raster.convertToFormat(QImage::Format_RGB888); }
-        const auto object = QJsonDocument::fromJson(raster.text("ImageCXX").toUtf8()).object();
+        const auto object = detail::rasterImageDescription(raster);
         auto metadata = detail::descriptionMetadata(object);
         if (metadata.axes.empty()) {
             metadata.axes = {{"X", raster.dotsPerMeterX() > 0 ? 1000.0 / raster.dotsPerMeterX() : 1, 0, raster.dotsPerMeterX() > 0 ? "mm" : "px"},
@@ -453,7 +513,8 @@ void writeImage(const Image &input, const QString &path, std::stop_token stop, I
             TIFFSetField(tiff.get(), TIFFTAG_ORIENTATION, ORIENTATION_TOPLEFT);
             TIFFSetField(tiff.get(), TIFFTAG_COMPRESSION, COMPRESSION_ADOBE_DEFLATE);
             TIFFSetField(tiff.get(), TIFFTAG_ROWSPERSTRIP, TIFFDefaultStripSize(tiff.get(), 0));
-            TIFFSetField(tiff.get(), TIFFTAG_IMAGEDESCRIPTION, description.constData());
+            if (!TIFFSetField(tiff.get(), TIFFTAG_IMAGEDESCRIPTION, description.constData()))
+                throw std::runtime_error("Cannot preserve TIFF metadata");
             if (samples == 4) { uint16_t extra = EXTRASAMPLE_UNASSALPHA; TIFFSetField(tiff.get(), TIFFTAG_EXTRASAMPLES, 1, &extra); }
             for (std::size_t y = 0; y < image.height(); ++y) {
                 detail::checkIo(stop, {}, 0);
@@ -483,15 +544,28 @@ void writeImage(const Image &input, const QString &path, std::stop_token stop, I
             detail::checkIo(stop, {}, 0);
             std::memcpy(raster.scanLine(y), image.data() + static_cast<std::size_t>(y) * rowBytes, rowBytes);
         }
-        raster.setText("ImageCXX", QString::fromUtf8(QJsonDocument(detail::imageDescription(image.slice())).toJson(QJsonDocument::Compact)));
-        QSaveFile output(path);
-        if (!output.open(QIODevice::WriteOnly)) throw std::runtime_error("Cannot create raster image");
-        QImageWriter writer(&output, suffix.toLatin1());
+        auto plane = image.slice();
+        if (plane.metadata().originalMetadata.isEmpty()) {
+            plane.metadata().originalMetadata = detail::imageDescription(image);
+            plane.metadata().originalMetadata.remove("originalMetadata");
+        }
+        const auto description = detail::imageDescription(plane);
+        const auto text = detail::imageDescriptionText(plane);
+        for (auto it = text.cbegin(); it != text.cend(); ++it) raster.setText(it.key(), it.value());
+        QTemporaryDir staging(QDir(QFileInfo(path).absolutePath()).filePath(".imagecxx-XXXXXX"));
+        if (!staging.isValid()) throw std::runtime_error("Cannot create temporary raster output");
+        const auto stagedPath = staging.filePath("image." + suffix);
+        QImageWriter writer(stagedPath, suffix.toLatin1());
         if (jpeg) writer.setQuality(95);
         if (!writer.write(raster)) throw std::runtime_error(writer.errorString().toStdString());
+        raster = {}; // Release export pixels before decoding the verification image.
+        QImageReader verification(stagedPath);
+        const auto stored = verification.read();
+        if (stored.isNull() || detail::rasterImageDescription(stored) != description)
+            throw std::runtime_error("Raster image codec did not preserve ImageCXX metadata");
         detail::checkIo(stop, progress, 0.95);
         detail::checkIo(stop, {}, 0);
-        if (!output.commit()) throw std::runtime_error("Cannot commit raster image");
+        detail::atomicCopy(stagedPath, path, stop);
     }
     if (progress) progress(1);
 }

@@ -47,6 +47,8 @@ struct ImageMetadata {
     QMap<QString, QString> attributes;
     // Sequence tags map to arrays of items, whose tags contain strings or nested sequences.
     QJsonObject dicomSequences;
+    // Source snapshot retained when a derived format normalizes geometry or replaces tags.
+    QJsonObject originalMetadata;
 };
 
 // Storage owns bytes independently from image views. Providers may load regions lazily.
