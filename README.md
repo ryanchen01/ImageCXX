@@ -2,61 +2,66 @@
 
 ImageCXX is a C++20 and Qt Widgets image viewer and analysis application with a compact launcher and separate image and tool windows. It keeps scientific pixel values separate from display settings and provides stack browsing, ROIs, measurements, plots and ITK processing.
 
-Open the images to compare, then choose View > Linked view and check the images to link with the active image. Reopen Linked view to add or deselect images. Slice/channel/time navigation and pan/zoom follow in both directions, using each image's origin, pixel spacing, spatial direction and units to follow physical locations. Uncalibrated images use pixel coordinates. Slice/channel/time indices clamp to each image's dimensions. Each image keeps its own contrast, colors, selections and edits. Choose Single view on either image to unlink them. Orthogonal views open XY/XZ/YZ windows for one image. Move and resize windows however you prefer; newly shown windows stay within the screen's usable area.
-
-Orthogonal views require a Z stack and follow the stored image axes, with calibrated pixel proportions when the axes use the same unit. Each window has its own slice slider: Z in XY, Y in XZ, and X in YZ. Channel and time selection is available in the Display panel. The Pointer tool is selected at startup. Click or drag with Pointer to move the shared intersection, or drag with Pan to pan the image. The wheel browses the hovered plane; Ctrl or Command plus the wheel zooms, and middle-button or Space plus dragging pans. Selection editing, measurements and pixel commands use XY. Orthogonal windows read their document's shared image storage, and edits and undo refresh all its planes.
-
-The image model and undo history are in `core/`, format adapters in `io/`, and ITK filters and measurements in `processing/`. The `app/` module owns commands, batch processing and background jobs; `ui/`, `viewer/` and `plots/` provide the desktop interface. See [format support and save limits](io/README.md), [keyboard shortcuts](docs/shortcuts.md) and [unfinished work](TODO.md).
-
 ## Build
 
-Install CMake 3.24 or later, Ninja, a C++20 compiler and the official Qt **6.12.0** desktop SDK. Add Qt Shader Tools, Qt Graphs and Qt Image Formats. Qt SVG is included in the base desktop SDK and must not be requested as an aqt add-on module. This Qt SDK also needs Qt Quick 3D as a transitive dependency of Qt Graphs, although ImageCXX uses only 2D plots. Include Qt Quick Timeline for the Qt Quick 3D QML plugins deployed in release packages. The desktop SDK also needs Qt Declarative, including Qt Quick, QML and QuickWidgets. Keep the matching Qt private development headers installed because the viewer uses Qt RHI behind its internal interface.
+Install these first:
 
-The supported dependency route is the [vcpkg manifest](vcpkg.json), pinned to baseline `bf19794383e8fb95eba5aa553235bc8ec2271688`. Qt comes from the official SDK, while ITK, DCMTK, libtiff, GoogleTest and Google Benchmark come from vcpkg. Do not install another Qt through vcpkg.
+- CMake 3.24+, Ninja and a C++20 compiler.
+- The official Qt 6.12.0 desktop SDK with Shader Tools, Graphs, Image Formats, Quick 3D and Quick Timeline.
+- A local [vcpkg checkout](https://github.com/microsoft/vcpkg). It supplies the dependencies in [vcpkg.json](vcpkg.json). Use the official SDK for Qt.
 
-On macOS or Linux, with the SDK and vcpkg checked out locally:
+The commands below build Release. Run them from the ImageCXX repository. Replace the Qt and vcpkg paths with your own.
+
+### macOS and Linux
+
+Point `QT_ROOT_DIR` to your platform's SDK directory, such as `macos` or `gcc_64`.
 
 ```sh
 export QT_ROOT_DIR=/path/to/Qt/6.12.0/macos
 export VCPKG_ROOT=/path/to/vcpkg
-git -C "$VCPKG_ROOT" checkout bf19794383e8fb95eba5aa553235bc8ec2271688
 "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
+cmake --preset release-vcpkg
+cmake --build --preset release-vcpkg
+ctest --preset release-vcpkg
+```
+
+Open `build/release-vcpkg/ImageCXX.app` on macOS, or run `build/release-vcpkg/ImageCXX` on Linux.
+
+### Windows
+
+Use an x64 Visual Studio 2022 developer PowerShell:
+
+```powershell
+$env:QT_ROOT_DIR = "C:/Qt/6.12.0/msvc2022_64"
+$env:VCPKG_ROOT = "C:/path/to/vcpkg"
+& "$env:VCPKG_ROOT/bootstrap-vcpkg.bat" -disableMetrics
+cmake --preset release-vcpkg -DVCPKG_TARGET_TRIPLET=x64-windows
+cmake --build --preset release-vcpkg
+$env:PATH = "$env:QT_ROOT_DIR/bin;$PWD/build/release-vcpkg/vcpkg_installed/x64-windows/bin;$env:PATH"
+ctest --preset release-vcpkg
+./build/release-vcpkg/ImageCXX.exe
+```
+
+## Development
+
+Use the dependencies and environment variables from the build instructions above. The `dev-vcpkg` preset builds Debug in `build/dev-vcpkg`.
+
+On macOS and Linux:
+
+```sh
 cmake --preset dev-vcpkg
 cmake --build --preset dev-vcpkg
 ctest --preset dev-vcpkg
 ```
 
-Set `QT_ROOT_DIR` to the actual platform SDK directory. `QTDIR` is also accepted. The presets append `CMAKE_PREFIX_PATH` from the environment, using CMake's semicolon-separated list syntax. A command-line `-DCMAKE_PREFIX_PATH=...` overrides that setting.
-
-On Windows, run these commands in an x64 Visual Studio 2022 developer PowerShell, after setting `$env:QT_ROOT_DIR` to the `msvc2022_64` SDK and `$env:VCPKG_ROOT` to vcpkg:
+On Windows, use an x64 Visual Studio 2022 developer PowerShell:
 
 ```powershell
-git -C $env:VCPKG_ROOT checkout bf19794383e8fb95eba5aa553235bc8ec2271688
-& "$env:VCPKG_ROOT/bootstrap-vcpkg.bat" -disableMetrics
 cmake --preset dev-vcpkg -DVCPKG_TARGET_TRIPLET=x64-windows
 cmake --build --preset dev-vcpkg
+$env:PATH = "$env:QT_ROOT_DIR/bin;$PWD/build/dev-vcpkg/vcpkg_installed/x64-windows/debug/bin;$env:PATH"
 ctest --preset dev-vcpkg
 ```
-
-Keep Qt's `bin` and vcpkg's `build/dev-vcpkg/vcpkg_installed/x64-windows/debug/bin` on `PATH` when running a Debug build on Windows. Use the triplet's `bin` directory for Release. The `dev` and `release` presets use dependencies already installed on the machine instead of enabling the vcpkg toolchain. Those builds are useful locally, but their dependency versions are not controlled by the manifest.
-
-Start `build/dev-vcpkg/ImageCXX` on Linux, `build/dev-vcpkg/ImageCXX.exe` on Windows, or `build/dev-vcpkg/ImageCXX.app` on macOS. You can also pass image paths as command-line arguments.
-
-## Checks and benchmarks
-
-```sh
-cmake --preset release-vcpkg -DIMAGECXX_BUILD_BENCHMARKS=ON
-cmake --build --preset release-vcpkg
-ctest --preset release-vcpkg --output-on-failure
-```
-
-The `sanitizers` and `sanitizers-vcpkg` presets enable AddressSanitizer and UndefinedBehaviorSanitizer with Clang or GCC. Headless widget tests use Qt's offscreen platform and skip GPU-only checks. Run `imagecxx_ui_tests` on a native desktop without `QT_QPA_PLATFORM=offscreen` to include GPU rendering checks.
-
-Run `imagecxx_benchmarks` from the selected build directory with `--benchmark_out=benchmarks.json --benchmark_out_format=json`. It measures shared snapshots, slice views, buffer copies, histograms and ITK Gaussian filtering on deterministic generated inputs. These are CPU microbenchmarks. Record hardware, OS, compiler, build type and dependency versions alongside results before comparing runs. They do not measure launch time, GPU frame timing or real file decoding.
-
-The [GitHub Actions workflow](.github/workflows/build.yml) defines Windows, macOS and Linux build/test jobs with cached dependencies. Linux also runs graphics and interactive plot tests under Xvfb with software rendering. The [release workflow](.github/workflows/release.yml) builds tagged installers and update packages. See [releasing and updates](docs/releases.md) for signing secrets, tag names, and platform behavior. CI requires the pinned Qt SDK and its add-on archives to be available from Qt's download service.
-
-`clang-format` uses [.clang-format](.clang-format), and `clang-tidy` can use the generated `compile_commands.json` with [.clang-tidy](.clang-tidy).
 
 ## License
 
