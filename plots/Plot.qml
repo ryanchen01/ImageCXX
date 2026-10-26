@@ -16,25 +16,41 @@ GraphsView {
     zoomStyle: GraphsView.ZoomStyle.Center
 
     // Qt's automatic tick step has a 0.0001 floor and does not follow zoom.
-    function tickStep(span, divisions) {
-        const raw = span / divisions
-        const magnitude = Math.pow(10, Math.floor(Math.log10(raw)))
+    function tickStep(minimum, maximum, zoom, divisions) {
+        // Divide before subtracting so opposite finite extremes do not overflow.
+        const raw = (maximum / divisions - minimum / divisions) / zoom
+        const resolution = Math.max(Number.MIN_VALUE,
+                                    Math.max(Math.abs(minimum), Math.abs(maximum)) * Number.EPSILON * 4)
+        if (!(raw > 0)) return Math.max(1, resolution)
+        if (!isFinite(raw)) return Number.MAX_VALUE / divisions
+        const magnitude = Math.max(Number.MIN_VALUE, Math.pow(10, Math.floor(Math.log10(raw))))
         const scaled = raw / magnitude
-        return (scaled < 1.5 ? 1 : scaled < 3 ? 2 : scaled < 7 ? 5 : 10) * magnitude
+        const step = (scaled < 1.5 ? 1 : scaled < 3 ? 2 : scaled < 7 ? 5 : 10) * magnitude
+        return Math.max(resolution, Math.min(Number.MAX_VALUE, step))
     }
 
     Binding {
         target: graph.xValues
         property: "tickInterval"
-        value: graph.tickStep((graph.xValues.max - graph.xValues.min) / graph.xValues.zoom,
+        value: graph.tickStep(graph.xValues.min, graph.xValues.max, graph.xValues.zoom,
                               Math.max(2, Math.floor((graph.width - 100) / 85)))
     }
     Binding {
         target: graph.yValues
         property: "tickInterval"
         value: Math.max(graph.yValues.labelDecimals === 0 ? 1 : 0,
-                        graph.tickStep((graph.yValues.max - graph.yValues.min) / graph.yValues.zoom,
+                        graph.tickStep(graph.yValues.min, graph.yValues.max, graph.yValues.zoom,
                                        Math.max(2, Math.floor((graph.height - 90) / 55))))
+    }
+    Binding {
+        target: graph.xValues
+        property: "tickAnchor"
+        value: graph.xValues.visualMin
+    }
+    Binding {
+        target: graph.yValues
+        property: "tickAnchor"
+        value: graph.yValues.visualMin
     }
 
     property int dataRevision: 0

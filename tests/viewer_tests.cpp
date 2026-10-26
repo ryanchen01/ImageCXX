@@ -1155,3 +1155,32 @@ TEST(Viewer, GpuHonorsDicomMonochrome1AndPreservesManualChoice)
     EXPECT_DOUBLE_EQ(image.sample(3, 0), 4095);
     EXPECT_TRUE(error.isEmpty()) << error.toStdString();
 }
+
+TEST(Viewer, GpuNormalizesExtremeAndTinyFiniteFloat64Ranges)
+{
+    if (QApplication::platformName() == "offscreen" || QApplication::platformName() == "minimal")
+        GTEST_SKIP() << "Qt RHI requires a graphics-capable platform plugin";
+    ImageViewer viewer;
+    viewer.resize(240, 240);
+    viewer.show();
+    bool ready = false;
+    QString error;
+    QObject::connect(&viewer, &ImageViewer::sliceReady, [&] { ready = true; });
+    QObject::connect(&viewer, &ImageViewer::loadFailed, [&](const QString &message) { error = message; });
+    for (const auto [minimum, maximum] : {std::pair{-1e308, 1e308}, std::pair{0.0, 1e-310}}) {
+        SCOPED_TRACE(::testing::Message() << minimum << " to " << maximum);
+        auto image = Image::allocate(PixelType::Float64, {4, 4});
+        for (std::size_t y = 0; y < 4; ++y) for (std::size_t x = 0; x < 4; ++x)
+            image.setValue(std::array<std::size_t, 2>{x, y}, x < 2 ? minimum : maximum);
+        ready = false;
+        viewer.setImage(image);
+        ASSERT_TRUE(waitFor([&] { return ready || !error.isEmpty(); }));
+        ASSERT_TRUE(error.isEmpty()) << error.toStdString();
+        ASSERT_TRUE(waitFor([&] { return displayColor(viewer, {3.5, .5}).red() > 250; }));
+        EXPECT_LT(displayColor(viewer, {.5, .5}).red(), 5);
+        EXPECT_DOUBLE_EQ(viewer.image().sample(0, 0), minimum);
+        EXPECT_DOUBLE_EQ(viewer.image().sample(3, 0), maximum);
+        viewer.setWindow(minimum, maximum);
+        EXPECT_GT(displayColor(viewer, {3.5, .5}).red(), 250);
+    }
+}

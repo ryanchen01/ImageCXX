@@ -1,5 +1,7 @@
 #include "mainwindow.h"
 #include "io/image_io.h"
+#include "core/memory.h"
+#include <QLineSeries>
 #include "ui/theme.h"
 #include <dcmtk/dcmdata/dctk.h>
 #include <gtest/gtest.h>
@@ -662,6 +664,115 @@ TEST(Desktop, FloatInvertUsesRawLimitsAndKeepsCalibration)
         EXPECT_DOUBLE_EQ(doc->image.metadata().intensityScale, 2);
         EXPECT_DOUBLE_EQ(doc->image.metadata().intensityOffset, 100);
     }
+}
+
+TEST(Desktop, SmoothKeepsLargeFiniteSamplesAndOtherPlanesAndSupportsUndo)
+{
+    for (const double value : {1e308, std::numeric_limits<double>::max(), -std::numeric_limits<double>::max()}) {
+        MainWindow window;
+        auto image = Image::allocate(PixelType::Float64, {3, 3, 2});
+        for (std::size_t y = 0; y < 3; ++y) for (std::size_t x = 0; x < 3; ++x) {
+            image.setValue(std::array<std::size_t, 3>{x, y, 0}, value);
+            image.setValue(std::array<std::size_t, 3>{x, y, 1}, 17);
+        }
+        auto *doc = window.addDocument(image);
+        window.commands().execute("edit.smooth");
+        ASSERT_TRUE(finishJobs(window));
+        for (std::size_t y = 0; y < 3; ++y) for (std::size_t x = 0; x < 3; ++x) {
+            EXPECT_DOUBLE_EQ(doc->image.sample(x, y, 0), value);
+            EXPECT_DOUBLE_EQ(doc->image.sample(x, y, 1), 17);
+        }
+        EXPECT_TRUE(doc->history.canUndo());
+        window.commands().execute("edit.undo");
+        EXPECT_DOUBLE_EQ(doc->image.sample(1, 1), value);
+    }
+}
+
+TEST(Desktop, LineProfilesSamplePixelCentersAndKeepCalibratedDistances)
+{
+    MainWindow window;
+    auto image = Image::allocate(PixelType::UInt16, {4, 2});
+    image.metadata().axes[0].spacing = image.metadata().axes[1].spacing = .25;
+    image.metadata().intensityScale = 2;
+    image.metadata().intensityOffset = 100;
+    for (std::size_t y = 0; y < 2; ++y) for (std::size_t x = 0; x < 4; ++x)
+        image.setValue(std::array<std::size_t, 2>{x, y}, 10 * x);
+    auto *doc = window.addDocument(image);
+    for (bool reverse : {false, true}) {
+        Roi line; line.type = RoiType::Line;
+        line.points = reverse ? std::vector<QPointF>{{3.5, .5}, {.5, .5}} : std::vector<QPointF>{{.5, .5}, {3.5, .5}};
+        doc->setSelection(line);
+        window.commands().execute("analyze.profile");
+        ASSERT_TRUE(finishJobs(window));
+        auto *panel = window.panel("profile");
+        ASSERT_NE(panel, nullptr);
+        auto *series = panel->findChild<QLineSeries *>();
+        ASSERT_NE(series, nullptr);
+        const auto points = series->points();
+        ASSERT_EQ(points.size(), 4);
+        for (qsizetype i = 0; i < points.size(); ++i) {
+            EXPECT_DOUBLE_EQ(points[i].x(), double(i) * .25);
+            EXPECT_DOUBLE_EQ(points[i].y(), 100 + 20 * (reverse ? 3 - i : i));
+        }
+    }
+}
+
+TEST(Desktop, UnrepresentableLineProfileShowsAnErrorAndFinishesItsJob)
+{
+    MainWindow window;
+    auto image = Image::allocate(PixelType::Float64, {2, 2});
+    for (std::size_t y = 0; y < 2; ++y) {
+        image.setValue(std::array<std::size_t, 2>{0, y}, -1e308);
+        image.setValue(std::array<std::size_t, 2>{1, y}, 1e308);
+    }
+    auto *doc = window.addDocument(image);
+    Roi line; line.type = RoiType::Line; line.points = {{.5, .5}, {1.5, .5}};
+    doc->setSelection(line);
+    QString error;
+    QTimer dismiss;
+    QObject::connect(&dismiss, &QTimer::timeout, [&] {
+        if (auto *dialog = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+            error = dialog->text(); dialog->accept();
+        }
+    });
+    dismiss.start(1);
+    window.commands().execute("analyze.profile");
+    ASSERT_TRUE(finishJobs(window));
+    EXPECT_TRUE(error.contains("too wide")) << error.toStdString();
+    ASSERT_NE(window.panel("profile"), nullptr);
+    EXPECT_FALSE(window.panel("profile")->isVisible());
+}
+
+TEST(Desktop, NewImagesAllocateInBackgroundAndHonorCancellation)
+{
+    for (bool cancel : {false, true}) {
+        MainWindow window;
+        window.commands().execute("file.new", {{"width", 16}, {"height", 8}, {"depth", 2}});
+        EXPECT_TRUE(window.documents().isEmpty());
+        EXPECT_TRUE(window.jobs().busy());
+        if (cancel) window.jobs().cancelAll();
+        ASSERT_TRUE(finishJobs(window));
+        if (cancel) EXPECT_TRUE(window.documents().isEmpty());
+        else {
+            ASSERT_EQ(window.documents().size(), 1);
+            const auto *doc = window.activeDocument();
+            ASSERT_NE(doc, nullptr);
+            EXPECT_EQ(doc->image.shape(), (std::vector<std::size_t>{16, 8, 2}));
+            EXPECT_TRUE(doc->modified);
+            for (std::size_t i = 0; i < doc->image.byteCount(); ++i) EXPECT_EQ(doc->image.data()[i], std::byte{0});
+        }
+    }
+}
+
+TEST(Desktop, NewImagesRejectUnaffordableDimensionsBeforeAllocating)
+{
+    constexpr std::uint64_t required = 16384ull * 16384 * 10000;
+    const auto available = detail::availableMemoryBytes();
+    if (available && *available >= required) GTEST_SKIP() << "Requested image fits this machine's memory";
+    MainWindow window;
+    EXPECT_THROW(window.commands().execute("file.new", {{"width", 16384}, {"height", 16384}, {"depth", 10000}}), std::exception);
+    EXPECT_FALSE(window.jobs().busy());
+    EXPECT_TRUE(window.documents().isEmpty());
 }
 
 TEST(Desktop, BackgroundPasteCapturesItsPlaneAndClipsWithoutChangingOtherPixels)

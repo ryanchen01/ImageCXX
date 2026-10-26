@@ -32,6 +32,7 @@ QVariantMap CommandRegistry::validate(const QString &id, const QVariantMap &para
             if (!ok || !std::isfinite(number) || number < parameter.minimum || number > parameter.maximum
                 || (parameter.kind == ParameterKind::Integer && std::floor(number) != number))
                 throw std::invalid_argument((parameter.label + " is outside its supported range").toStdString());
+            value = number;
         } else if (parameter.kind == ParameterKind::Choice && !parameter.choices.contains(value.toString())) {
             throw std::invalid_argument((parameter.label + " has an unsupported choice").toStdString());
         } else if (parameter.kind == ParameterKind::Boolean && value.metaType().id() != QMetaType::Bool) {

@@ -11,6 +11,7 @@
 #include <QWheelEvent>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 
 using namespace imagecxx;
 
@@ -68,6 +69,61 @@ TEST(Plots, ReplacingDataResetsNavigationAndKeepsOnlyFiniteSamples)
     plot.setData({{2, 5}}, "Distance", "Intensity");
     EXPECT_LT(x->min(), x->max());
     EXPECT_LT(y->min(), y->max());
+}
+
+TEST(Plots, LargeConstantDataKeepsFiniteRangesAndPositiveTickIntervals)
+{
+    PlotWidget plot;
+    ASSERT_TRUE(plot.ready());
+    auto *quick = plot.findChild<QQuickWidget *>();
+    ASSERT_NE(quick, nullptr);
+    auto *graph = quick->rootObject();
+    auto *x = qobject_cast<QValueAxis *>(graph->property("axisX").value<QObject *>());
+    auto *y = qobject_cast<QValueAxis *>(graph->property("axisY").value<QObject *>());
+    ASSERT_NE(x, nullptr);
+    ASSERT_NE(y, nullptr);
+    for (const double value : {1e20, -1e20, 1e308, -1e308,
+                              std::numeric_limits<double>::max(), -std::numeric_limits<double>::max()}) {
+        SCOPED_TRACE(value);
+        plot.setData({{value, value}}, "Distance", "Intensity");
+        for (auto *axis : {x, y}) {
+            EXPECT_TRUE(std::isfinite(axis->min()));
+            EXPECT_TRUE(std::isfinite(axis->max()));
+            EXPECT_LT(axis->min(), axis->max());
+            EXPECT_LE(axis->min(), value);
+            EXPECT_GE(axis->max(), value);
+            EXPECT_TRUE(std::isfinite(axis->tickInterval()));
+            EXPECT_GT(axis->tickInterval(), 0);
+            if (std::abs(value) == 1e20) {
+                // A distant pan after zooming must not make Qt walk billions
+                // of ticks from the original range's anchor.
+                axis->setZoom(1e6);
+                axis->setPan(value);
+                EXPECT_TRUE(std::isfinite(axis->visualMin()));
+                EXPECT_TRUE(std::isfinite(axis->visualMax()));
+                EXPECT_LT(axis->visualMin(), axis->visualMax());
+            }
+        }
+    }
+}
+
+TEST(Plots, UnrepresentableRangesFailWithoutReplacingThePreviousPlot)
+{
+    PlotWidget plot;
+    plot.setData({{0, 1}, {1, 2}}, "Distance", "Intensity");
+    auto *series = plot.findChild<QLineSeries *>();
+    ASSERT_NE(series, nullptr);
+    const auto original = series->points();
+    const auto axes = plot.findChildren<QValueAxis *>();
+    constexpr double limit = std::numeric_limits<double>::max();
+    for (const auto &points : {std::vector<QPointF>{{-limit, 1}, {limit, 2}},
+                               std::vector<QPointF>{{0, -limit}, {1, limit}}}) {
+        EXPECT_THROW(plot.setData(points, "Changed X", "Changed Y"), std::length_error);
+        EXPECT_EQ(series->points(), original);
+        for (auto *axis : axes) EXPECT_LT(axis->max(), 3);
+    }
+    // Optional padding must not reject a data range that still fits.
+    EXPECT_NO_THROW(plot.setData({{0, -limit / 2}, {1, limit / 2}}, "Distance", "Intensity"));
 }
 
 TEST(Plots, NativeMouseZoomPanHoverAndReset)

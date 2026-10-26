@@ -188,6 +188,133 @@ TEST(ImageIo, TiffChecksEveryPageLayoutAndReadsPartialEdgeTiles)
         }
 }
 
+TEST(ImageIo, TiffConvertsAssociatedAlphaAndChecksEveryPagesAlphaEncoding)
+{
+    QTemporaryDir directory;
+    const auto path = directory.filePath("alpha.tif");
+    const auto write = [&](bool tiled, std::array<uint16_t, 2> alpha) {
+        std::unique_ptr<TIFF, decltype(&TIFFClose)> tiff(TIFFOpen(qPrintable(path), "w"), TIFFClose);
+        ASSERT_NE(tiff, nullptr);
+        for (int page = 0; page < 2; ++page) {
+            TIFFSetField(tiff.get(), TIFFTAG_IMAGEWIDTH, 16);
+            TIFFSetField(tiff.get(), TIFFTAG_IMAGELENGTH, 16);
+            TIFFSetField(tiff.get(), TIFFTAG_SAMPLESPERPIXEL, 4);
+            TIFFSetField(tiff.get(), TIFFTAG_BITSPERSAMPLE, 8);
+            TIFFSetField(tiff.get(), TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_RGB);
+            TIFFSetField(tiff.get(), TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
+            TIFFSetField(tiff.get(), TIFFTAG_EXTRASAMPLES, 1, &alpha[page]);
+            std::vector<std::uint8_t> pixels(16 * 16 * 4);
+            for (std::size_t i = 0; i < pixels.size(); i += 4) {
+                pixels[i] = 64; pixels[i + 1] = 32; pixels[i + 2] = 0;
+                pixels[i + 3] = i == 0 ? 0 : 128;
+            }
+            if (tiled) {
+                TIFFSetField(tiff.get(), TIFFTAG_TILEWIDTH, 16);
+                TIFFSetField(tiff.get(), TIFFTAG_TILELENGTH, 16);
+                ASSERT_GE(TIFFWriteTile(tiff.get(), pixels.data(), 0, 0, 0, 0), 0);
+            } else {
+                for (uint32_t y = 0; y < 16; ++y)
+                    ASSERT_GE(TIFFWriteScanline(tiff.get(), pixels.data() + y * 16 * 4, y), 0);
+            }
+            ASSERT_TRUE(TIFFWriteDirectory(tiff.get()));
+        }
+    };
+    for (bool tiled : {false, true}) {
+        for (uint16_t alpha : {EXTRASAMPLE_ASSOCALPHA, EXTRASAMPLE_UNASSALPHA}) {
+            write(tiled, {alpha, alpha});
+            const auto image = readImage(path);
+            ASSERT_EQ(image.pixelType(), PixelType::RGBA8);
+            for (std::size_t z = 0; z < 2; ++z) {
+                EXPECT_DOUBLE_EQ(image.sample(1, 0, z, 0, 0, 0), alpha == EXTRASAMPLE_ASSOCALPHA ? 128 : 64);
+                EXPECT_DOUBLE_EQ(image.sample(1, 0, z, 0, 0, 1), alpha == EXTRASAMPLE_ASSOCALPHA ? 64 : 32);
+                EXPECT_DOUBLE_EQ(image.sample(1, 0, z, 0, 0, 3), 128);
+                EXPECT_DOUBLE_EQ(image.sample(0, 0, z, 0, 0, 0), alpha == EXTRASAMPLE_ASSOCALPHA ? 0 : 64);
+                EXPECT_DOUBLE_EQ(image.sample(0, 0, z, 0, 0, 3), 0);
+            }
+            const auto saved = directory.filePath("straight.tif");
+            writeImage(image, saved);
+            expectPixels(readImage(saved), image);
+        }
+        write(tiled, {EXTRASAMPLE_UNASSALPHA, EXTRASAMPLE_ASSOCALPHA});
+        EXPECT_THROW(readImage(path), std::runtime_error);
+        write(tiled, {EXTRASAMPLE_UNASSALPHA, EXTRASAMPLE_UNSPECIFIED});
+        EXPECT_THROW(readImage(path), std::runtime_error);
+        write(tiled, {EXTRASAMPLE_UNSPECIFIED, EXTRASAMPLE_UNSPECIFIED});
+        EXPECT_THROW(readImage(path), std::runtime_error);
+    }
+}
+
+TEST(ImageIo, NativeNrrdPreservesSpaceUnitsAndNormalizesMixedWorldUnits)
+{
+    QTemporaryDir directory;
+    const auto path = directory.filePath("units.nrrd");
+    for (const auto &units : {QByteArray("\"um\" \"um\" \"um\""), QByteArray("\"cm\" \"mm\" \"um\"")}) {
+        QFile file(path);
+        ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+        const QByteArray header = "NRRD0005\ntype: ushort\ndimension: 3\nspace: left-posterior-superior\n"
+            "sizes: 2 2 2\nspace directions: (0,0.5,0) (-0.5,0,0) (0,0,1)\nspace units: " + units +
+            "\nspace origin: (10,20,30)\nendian: little\nencoding: raw\n\n";
+        ASSERT_EQ(file.write(header), header.size());
+        ASSERT_EQ(file.write(QByteArray(16, '\0')), 16);
+        file.close();
+        const auto image = readImage(path);
+        const auto &axes = image.metadata().axes;
+        if (units.startsWith("\"um\"")) {
+            EXPECT_EQ(axes[0].unit, "um");
+            EXPECT_EQ(axes[1].unit, "um");
+            EXPECT_EQ(axes[2].unit, "um");
+            EXPECT_DOUBLE_EQ(axes[0].spacing, .5);
+            EXPECT_DOUBLE_EQ(axes[1].spacing, .5);
+            EXPECT_DOUBLE_EQ(axes[2].spacing, 1);
+            EXPECT_DOUBLE_EQ(axes[0].origin, 10);
+            EXPECT_DOUBLE_EQ(axes[1].origin, 20);
+            EXPECT_DOUBLE_EQ(axes[2].origin, 30);
+        } else {
+            for (const auto &axis : axes) EXPECT_EQ(axis.unit, "mm");
+            EXPECT_DOUBLE_EQ(axes[0].spacing, .5); // X voxels move along the millimeter world axis.
+            EXPECT_DOUBLE_EQ(axes[1].spacing, 5);  // Y voxels move along the centimeter world axis.
+            EXPECT_DOUBLE_EQ(axes[2].spacing, .001);
+            EXPECT_DOUBLE_EQ(axes[0].origin, 100);
+            EXPECT_DOUBLE_EQ(axes[1].origin, 20);
+            EXPECT_DOUBLE_EQ(axes[2].origin, .03);
+        }
+        EXPECT_EQ(image.metadata().direction, (std::vector<double>{0, -1, 0, 1, 0, 0, 0, 0, 1}));
+        const auto saved = directory.filePath("roundtrip.nrrd");
+        writeImage(image, saved);
+        const auto restored = readImage(saved);
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            EXPECT_EQ(restored.metadata().axes[axis].unit, axes[axis].unit);
+            EXPECT_DOUBLE_EQ(restored.metadata().axes[axis].spacing, axes[axis].spacing);
+            EXPECT_DOUBLE_EQ(restored.metadata().axes[axis].origin, axes[axis].origin);
+        }
+    }
+}
+
+TEST(ImageIo, NativeNrrdReadsSpaceTimeUnitsAndDistinguishesCustomKeys)
+{
+    QTemporaryDir directory;
+    for (bool customKey : {false, true}) {
+        const auto path = directory.filePath("time.nrrd");
+        QFile file(path);
+        ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+        QByteArray header = "NRRD0005\ntype: ushort\ndimension: 4\nspace: left-posterior-superior-time\n"
+            "sizes: 2 2 2 2\nspace directions: (0.5,0,0,0) (0,0.5,0,0) (0,0,1,0) (0,0,0,2.5)\n"
+            "space origin: (10,20,30,40)\nendian: little\nencoding: raw\n";
+        header += customKey ? "space units:=custom attribute\n\n" : "space units: \"um\" \"um\" \"um\" \"ms\"\n\n";
+        ASSERT_EQ(file.write(header), header.size());
+        ASSERT_EQ(file.write(QByteArray(32, '\0')), 32);
+        file.close();
+        const auto image = readImage(path);
+        ASSERT_EQ(image.shape(), (std::vector<std::size_t>{2, 2, 2, 1, 2}));
+        const auto &axes = image.metadata().axes;
+        for (std::size_t axis = 0; axis < 3; ++axis) EXPECT_EQ(axes[axis].unit, customKey ? "mm" : "um");
+        EXPECT_EQ(axes[4].unit, customKey ? "s" : "ms");
+        EXPECT_DOUBLE_EQ(axes[0].spacing, .5);
+        EXPECT_DOUBLE_EQ(axes[4].spacing, 2.5);
+        EXPECT_DOUBLE_EQ(axes[4].origin, 40);
+    }
+}
+
 TEST(ImageIo, RawRoundTripMapsAndPreservesSidecarMetadata)
 {
     QTemporaryDir directory;

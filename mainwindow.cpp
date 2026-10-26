@@ -962,10 +962,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                             if (operation == "invert") value = minimum + maximum - input.sample(x, y, z, c, t, component);
                             if (operation == "smooth") {
                                 value = 0;
-                                for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx)
-                                    value += input.sample(std::clamp<qint64>(qint64(x) + dx, 0, input.width() - 1),
+                                int count = 0;
+                                for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
+                                    const double sample = input.sample(std::clamp<qint64>(qint64(x) + dx, 0, input.width() - 1),
                                         std::clamp<qint64>(qint64(y) + dy, 0, input.height() - 1), z, c, t, component);
-                                value /= 9;
+                                    ++count;
+                                    value = std::isfinite(value) && std::isfinite(sample)
+                                        ? std::lerp(value, sample, 1.0 / count) : value + sample;
+                                }
                             }
                             output->setValue(std::span(index).first(input.shape().size()), value, component);
                         }
@@ -984,10 +988,26 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         {{"width", tr("Width"), ParameterKind::Integer, 512, 1, 16384, {}},
          {"height", tr("Height"), ParameterKind::Integer, 512, 1, 16384, {}},
          {"depth", tr("Slices"), ParameterKind::Integer, 1, 1, 10000, {}}}, [this](const QVariantMap &p) {
-        ImageMetadata metadata; metadata.name = tr("Untitled");
-        auto *doc = addDocument(Image::allocate(PixelType::UInt8,
-            {p.value("width").toUInt(), p.value("height").toUInt(), p.value("depth").toUInt()}, metadata));
-        doc->modified = true; updatePanels();
+        const std::vector<std::size_t> shape{p.value("width").toUInt(), p.value("height").toUInt(), p.value("depth").toUInt()};
+        std::size_t bytes = 1;
+        for (const auto length : shape) {
+            if (length > std::numeric_limits<std::size_t>::max() / bytes)
+                throw std::length_error("New image exceeds the addressable size");
+            bytes *= length;
+        }
+        detail::checkMemoryBudget(bytes, detail::availableMemoryBytes());
+        auto output = std::make_shared<Image>();
+        jobs_.submit(tr("Creating image"), [shape, bytes, output](auto stop, auto progress) {
+            if (stop.stop_requested()) throw std::runtime_error("Image creation cancelled");
+            detail::checkMemoryBudget(bytes, detail::availableMemoryBytes());
+            ImageMetadata metadata; metadata.name = tr("Untitled");
+            *output = Image::allocate(PixelType::UInt8, shape, std::move(metadata));
+            if (stop.stop_requested()) throw std::runtime_error("Image creation cancelled");
+            progress(1);
+        }, [this, output](auto error) {
+            if (showJobError(error)) return;
+            addDocument(*output)->modified = true; updatePanels();
+        });
     }});
     for (const bool crop : {false, true}) {
         commands_.add({crop ? "image.crop" : "image.duplicate", crop ? tr("Crop") : tr("Duplicate"), "Edit",
@@ -1923,7 +1943,7 @@ void MainWindow::showPlot(bool profile)
     auto output = std::make_shared<PlotData>();
     jobs_.submit(profile ? tr("Line profile") : tr("Histogram"), [slice, roi, profile, output](auto stop, auto) {
         if (profile) {
-            auto start = roi->points.front(), end = roi->points.back();
+            auto start = roi->points.front() - QPointF(.5, .5), end = roi->points.back() - QPointF(.5, .5);
             for (auto *point : {&start, &end}) { point->setX(std::clamp(point->x(), 0.0, double(slice.width() - 1))); point->setY(std::clamp(point->y(), 0.0, double(slice.height() - 1))); }
             const auto data = lineProfile(slice, start, end, 0, true, stop);
             for (std::size_t i = 0; i < data.distance.size(); ++i) output->points.emplace_back(data.distance[i], data.intensity[i]);
@@ -1937,7 +1957,8 @@ void MainWindow::showPlot(bool profile)
         if (showJobError(error)) return;
         auto *window = plotWindow(profile);
         auto *plot = profile ? profilePlot_ : histogramPlot_;
-        plot->setData(output->points, output->xTitle, output->yTitle);
+        try { plot->setData(output->points, output->xTitle, output->yTitle); }
+        catch (...) { showJobError(std::current_exception()); return; }
         window->showNormal(); window->raise(); window->activateWindow();
     });
 }

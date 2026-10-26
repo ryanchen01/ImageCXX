@@ -260,8 +260,13 @@ protected:
         matrix.translate(float(imageRect.x()), float(imageRect.y()));
         matrix.scale(float(imageRect.width()), float(imageRect.height()));
         std::copy_n(matrix.constData(), 16, parameters.begin());
-        parameters[16] = float((minimum - frame->offset) / frame->scale);
-        parameters[17] = float(frame->scale / std::max(maximum - minimum, 1e-300));
+        const double relativeMinimum = minimum - frame->offset;
+        parameters[16] = float(std::isfinite(relativeMinimum) ? relativeMinimum / frame->scale
+            : minimum / frame->scale - frame->offset / frame->scale);
+        const double range = maximum - minimum;
+        parameters[17] = float(std::isfinite(range)
+            ? frame->scale / std::max(range, std::numeric_limits<double>::denorm_min())
+            : (frame->scale / 2) / (maximum / 2 - minimum / 2));
         parameters[18] = float(1.0 / gamma);
         parameters[19] = inverted ? 1.0f : 0.0f;
         parameters[20] = float(frame->mode);

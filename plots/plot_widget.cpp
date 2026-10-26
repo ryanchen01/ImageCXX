@@ -5,8 +5,11 @@
 #include <QValueAxis>
 #include <QVBoxLayout>
 #include <QLabel>
+#include <QSignalBlocker>
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <stdexcept>
 
 namespace imagecxx {
 PlotWidget::PlotWidget(QWidget *parent) : QWidget(parent), quick_(new QQuickWidget(this)),
@@ -53,7 +56,6 @@ void PlotWidget::setData(const std::vector<QPointF> &points, const QString &xTit
 {
     QList<QPointF> finite;
     for (const auto &point : points) if (std::isfinite(point.x()) && std::isfinite(point.y())) finite.append(point);
-    series_->replace(finite);
     double xMin = 0, xMax = 1, yMin = 0, yMax = 1;
     if (!finite.empty()) {
         xMin = xMax = finite.front().x();
@@ -63,15 +65,60 @@ void PlotWidget::setData(const std::vector<QPointF> &points, const QString &xTit
             yMin = std::min(yMin, point.y()); yMax = std::max(yMax, point.y());
         }
     }
-    if (xMax <= xMin) xMax = xMin + 1;
-    if (yMax <= yMin) yMax = yMin + 1;
-    const double padding = (yMax - yMin) * .05;
-    axisX_->setRange(xMin, xMax);
-    axisY_->setRange(yMin >= 0 ? std::max(0.0, yMin - padding) : yMin - padding, yMax + padding);
-    axisX_->setZoom(1);
-    axisY_->setZoom(1);
-    axisX_->setPan(0);
-    axisY_->setPan(0);
+    const auto expandRange = [](double &minimum, double &maximum) {
+        if (maximum > minimum) return;
+        const double expansion = std::max(1.0, std::abs(minimum) * 1e-6);
+        maximum = minimum + expansion;
+        if (!std::isfinite(maximum)) {
+            maximum = minimum;
+            minimum -= expansion;
+        }
+    };
+    expandRange(xMin, xMax);
+    expandRange(yMin, yMax);
+    const double padding = yMax * .05 - yMin * .05;
+    constexpr double limit = std::numeric_limits<double>::max();
+    double yLower = yMin >= 0 ? std::max(0.0, yMin - padding) : std::max(-limit, yMin - padding);
+    double yUpper = std::min(limit, yMax + padding);
+    if (!std::isfinite(yUpper - yLower)) { yLower = yMin; yUpper = yMax; }
+    if (!std::isfinite(xMax - xMin) || !std::isfinite(yUpper - yLower))
+        throw std::length_error("The values span a range too wide to plot.");
+    const auto setRange = [](QValueAxis *axis, double minimum, double maximum) {
+        // Qt reconstructs the limits through their center. At a double limit,
+        // rounding that reconstruction can overflow even though both ends fit.
+        const double halfSpan = (maximum - minimum) / 2;
+        const double center = minimum + halfSpan;
+        if (std::isfinite(halfSpan)) {
+            if (!std::isfinite(center - halfSpan))
+                maximum = std::nextafter(maximum, std::numeric_limits<double>::infinity());
+            if (!std::isfinite(center + halfSpan))
+                minimum = std::nextafter(minimum, -std::numeric_limits<double>::infinity());
+        }
+        // Qt walks from tickAnchor to the first visible tick. Publish the new
+        // range, anchor and a representable step together to bound that walk.
+        QSignalBlocker blocker(axis);
+        axis->setRange(minimum, maximum);
+        axis->setTickAnchor(minimum);
+        axis->setTickInterval(std::max({maximum / 8 - minimum / 8,
+            std::max(std::abs(minimum), std::abs(maximum)) * std::numeric_limits<double>::epsilon() * 4,
+            std::numeric_limits<double>::min()}));
+        axis->setZoom(1);
+        axis->setPan(0);
+        blocker.unblock();
+        emit axis->minChanged(minimum);
+        emit axis->maxChanged(maximum);
+        emit axis->rangeChanged(minimum, maximum);
+        emit axis->tickAnchorChanged(minimum);
+        emit axis->tickIntervalChanged(axis->tickInterval());
+        emit axis->zoomChanged(1);
+        emit axis->panChanged(0);
+        emit axis->visualMinChanged(axis->visualMin());
+        emit axis->visualMaxChanged(axis->visualMax());
+        emit axis->update();
+    };
+    series_->replace(finite);
+    setRange(axisX_, xMin, xMax);
+    setRange(axisY_, yLower, yUpper);
     axisX_->setTitleText(xTitle);
     axisY_->setTitleText(yTitle);
     axisX_->setTitleVisible(true);

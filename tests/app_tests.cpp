@@ -27,6 +27,23 @@ TEST(Commands, ValidatesDefaultsRangesChoicesAndUnknownParameters)
     EXPECT_EQ(executions, 1);
 }
 
+TEST(Commands, NumericStringsKeepTheirValidatedValueDuringExecution)
+{
+    CommandRegistry registry;
+    ProcessingOptions options;
+    registerProcessingCommands(registry, [&](const QString &id, const QVariantMap &parameters) {
+        options = processingOptions(id, parameters);
+    });
+    for (const auto *radius : {"1e1", "10.0", "10"}) {
+        registry.execute("process.median", {{"radius", radius}});
+        EXPECT_EQ(options.radius, 10u);
+    }
+    registry.execute("process.gaussian", {{"sigma", "2.5e0"}});
+    EXPECT_DOUBLE_EQ(options.sigma, 2.5);
+    EXPECT_THROW(registry.execute("process.median", {{"radius", "1.5"}}), std::invalid_argument);
+    EXPECT_THROW(registry.execute("process.median", {{"radius", "1e2"}}), std::invalid_argument);
+}
+
 TEST(Batch, ProducesTiffReportsFailuresAndNeverOverwrites)
 {
     QTemporaryDir directory;

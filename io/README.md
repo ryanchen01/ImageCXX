@@ -16,6 +16,10 @@ Opening or dropping a `.raw` or `.bin` file without an adjacent `.json` sidecar 
 
 High-bit-depth color rasters fail explicitly because the model currently supports 8-bit color components. TIFF rejects planar samples, palette pixels, unsupported orientation and inconsistent pages. OME axis metadata and ImageJ contiguous stacks without one directory per page are outside the phase 1 adapter.
 
+Four-sample TIFF images must identify the extra sample as associated or unassociated alpha. Associated alpha is converted to straight RGBA on import. All pages must use the same alpha encoding; an unspecified fourth sample is rejected. TIFF export writes unassociated alpha.
+
+Native NRRD imports retain matching spatial unit labels from the header. Mixed spatial units supported by the unit converter are normalized to millimeters, including world origins and direction vectors. ImageCXX metadata remains authoritative when present.
+
 NIfTI exports convert spatial units m/cm/mm/um/nm to millimeters and time units s/ms/us/min to seconds. Unsupported or uncalibrated units fail explicitly. Standard NIfTI slope/intercept fields use float32 precision. Reading keeps original stored samples and applies calibration through `ImageMetadata`, avoiding ITK's default integer-to-float promotion. NIfTI color samples require identity intensity calibration because the format ignores color scaling.
 
 Every supported save format retains the metadata held by `ImageMetadata`, including nested DICOM sequences, channel descriptions and arbitrary attributes. TIFF and raw sidecars use ImageCXX JSON. PNG, JPEG, MetaImage and NRRD use numbered base64 text records, avoiding text normalization and header-line limits. Readers also accept legacy unchunked ImageCXX JSON. NIfTI uses an ASCII `ImageCXX` comment extension. Raster and scientific text encodings are checked before the destination is replaced; a codec that drops metadata causes the save to fail. Non-finite numeric metadata is rejected rather than converted to JSON null.

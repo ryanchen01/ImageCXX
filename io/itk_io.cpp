@@ -138,6 +138,56 @@ Image readScientific(const QString &path, std::stop_token stop, IoProgress progr
             if (originalShape.size() < 2 || originalShape.size() > 5 || originalCount != fileCount)
                 throw std::runtime_error("Scientific image metadata does not match pixels");
             shape = std::move(originalShape);
+        } else if (dynamic_cast<itk::NrrdImageIO *>(io.GetPointer())) {
+            // ITK reads the geometry but does not expose NRRD space units.
+            QFile header(path);
+            if (!header.open(QIODevice::ReadOnly)) throw std::runtime_error("Cannot read NRRD spatial units");
+            while (!header.atEnd()) {
+                detail::checkIo(stop, {}, 0);
+                const auto line = QString::fromUtf8(header.readLine()).trimmed();
+                if (line.isEmpty()) break;
+                if (!line.startsWith("space units:") || line.startsWith("space units:=")) continue;
+                const auto text = line.mid(12);
+                static const QRegularExpression quotedUnit(QStringLiteral(R"unit("((?:\\.|[^"\\])*)")unit"));
+                auto matches = quotedUnit.globalMatch(text);
+                QStringList units;
+                qsizetype end = 0;
+                while (matches.hasNext()) {
+                    const auto match = matches.next();
+                    if (!text.mid(end, match.capturedStart() - end).trimmed().isEmpty())
+                        throw std::runtime_error("Invalid NRRD spatial units");
+                    units.append(match.captured(1).replace("\\\"", "\"").replace("\\\\", "\\"));
+                    end = match.capturedEnd();
+                }
+                if (!text.mid(end).trimmed().isEmpty() || units.size() < spatial || units.size() > dimensions)
+                    throw std::runtime_error("Invalid NRRD spatial units");
+                for (qsizetype axis = spatial; axis < units.size(); ++axis)
+                    metadata.axes[std::size_t(axis)].unit = units[axis];
+                if (std::all_of(units.begin(), units.begin() + spatial, [&](const auto &unit) { return unit == units.front(); })) {
+                    for (unsigned int axis = 0; axis < spatial; ++axis)
+                        metadata.axes[axis].unit = units[int(axis)];
+                } else {
+                    // Space units describe world-coordinate rows, not voxel axes.
+                    for (unsigned int row = 0; row < spatial; ++row) {
+                        const double factor = detail::spatialUnitToMillimeters(units[int(row)]);
+                        metadata.axes[row].origin *= factor;
+                        metadata.axes[row].unit = "mm";
+                        for (unsigned int column = 0; column < spatial; ++column)
+                            metadata.direction[row * spatial + column] *= factor;
+                    }
+                    for (unsigned int column = 0; column < spatial; ++column) {
+                        double length = 0;
+                        for (unsigned int row = 0; row < spatial; ++row)
+                            length = std::hypot(length, metadata.direction[row * spatial + column]);
+                        if (!std::isfinite(length) || length <= 0)
+                            throw std::runtime_error("Invalid NRRD spatial calibration");
+                        metadata.axes[column].spacing *= length;
+                        for (unsigned int row = 0; row < spatial; ++row)
+                            metadata.direction[row * spatial + column] /= length;
+                    }
+                }
+                break;
+            }
         }
         // NIfTI and conventional scientific 4D images place time immediately after Z.
         if (dimensions == 4 && !ownMetadata) {

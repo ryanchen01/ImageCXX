@@ -279,6 +279,15 @@ Image readImage(const QString &path, const std::optional<RawImportOptions> &raw,
         if (planar != PLANARCONFIG_CONTIG || (samples == 1
             && photometric != PHOTOMETRIC_MINISBLACK && photometric != PHOTOMETRIC_MINISWHITE))
             throw std::runtime_error("TIFF planar or photometric encoding is unsupported");
+        const auto alphaEncoding = [samples](TIFF *directory) -> uint16_t {
+            if (samples != 4) return EXTRASAMPLE_UNSPECIFIED;
+            uint16_t count = 0, *extra = nullptr;
+            if (!TIFFGetField(directory, TIFFTAG_EXTRASAMPLES, &count, &extra) || count != 1 || !extra
+                || (extra[0] != EXTRASAMPLE_ASSOCALPHA && extra[0] != EXTRASAMPLE_UNASSALPHA))
+                throw std::runtime_error("TIFF fourth sample must be explicitly identified as alpha");
+            return extra[0];
+        };
+        const auto alpha = alphaEncoding(tiff.get());
         std::size_t pages = 0;
         do { ++pages; } while (TIFFReadDirectory(tiff.get()));
         TIFFSetDirectory(tiff.get(), 0);
@@ -358,7 +367,8 @@ Image readImage(const QString &path, const std::optional<RawImportOptions> &raw,
             TIFFGetFieldDefaulted(tiff.get(), TIFFTAG_PHOTOMETRIC, &pagePhotometric);
             if (pageWidth != width || pageHeight != height || pageBits != bits || pageSamples != samples
                 || pageFormat != format || pageOrientation != ORIENTATION_TOPLEFT
-                || pagePlanar != PLANARCONFIG_CONTIG || pagePhotometric != photometric)
+                || pagePlanar != PLANARCONFIG_CONTIG || pagePhotometric != photometric
+                || alphaEncoding(tiff.get()) != alpha)
                 throw std::runtime_error("TIFF pages have inconsistent dimensions, encoding, or unsupported orientation");
             std::size_t targetPage = page;
             if (imageJ) {
@@ -394,6 +404,17 @@ Image readImage(const QString &path, const std::optional<RawImportOptions> &raw,
                     detail::checkIo(stop, {}, 0);
                     if (TIFFReadScanline(tiff.get(), destination + targetPage * pageBytes + y * rowBytes, y, 0) < 0)
                         throw std::runtime_error("TIFF image is truncated or corrupt");
+                }
+            }
+            if (alpha == EXTRASAMPLE_ASSOCALPHA) {
+                auto *pixels = reinterpret_cast<std::uint8_t *>(destination + targetPage * pageBytes);
+                for (std::size_t y = 0; y < height; ++y) {
+                    detail::checkIo(stop, {}, 0);
+                    for (std::size_t x = 0; x < width; ++x) {
+                        auto *pixel = pixels + y * rowBytes + x * 4;
+                        for (int component = 0; component < 3; ++component)
+                            pixel[component] = pixel[3] ? std::min(255, (pixel[component] * 255 + pixel[3] / 2) / pixel[3]) : 0;
+                    }
                 }
             }
         }

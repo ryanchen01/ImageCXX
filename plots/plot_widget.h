@@ -11,6 +11,7 @@ class PlotWidget : public QWidget {
     Q_OBJECT
 public:
     explicit PlotWidget(QWidget *parent = nullptr);
+    // Throws if the coordinate range exceeds what Qt Graphs can represent.
     void setData(const std::vector<QPointF> &points, const QString &xTitle, const QString &yTitle);
     bool ready() const;
 private:
