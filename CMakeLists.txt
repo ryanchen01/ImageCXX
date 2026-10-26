@@ -13,7 +13,7 @@ include(GNUInstallDirs)
 include(CTest)
 option(IMAGECXX_BUILD_BENCHMARKS "Build image-model and analysis benchmarks" OFF)
 option(IMAGECXX_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
-option(IMAGECXX_ENABLE_UPDATES "Check GitHub Releases at GUI startup" OFF)
+option(IMAGECXX_ENABLE_UPDATES "Enable automatic and manual update checks" OFF)
 
 find_package(Qt6 6.12.0 EXACT REQUIRED COMPONENTS Core Gui GuiPrivate Widgets PrintSupport ShaderTools Svg QuickWidgets Graphs)
 find_package(ITK 5.4 REQUIRED COMPONENTS ITKCommon ITKIOImageBase ITKIOMeta ITKIONIFTI ITKIONRRD

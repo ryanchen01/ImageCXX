@@ -34,18 +34,21 @@
 }
 @end
 
-void imagecxx::UpdateChecker::checkWithSparkle(MainWindow &window)
+void imagecxx::UpdateChecker::checkWithSparkle(MainWindow &window, bool manual)
 {
-    static ImageCXXUpdaterDelegate *delegate = [[ImageCXXUpdaterDelegate alloc] initWithWindow:&window];
-    static SPUStandardUpdaterController *controller = [[SPUStandardUpdaterController alloc]
-        initWithStartingUpdater:NO updaterDelegate:delegate userDriverDelegate:nil];
-    QObject::connect(qApp, &QCoreApplication::aboutToQuit, qApp, [] {
-        if (delegate.installHandler) {
-            const auto handler = delegate.installHandler;
-            delegate.installHandler = nil;
-            handler();
-        }
-    });
-    [controller startUpdater];
-    if (controller.updater.automaticallyChecksForUpdates) [controller.updater checkForUpdatesInBackground];
+    static SPUStandardUpdaterController *controller = [&window] {
+        ImageCXXUpdaterDelegate *delegate = [[ImageCXXUpdaterDelegate alloc] initWithWindow:&window];
+        SPUStandardUpdaterController *updater = [[SPUStandardUpdaterController alloc]
+            initWithStartingUpdater:NO updaterDelegate:delegate userDriverDelegate:nil];
+        QObject::connect(qApp, &QCoreApplication::aboutToQuit, qApp, [delegate] {
+            if (delegate.installHandler) {
+                const auto handler = delegate.installHandler;
+                delegate.installHandler = nil;
+                handler();
+            }
+        });
+        [updater startUpdater];
+        return updater;
+    }();
+    if (manual) [controller checkForUpdates:nil];
 }

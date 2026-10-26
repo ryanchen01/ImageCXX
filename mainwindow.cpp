@@ -1215,6 +1215,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     windowMenu_ = menuBar()->addMenu(tr("Window"));
     windowMenu_->setObjectName("windowMenu");
     connect(windowMenu_, &QMenu::aboutToShow, this, &MainWindow::updateWindowMenu);
+    auto *helpMenu = menuBar()->addMenu(tr("Help"));
+    helpMenu->setObjectName("helpMenu");
+    auto *checkUpdates = helpMenu->addAction(tr("Check for Updates..."));
+    checkUpdates->setObjectName("help.checkUpdates");
+    checkUpdates->setMenuRole(QAction::NoRole);
+    checkUpdates->setEnabled(false);
     crosshair_ = menus["View"]->addAction(tr("Crosshair")); crosshair_->setCheckable(true);
     connect(crosshair_, &QAction::toggled, this, [this](bool value) { if (auto *doc = activeDocument()) doc->viewer->setCrosshairVisible(value); });
     scaleBar_ = menus["View"]->addAction(tr("Scale bar")); scaleBar_->setCheckable(true); scaleBar_->setChecked(false);
