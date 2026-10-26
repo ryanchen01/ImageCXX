@@ -178,8 +178,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             border-radius: 4px; padding: 7px 12px; }
         QLabel, QCheckBox { color: #1A1C1F; }
         QToolButton:disabled, QPushButton:disabled { color: #8B8883; }
-        QProgressBar { border: 0; background: #E8E2D9; border-radius: 3px; height: 5px; }
-        QProgressBar::chunk { background: #1A1C1F; border-radius: 3px; }
+        QStatusBar QProgressBar { border: 0; background: #E8E2D9; border-radius: 3px; height: 5px; }
+        QStatusBar QProgressBar::chunk { background: #1A1C1F; border-radius: 3px; }
     )");
     auto *displayPanel = new QDialog(this, Qt::Window);
     displayPanel->setWindowTitle(tr("Display"));
