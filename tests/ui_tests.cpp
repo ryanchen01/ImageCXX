@@ -2948,6 +2948,149 @@ TEST(Desktop, RoiRenameSurvivesAnAsynchronousPanelRefresh)
     EXPECT_EQ(document->rois.front().name, "Renamed");
 }
 
+TEST(Desktop, SelectionPropertiesApplyAreaGeometryAndAppearanceWithoutEditingPixels)
+{
+    for (const auto type : {RoiType::Rectangle, RoiType::Ellipse}) {
+        MainWindow window;
+        auto *doc = window.addDocument(Image::allocate(PixelType::UInt16, {16, 16, 3, 2, 2}));
+        doc->image.setValue(std::array<std::size_t, 5>{3, 4, 2, 1, 1}, 43210);
+        Roi roi; roi.type = type; roi.name = "Before"; roi.points = {{7, 8}, {1, 2}};
+        roi.z = 0; roi.channel = 1; roi.time = 1;
+        doc->rois.push_back(roi); doc->setSelection(roi); doc->viewer->setSlice(2, 1, 1);
+        auto *action = window.findChild<QAction *>("selection.properties"); ASSERT_NE(action, nullptr);
+        QTimer::singleShot(0, &window, [&] {
+            auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget()); ASSERT_NE(dialog, nullptr);
+            EXPECT_EQ(dialog->objectName(), "selectionPropertiesDialog");
+            auto *name = dialog->findChild<QLineEdit *>("roiName"); ASSERT_NE(name, nullptr); name->setText("Measured area");
+            auto *x = dialog->findChild<QDoubleSpinBox *>("roiX"); ASSERT_NE(x, nullptr); EXPECT_DOUBLE_EQ(x->value(), 1);
+            auto *y = dialog->findChild<QDoubleSpinBox *>("roiY"); ASSERT_NE(y, nullptr); EXPECT_DOUBLE_EQ(y->value(), 2);
+            auto *width = dialog->findChild<QDoubleSpinBox *>("roiWidth"); ASSERT_NE(width, nullptr);
+            auto *height = dialog->findChild<QDoubleSpinBox *>("roiHeight"); ASSERT_NE(height, nullptr);
+            EXPECT_DOUBLE_EQ(width->value(), 6); EXPECT_DOUBLE_EQ(height->value(), 6);
+            x->setValue(2.25); y->setValue(3.5); width->setValue(4.5); height->setValue(5.25);
+            auto *visible = dialog->findChild<QCheckBox *>("roiVisible"); ASSERT_NE(visible, nullptr); visible->setChecked(false);
+            auto *color = dialog->findChild<QPushButton *>("roiColor"); ASSERT_NE(color, nullptr);
+            QTimer::singleShot(0, dialog, [] {
+                auto *picker = qobject_cast<QColorDialog *>(QApplication::activeModalWidget()); ASSERT_NE(picker, nullptr);
+                picker->setCurrentColor(QColor(12, 34, 56, 128)); picker->accept();
+            });
+            color->click();
+            auto *buttons = dialog->findChild<QDialogButtonBox *>(); ASSERT_NE(buttons, nullptr);
+            buttons->button(QDialogButtonBox::Apply)->click();
+            EXPECT_TRUE(dialog->isVisible());
+            EXPECT_EQ(doc->rois.front().name, "Measured area");
+            EXPECT_EQ(doc->rois.front().bounds(), QRectF(2.25, 3.5, 4.5, 5.25));
+            EXPECT_EQ(doc->rois.front().color, QColor(12, 34, 56, 128).rgba());
+            EXPECT_FALSE(doc->rois.front().visible);
+            ASSERT_TRUE(doc->selection); EXPECT_EQ(doc->selection->points, doc->rois.front().points);
+            name->setText("Discard this"); width->setValue(9);
+            buttons->button(QDialogButtonBox::Cancel)->click();
+        });
+        action->trigger();
+        ASSERT_EQ(doc->rois.size(), 1u); const auto &saved = doc->rois.front();
+        EXPECT_EQ(saved.id, roi.id); EXPECT_EQ(saved.type, type);
+        EXPECT_EQ(saved.name, "Measured area"); EXPECT_EQ(saved.bounds(), QRectF(2.25, 3.5, 4.5, 5.25));
+        EXPECT_EQ(saved.z, 0u); EXPECT_EQ(saved.channel, 1u); EXPECT_EQ(saved.time, 1u);
+        EXPECT_FALSE(doc->modified); EXPECT_FALSE(doc->history.canUndo());
+        EXPECT_DOUBLE_EQ(doc->image.sample(3, 4, 2, 1, 1), 43210);
+        window.commands().execute("analyze.measure"); ASSERT_TRUE(finishJobs(window));
+        auto *results = window.panel("measurements")->findChild<QTableView *>(); ASSERT_NE(results, nullptr);
+        EXPECT_EQ(results->model()->data(results->model()->index(0, 1)).toString(), "Measured area");
+        if (type == RoiType::Rectangle) {
+            EXPECT_EQ(results->model()->data(results->model()->index(0, 2)).toULongLong(), 30u);
+            EXPECT_DOUBLE_EQ(results->model()->data(results->model()->index(0, 8)).toDouble(), 43210);
+        }
+    }
+}
+
+TEST(Desktop, SelectionPropertiesEditLineEndpointsAndRejectZeroLength)
+{
+    MainWindow window;
+    auto *doc = window.addDocument(Image::allocate(PixelType::UInt8, {16, 16}));
+    Roi roi; roi.type = RoiType::Line; roi.points = {{9, 8}, {2, 3}}; doc->setSelection(roi);
+    QTimer::singleShot(0, &window, [&] {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget()); ASSERT_NE(dialog, nullptr);
+        auto *x1 = dialog->findChild<QDoubleSpinBox *>("roiX1"); ASSERT_NE(x1, nullptr);
+        auto *y1 = dialog->findChild<QDoubleSpinBox *>("roiY1"); ASSERT_NE(y1, nullptr);
+        auto *x2 = dialog->findChild<QDoubleSpinBox *>("roiX2"); ASSERT_NE(x2, nullptr);
+        auto *y2 = dialog->findChild<QDoubleSpinBox *>("roiY2"); ASSERT_NE(y2, nullptr);
+        EXPECT_DOUBLE_EQ(x1->value(), 9); EXPECT_DOUBLE_EQ(y1->value(), 8);
+        EXPECT_DOUBLE_EQ(x2->value(), 2); EXPECT_DOUBLE_EQ(y2->value(), 3);
+        x1->setValue(2); y1->setValue(3);
+        auto *buttons = dialog->findChild<QDialogButtonBox *>(); ASSERT_NE(buttons, nullptr);
+        EXPECT_FALSE(buttons->button(QDialogButtonBox::Ok)->isEnabled());
+        EXPECT_FALSE(buttons->button(QDialogButtonBox::Apply)->isEnabled());
+        auto *error = dialog->findChild<QLabel *>("roiGeometryError"); ASSERT_NE(error, nullptr); EXPECT_TRUE(error->isVisible());
+        EXPECT_EQ(doc->selection->points, roi.points);
+        x1->setValue(12.125); y1->setValue(10.75); x2->setValue(0); y2->setValue(0);
+        EXPECT_TRUE(buttons->button(QDialogButtonBox::Ok)->isEnabled()); EXPECT_FALSE(error->isVisible());
+        buttons->button(QDialogButtonBox::Ok)->click();
+    });
+    window.commands().execute("selection.properties");
+    ASSERT_TRUE(doc->selection);
+    EXPECT_EQ(doc->selection->points, (std::vector<QPointF>{{12.125, 10.75}, {0, 0}}));
+    EXPECT_EQ(doc->selection->id, roi.id); EXPECT_EQ(doc->selection->type, RoiType::Line);
+    EXPECT_TRUE(doc->rois.empty()); EXPECT_FALSE(doc->modified);
+}
+
+TEST(Desktop, SelectionPropertiesPreserveUneditedCoordinatesAndCancelAppearance)
+{
+    for (const auto type : {RoiType::Rectangle, RoiType::Ellipse, RoiType::Line, RoiType::Polygon}) {
+        MainWindow window;
+        auto *doc = window.addDocument(Image::allocate(PixelType::UInt8, {16, 16}));
+        Roi roi; roi.type = type; roi.points = {{1.123456789, 2.987654321}, {8.765432109, 9.123456789}};
+        if (type == RoiType::Polygon) roi.points.push_back({2.123456789, 12.987654321});
+        doc->setSelection(roi);
+        QTimer::singleShot(0, &window, [&] {
+            auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget()); ASSERT_NE(dialog, nullptr);
+            auto *name = dialog->findChild<QLineEdit *>("roiName"); ASSERT_NE(name, nullptr); name->setText("Keep precise geometry");
+            if (type == RoiType::Polygon) EXPECT_TRUE(dialog->findChildren<QDoubleSpinBox *>().isEmpty());
+            auto *buttons = dialog->findChild<QDialogButtonBox *>(); ASSERT_NE(buttons, nullptr);
+            buttons->button(QDialogButtonBox::Ok)->click();
+        });
+        window.commands().execute("selection.properties");
+        ASSERT_TRUE(doc->selection); EXPECT_EQ(doc->selection->name, "Keep precise geometry");
+        EXPECT_EQ(doc->selection->points, roi.points);
+        QTimer::singleShot(0, &window, [&] {
+            auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget()); ASSERT_NE(dialog, nullptr);
+            dialog->findChild<QLineEdit *>("roiName")->setText("Discard");
+            dialog->findChild<QCheckBox *>("roiVisible")->setChecked(false);
+            auto *color = dialog->findChild<QPushButton *>("roiColor"); ASSERT_NE(color, nullptr);
+            QTimer::singleShot(0, dialog, [] {
+                auto *picker = qobject_cast<QColorDialog *>(QApplication::activeModalWidget()); ASSERT_NE(picker, nullptr);
+                picker->setCurrentColor(Qt::red); picker->reject();
+            });
+            color->click(); EXPECT_EQ(color->text(), QColor::fromRgba(roi.color).name(QColor::HexArgb));
+            dialog->reject();
+        });
+        window.commands().execute("selection.properties");
+        ASSERT_TRUE(doc->selection); EXPECT_EQ(doc->selection->name, "Keep precise geometry");
+        EXPECT_EQ(doc->selection->points, roi.points); EXPECT_EQ(doc->selection->color, roi.color);
+        EXPECT_TRUE(doc->selection->visible); EXPECT_TRUE(doc->rois.empty()); EXPECT_FALSE(doc->modified);
+    }
+}
+
+TEST(Desktop, SelectionPropertiesRequireAnActiveSelection)
+{
+    MainWindow window;
+    window.commands().execute("selection.properties");
+    auto *doc = window.addDocument(Image::allocate(PixelType::UInt8, {16, 16}));
+    QString error;
+    QTimer dismiss;
+    QObject::connect(&dismiss, &QTimer::timeout, [&] {
+        if (auto *dialog = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+            error = dialog->text(); dialog->accept();
+        }
+    });
+    dismiss.start(1);
+    window.commands().execute("selection.properties"); EXPECT_EQ(error, "Select an ROI first.");
+    Roi roi; roi.points = {{1, 1}, {4, 4}}; doc->rois.push_back(roi); doc->setSelection(roi);
+    window.commands().execute("selection.none");
+    error.clear(); window.commands().execute("selection.properties"); EXPECT_EQ(error, "Select an ROI first.");
+    EXPECT_EQ(window.findChild<QDialog *>("selectionPropertiesDialog"), nullptr);
+    EXPECT_EQ(doc->rois.front().points, roi.points);
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication::setAttribute(Qt::AA_DontUseNativeDialogs);

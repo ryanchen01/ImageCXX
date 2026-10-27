@@ -7,7 +7,7 @@ Missing or incomplete features, checked against the current source. Unchecked it
 Register new commands through the existing `CommandRegistry`, with Qt actions, menus, shortcuts and generated parameter forms as appropriate.
 
 - [x] Add a color picker.
-- [ ] Add selection properties beyond the existing ROI rename and drag/resize controls.
+- [x] Add selection properties beyond the existing ROI rename and drag/resize controls. Edit names, outline colors and visibility, rectangle/ellipse bounds and line endpoints through the command registry. Apply updates saved ROIs without changing image pixels or their saved Z/C/T positions.
 - [ ] Add the overlay-add command. Use separate project-owned ROI/annotation models and the viewer's overlay layer.
 - [x] Add reslice. Use ITK for resampling and spatial transformations, preserve geometry and numeric types, and declare the operation's scope.
 - [x] Add orthogonal views as separate synchronized windows and keep image ownership in the model.

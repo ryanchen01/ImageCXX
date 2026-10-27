@@ -36,6 +36,8 @@ Type in the bottom-right search field to find commands by name or category. Use 
 
 Draw a selection, then press Ctrl+T to retain it in the ROI manager. Select None clears the active selection without deleting saved ROIs. Pixel edits affect the current Z/C/T plane and support undo.
 
+Choose Edit > Selection properties to edit the active ROI's name, outline color and visibility. Rectangles and ellipses also have X/Y/width/height fields, and lines have endpoint coordinates. Coordinates use pixels with a zero-based origin. Apply updates the ROI and keeps the dialog open; OK applies and closes it. Cancel discards edits made since the last Apply. These changes also update a saved ROI without changing image pixels or its saved Z/C/T position. Polygon vertices remain editable on the canvas.
+
 Copy and Cut immediately retain the selected bounds, or the entire current Z/C/T plane, with their original scientific pixel type and values. They prepare a PNG in the background for pasting into other applications. The PNG uses the display intensity range captured when copying, at native pixel dimensions independent of viewer zoom. If both dimensions are below 320 pixels, it scales up proportionally until the longer axis reaches 320 pixels. Internal pastes retain the original dimensions and remain available if PNG export exceeds its memory budget. A status message reports export failures.
 
 Paste uses the typed copy while it remains on the clipboard, including across ImageCXX windows. After another application replaces the clipboard, Paste reads its image instead. It writes at the selection's top-left corner, or the image origin, and clips to the current plane. The clipboard and destination pixel types must match. With no image open, Paste creates a new image.

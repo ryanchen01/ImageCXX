@@ -1112,6 +1112,95 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     commands_.add({"selection.restore", tr("Restore selection"), "Edit", QKeySequence("Shift+E"), true, {}, [this](const QVariantMap &) {
         auto *doc = activeDocument(); if (doc && doc->previousSelection) doc->setSelection(doc->previousSelection);
     }});
+    commands_.add({"selection.properties", tr("Selection properties..."), "Edit", {}, true, {}, [this](const QVariantMap &) {
+        const QPointer<DocumentWidget> doc = activeDocument();
+        const auto roi = selectedRoi();
+        if (!doc) return;
+        if (!roi) { showError(tr("Select an ROI first.")); return; }
+
+        QDialog dialog(this);
+        dialog.setObjectName("selectionPropertiesDialog");
+        dialog.setWindowTitle(tr("Selection properties"));
+        dialog.setMinimumWidth(380);
+        auto *layout = new QFormLayout(&dialog);
+        auto *name = new QLineEdit(roi->name, &dialog); name->setObjectName("roiName");
+        layout->addRow(tr("Name"), name);
+        QColor outline = QColor::fromRgba(roi->color);
+        auto *color = new QPushButton(&dialog); color->setObjectName("roiColor");
+        const auto updateColor = [&] {
+            QPixmap swatch(20, 20); swatch.fill(outline);
+            color->setIcon(QIcon(swatch)); color->setText(outline.name(QColor::HexArgb));
+        };
+        updateColor();
+        layout->addRow(tr("Outline color"), color);
+        connect(color, &QPushButton::clicked, &dialog, [&] {
+            const auto chosen = QColorDialog::getColor(outline, &dialog, tr("ROI outline color"), QColorDialog::ShowAlphaChannel);
+            if (chosen.isValid()) { outline = chosen; updateColor(); }
+        });
+        auto *visible = new QCheckBox(&dialog); visible->setObjectName("roiVisible"); visible->setChecked(roi->visible);
+        layout->addRow(tr("Visible"), visible);
+
+        const bool line = roi->type == RoiType::Line;
+        const bool area = roi->type == RoiType::Rectangle || roi->type == RoiType::Ellipse;
+        QList<QDoubleSpinBox *> geometry;
+        bool geometryChanged = false;
+        if (line || area) {
+            const auto bounds = roi->bounds();
+            const QStringList labels = line ? QStringList{tr("X1"), tr("Y1"), tr("X2"), tr("Y2")}
+                                           : QStringList{tr("X"), tr("Y"), tr("Width"), tr("Height")};
+            const QStringList ids = line ? QStringList{"roiX1", "roiY1", "roiX2", "roiY2"}
+                                        : QStringList{"roiX", "roiY", "roiWidth", "roiHeight"};
+            const std::array<double, 4> values = line
+                ? std::array{roi->points[0].x(), roi->points[0].y(), roi->points[1].x(), roi->points[1].y()}
+                : std::array{bounds.x(), bounds.y(), bounds.width(), bounds.height()};
+            for (int i = 0; i < 4; ++i) {
+                auto *spin = new QDoubleSpinBox(&dialog); spin->setObjectName(ids[i]); spin->setDecimals(6);
+                spin->findChild<QLineEdit *>()->setTextMargins(6, 0, 0, 0);
+                spin->setRange(area && i >= 2 ? 0.5 : std::numeric_limits<double>::lowest(),
+                               std::numeric_limits<double>::max());
+                spin->setSuffix(tr(" px")); spin->setValue(values[i]);
+                layout->addRow(labels[i], spin); geometry.append(spin);
+            }
+        }
+        auto *error = new QLabel(&dialog); error->setObjectName("roiGeometryError");
+        error->setWordWrap(true); layout->addRow(error);
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Apply | QDialogButtonBox::Cancel, &dialog);
+        layout->addRow(buttons);
+        const auto editedRoi = [&] {
+            auto edited = *roi;
+            edited.name = name->text(); edited.color = outline.rgba(); edited.visible = visible->isChecked();
+            // Appearance edits must not round existing subpixel coordinates.
+            if (geometryChanged) {
+                const QPointF first(geometry[0]->value(), geometry[1]->value());
+                const QPointF second(geometry[2]->value(), geometry[3]->value());
+                edited.points = {first, line ? second : first + second};
+            }
+            return edited;
+        };
+        const auto validate = [&] {
+            const auto edited = editedRoi();
+            bool valid = true;
+            if (geometryChanged) {
+                for (const auto &point : edited.points) valid &= std::isfinite(point.x()) && std::isfinite(point.y());
+                if (line) valid &= std::hypot(edited.points[1].x() - edited.points[0].x(),
+                                             edited.points[1].y() - edited.points[0].y()) >= 0.5;
+            }
+            error->setText(valid ? QString{} : line ? tr("The line must be at least 0.5 pixels long and have finite coordinates.")
+                                                   : tr("The selection must have finite coordinates."));
+            error->setVisible(!valid);
+            buttons->button(QDialogButtonBox::Ok)->setEnabled(valid);
+            buttons->button(QDialogButtonBox::Apply)->setEnabled(valid);
+        };
+        for (auto *spin : geometry) connect(spin, &QDoubleSpinBox::valueChanged, &dialog, [&] {
+            geometryChanged = true; validate();
+        });
+        validate();
+        const auto apply = [&] { if (doc) doc->editRoi(editedRoi()); };
+        connect(buttons->button(QDialogButtonBox::Apply), &QPushButton::clicked, &dialog, apply);
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] { apply(); dialog.accept(); });
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        dialog.exec();
+    }});
     for (const auto &entry : {std::pair{"view.display", "display"}, {"view.info", "properties"},
                               {"view.properties", "properties"}, {"view.channels", "display"}}) {
         const QMap<QString, QString> labels{{"view.display", tr("Display")}, {"view.info", tr("Show info")},
