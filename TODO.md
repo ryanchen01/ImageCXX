@@ -27,7 +27,7 @@ Register new commands through the existing `CommandRegistry`, with Qt actions, m
 - [ ] Extend advanced channel/time workflows. Z/C/T browsing, animation and basic compositing already exist, but composite display currently uses at most four channels. Keep channel metadata and original pixel values in the model; apply blending in shaders.
 - [ ] Add tile-based display and partial texture updates where practical. The viewer currently uploads whole changed slices and rejects slices exceeding texture or memory limits. Reuse GPU resources and keep CPU/GPU caches bounded.
 - [ ] Add scatter plots and calibration curves using Qt Graphs 2D and C++ data models. Current plots cover histograms and line profiles.
-- [ ] Add ROI measurement plots and time-series measurement plots using the same plotting module. Keep QML/Quick details inside that module and create plot windows on demand.
+- [x] Add ROI measurement plots and time-series measurement plots using the same plotting module. Plot a fixed area ROI's mean intensity across Z or Time, with calibrated axes, background cancellation and CSV export of per-plane statistics. QML/Quick details stay inside the plotting module and plot windows are created on demand.
 
 ## Chunked storage and larger-than-RAM processing
 

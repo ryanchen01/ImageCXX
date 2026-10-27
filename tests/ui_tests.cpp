@@ -2,6 +2,7 @@
 #include "io/image_io.h"
 #include "core/memory.h"
 #include <QLineSeries>
+#include <QValueAxis>
 #include "ui/theme.h"
 #include <dcmtk/dcmdata/dctk.h>
 #include <gtest/gtest.h>
@@ -741,6 +742,154 @@ TEST(Desktop, UnrepresentableLineProfileShowsAnErrorAndFinishesItsJob)
     EXPECT_TRUE(error.contains("too wide")) << error.toStdString();
     ASSERT_NE(window.panel("profile"), nullptr);
     EXPECT_FALSE(window.panel("profile")->isVisible());
+}
+
+TEST(Desktop, RoiMeasurementPlotsPreserveCalibrationScopeAndExportSnapshotStatistics)
+{
+    for (bool overTime : {true, false}) {
+        SCOPED_TRACE(overTime);
+        MainWindow window;
+        ImageMetadata metadata;
+        metadata.name = "Sample,\"A\"";
+        metadata.axes = {{"X", .5, 0, "um"}, {"Y", .25, 0, "um"}, {"Z", 2, 10, "um"},
+                         {"C", 1, 0, ""}, {"T", .5, 7, "s"}};
+        metadata.intensityScale = 2; metadata.intensityOffset = 3; metadata.intensityUnit = "a.u.";
+        auto image = Image::allocate(PixelType::UInt16, {3, 2, 3, 2, 3}, metadata);
+        for (std::size_t t = 0; t < 3; ++t) for (std::size_t c = 0; c < 2; ++c)
+            for (std::size_t z = 0; z < 3; ++z) for (std::size_t y = 0; y < 2; ++y)
+                for (std::size_t x = 0; x < 3; ++x)
+                    image.setValue(std::array<std::size_t, 5>{x, y, z, c, t},
+                        y == 0 && x < 2 ? 100 * t + 10 * c + z + 2 * x : 10000);
+        auto *doc = window.addDocument(image);
+        doc->setPosition(0, 0, 1, 1, 1);
+        Roi roi; roi.name = "ROI,\"one\""; roi.points = {{0, 0}, {2, 1}};
+        roi.channel = 1; roi.time = 1;
+        doc->setSelection(roi);
+        EXPECT_EQ(window.findChild<QDialog *>("roiMeasurementsWindow"), nullptr);
+        // Exercise the generated parameter form used by the menu command.
+        QTimer::singleShot(0, &window, [overTime] {
+            auto *form = qobject_cast<QDialog *>(QApplication::activeModalWidget()); ASSERT_NE(form, nullptr);
+            auto *axis = form->findChild<QComboBox *>("axis"); ASSERT_NE(axis, nullptr);
+            EXPECT_EQ(axis->currentText(), "Time");
+            axis->setCurrentText(overTime ? "Time" : "Z"); form->accept();
+        });
+        window.executeCommand("analyze.roiPlot");
+        // Results must describe the requested image and ROI, even after subsequent edits.
+        doc->image.setValue(std::array<std::size_t, 5>{0, 0, 1, 1, 0}, 60000);
+        doc->setSelection({}); doc->setPosition(0, 0, 0);
+        ASSERT_TRUE(finishJobs(window));
+        auto *plot = window.findChild<QDialog *>("roiMeasurementsWindow"); ASSERT_NE(plot, nullptr);
+        auto *series = plot->findChild<QLineSeries *>(); ASSERT_NE(series, nullptr);
+        const auto points = series->points(); ASSERT_EQ(points.size(), 3);
+        const auto axes = plot->findChildren<QValueAxis *>(); ASSERT_EQ(axes.size(), 2);
+        const QString xTitle = overTime ? "Time [s]" : "Z [um]";
+        EXPECT_EQ(axes[0]->titleText(), xTitle);
+        EXPECT_EQ(axes[1]->titleText(), "Mean intensity [a.u.]");
+        EXPECT_TRUE(plot->windowTitle().contains(overTime ? "C2, Z2" : "C2, T2"));
+        for (int i = 0; i < 3; ++i) {
+            EXPECT_DOUBLE_EQ(points[i].x(), overTime ? 7 + .5 * i : 10 + 2 * i);
+            EXPECT_DOUBLE_EQ(points[i].y(), overTime ? 27 + 200 * i : 225 + 2 * i);
+        }
+        // Completed plots remain accessible through the Window menu.
+        auto *menu = window.findChild<QMenu *>("windowMenu"); ASSERT_NE(menu, nullptr);
+        menu->aboutToShow(); plot->hide();
+        QAction *plotAction = nullptr;
+        for (auto *action : menu->actions()) if (action->text() == plot->windowTitle()) plotAction = action;
+        ASSERT_NE(plotAction, nullptr); plotAction->trigger(); EXPECT_TRUE(plot->isVisible());
+        QTemporaryDir directory; ASSERT_TRUE(directory.isValid());
+        const auto path = directory.filePath("measurements.csv");
+        auto *exportButton = plot->findChild<QPushButton *>("exportRoiMeasurements"); ASSERT_NE(exportButton, nullptr);
+        QTimer picker;
+        QObject::connect(&picker, &QTimer::timeout, &window, [path] {
+            auto *dialog = qobject_cast<QFileDialog *>(QApplication::activeModalWidget());
+            if (!dialog) return;
+            dialog->setDirectory(QFileInfo(path).absolutePath()); dialog->selectFile(QFileInfo(path).fileName());
+            if (auto *name = dialog->findChild<QLineEdit *>("fileNameEdit")) name->setText(QFileInfo(path).fileName());
+            QMetaObject::invokeMethod(dialog, "accept", Qt::QueuedConnection);
+        });
+        picker.start(1); exportButton->click(); picker.stop();
+        QFile csv(path); ASSERT_TRUE(csv.open(QIODevice::ReadOnly));
+        const auto rows = QString::fromUtf8(csv.readAll()).split('\n'); ASSERT_EQ(rows.size(), 5);
+        EXPECT_EQ(rows[0], QString("\"Image\",\"ROI\",\"Z\",\"Channel\",\"Frame\",\"%1\",\"Count\",\"Area\",\"Mean\","
+            "\"StdDev\",\"Min\",\"Max\",\"Sum\",\"Area unit\",\"Intensity unit\"").arg(xTitle));
+        for (int i = 0; i < 3; ++i) {
+            const int mean = overTime ? 27 + 200 * i : 225 + 2 * i;
+            const auto &row = rows[i + 1];
+            ASSERT_TRUE(row.startsWith('"') && row.endsWith('"'));
+            const auto fields = row.mid(1, row.size() - 2).split("\",\""); ASSERT_EQ(fields.size(), 15);
+            EXPECT_EQ(fields[0], "Sample,\"\"A\"\""); EXPECT_EQ(fields[1], "ROI,\"\"one\"\"");
+            EXPECT_EQ(fields[2].toInt(), overTime ? 2 : i + 1); EXPECT_EQ(fields[3].toInt(), 2);
+            EXPECT_EQ(fields[4].toInt(), overTime ? i + 1 : 2);
+            EXPECT_DOUBLE_EQ(fields[5].toDouble(), points[i].x());
+            EXPECT_EQ(fields[6].toInt(), 2); EXPECT_DOUBLE_EQ(fields[7].toDouble(), .25);
+            EXPECT_DOUBLE_EQ(fields[8].toDouble(), points[i].y());
+            EXPECT_NEAR(fields[9].toDouble(), 2, 1e-12);
+            EXPECT_DOUBLE_EQ(fields[10].toDouble(), mean - 2); EXPECT_DOUBLE_EQ(fields[11].toDouble(), mean + 2);
+            EXPECT_NEAR(fields[12].toDouble(), mean * 2, 1e-12);
+            EXPECT_EQ(fields[13], "um²"); EXPECT_EQ(fields[14], "a.u.");
+        }
+        QPointer<QDialog> closed(plot); plot->close();
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        EXPECT_TRUE(closed.isNull());
+    }
+}
+
+TEST(Desktop, RoiMeasurementPlotsUseIndicesWithoutCalibrationAndSupportAreaShapes)
+{
+    for (const auto type : {RoiType::Rectangle, RoiType::Ellipse, RoiType::Polygon}) {
+        for (bool overTime : {true, false}) {
+            MainWindow window;
+            auto image = Image::allocate(PixelType::Float64, {2, 2, 2, 1, 2});
+            for (std::size_t t = 0; t < 2; ++t) for (std::size_t z = 0; z < 2; ++z)
+                for (std::size_t y = 0; y < 2; ++y) for (std::size_t x = 0; x < 2; ++x)
+                    image.setValue(std::array<std::size_t, 5>{x, y, z, 0, t}, .123456789012345 + 10 * t + z);
+            auto *doc = window.addDocument(image);
+            Roi roi; roi.type = type;
+            roi.points = type == RoiType::Polygon ? std::vector<QPointF>{{0, 0}, {2, 0}, {2, 2}, {0, 2}}
+                                                 : std::vector<QPointF>{{0, 0}, {2, 2}};
+            doc->setSelection(roi);
+            window.commands().execute("analyze.roiPlot", {{"axis", overTime ? "Time" : "Z"}});
+            ASSERT_TRUE(finishJobs(window));
+            auto *plot = window.findChild<QDialog *>("roiMeasurementsWindow"); ASSERT_NE(plot, nullptr);
+            auto *series = plot->findChild<QLineSeries *>(); ASSERT_NE(series, nullptr);
+            const auto points = series->points(); ASSERT_EQ(points.size(), 2);
+            EXPECT_DOUBLE_EQ(points[0].x(), 1); EXPECT_DOUBLE_EQ(points[1].x(), 2);
+            EXPECT_DOUBLE_EQ(points[0].y(), .123456789012345);
+            EXPECT_DOUBLE_EQ(points[1].y(), .123456789012345 + (overTime ? 10 : 1));
+            const auto axes = plot->findChildren<QValueAxis *>(); ASSERT_EQ(axes.size(), 2);
+            EXPECT_EQ(axes[0]->titleText(), overTime ? "Frame" : "Slice");
+            EXPECT_EQ(axes[1]->titleText(), "Mean intensity");
+        }
+    }
+}
+
+TEST(Desktop, RoiMeasurementPlotsValidateSelectionsAxesAndHonorCancellation)
+{
+    MainWindow window;
+    auto *doc = window.addDocument(Image::allocate(PixelType::UInt8, {4, 4, 2, 1, 2}));
+    QString error;
+    QTimer dismiss;
+    QObject::connect(&dismiss, &QTimer::timeout, [&] {
+        if (auto *dialog = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+            error = dialog->text(); dialog->accept();
+        }
+    });
+    dismiss.start(1);
+    window.commands().execute("analyze.roiPlot"); EXPECT_EQ(error, "Select an area ROI first.");
+    Roi roi; roi.type = RoiType::Line; roi.points = {{0, 0}, {2, 2}}; doc->setSelection(roi);
+    error.clear(); window.commands().execute("analyze.roiPlot"); EXPECT_EQ(error, "Select an area ROI first.");
+    EXPECT_FALSE(window.jobs().busy());
+    EXPECT_THROW(window.commands().execute("analyze.roiPlot", {{"axis", "Channel"}}), std::invalid_argument);
+    roi.type = RoiType::Rectangle; doc->setSelection(roi);
+    window.commands().execute("analyze.roiPlot"); window.jobs().cancelAll();
+    ASSERT_TRUE(finishJobs(window));
+    EXPECT_EQ(window.findChild<QDialog *>("roiMeasurementsWindow"), nullptr);
+    doc = window.addDocument(Image::allocate(PixelType::UInt8, {4, 4})); doc->setSelection(roi);
+    error.clear(); window.commands().execute("analyze.roiPlot"); EXPECT_EQ(error, "The image needs at least two time frames.");
+    error.clear(); window.commands().execute("analyze.roiPlot", {{"axis", "Z"}});
+    EXPECT_EQ(error, "The image needs at least two Z slices.");
+    EXPECT_FALSE(window.jobs().busy());
+    EXPECT_EQ(window.findChild<QDialog *>("roiMeasurementsWindow"), nullptr);
 }
 
 TEST(Desktop, NewImagesAllocateInBackgroundAndHonorCancellation)

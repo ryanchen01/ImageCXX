@@ -2,6 +2,8 @@
 
 ImageCXX is a C++20 and Qt Widgets image viewer and analysis application with a compact launcher and separate image and tool windows. It keeps scientific pixel values separate from display settings and provides stack browsing, ROIs, measurements, plots and ITK processing.
 
+Select an area ROI and choose **Analyze > Plot ROI measurements...** to plot mean intensity across Time or Z. The ROI's XY shape, current channel and other axis stay fixed. Plots use calibrated coordinates when available and frame or slice numbers otherwise. Each plot has an **Export CSV...** button for per-plane statistics and keeps its measured values when the source image changes.
+
 ## Build
 
 Install these first:

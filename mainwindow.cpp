@@ -727,6 +727,80 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     }});
     commands_.add({"analyze.histogram", tr("Histogram"), "Analyze", QKeySequence("H"), true, {}, [this](const QVariantMap &) { showPlot(false); }});
     commands_.add({"analyze.profile", tr("Line profile"), "Analyze", QKeySequence("K"), true, {}, [this](const QVariantMap &) { showPlot(true); }});
+    commands_.add({"analyze.roiPlot", tr("Plot ROI measurements..."), "Analyze", {}, true,
+        {{"axis", tr("Axis"), ParameterKind::Choice, "Time", 0, 0, {"Time", "Z"}}}, [this](const QVariantMap &p) {
+        const auto *doc = activeDocument(); if (!doc) return;
+        const auto roi = selectedRoi();
+        if (!roi || roi->type == RoiType::Line) { showError(tr("Select an area ROI first.")); return; }
+        const bool overTime = p.value("axis").toString() == "Time";
+        const auto image = doc->image;
+        const auto count = overTime ? image.frames() : image.depth();
+        if (count < 2) { showError(overTime ? tr("The image needs at least two time frames.")
+                                         : tr("The image needs at least two Z slices.")); return; }
+        const auto z = doc->viewer->slice(), channel = doc->viewer->channel(), time = doc->viewer->time();
+        const auto &axis = image.metadata().axes[overTime ? 4 : 2];
+        const bool calibrated = !axis.unit.isEmpty() && axis.unit != "px";
+        const QString xTitle = calibrated ? (overTime ? tr("Time [%1]") : tr("Z [%1]")).arg(axis.unit)
+                                         : (overTime ? tr("Frame") : tr("Slice"));
+        const QString yTitle = image.metadata().intensityUnit.isEmpty() ? tr("Mean intensity")
+            : tr("Mean intensity [%1]").arg(image.metadata().intensityUnit);
+        const QString roiName = roi->name.isEmpty() ? tr("Selection") : roi->name;
+        const QString title = tr("%1: %2, mean vs %3, C%4, %5%6").arg(doc->title(), roiName,
+            overTime ? tr("time") : tr("Z")).arg(channel + 1).arg(overTime ? "Z" : "T").arg((overTime ? z : time) + 1);
+        struct RoiPlotData { std::vector<QPointF> points; QByteArray csv; };
+        auto output = std::make_shared<RoiPlotData>();
+        jobs_.submit(tr("Measuring ROI series"),
+            [image, roi, roiName, overTime, calibrated, z, channel, time, count, xTitle, output](auto stop, auto progress) {
+                const auto &axis = image.metadata().axes[overTime ? 4 : 2];
+                const auto appendRow = [&output](QStringList fields) {
+                    for (auto &field : fields) { field.replace('"', "\"\""); field = '"' + field + '"'; }
+                    output->csv += fields.join(',').toUtf8() + '\n';
+                };
+                const auto number = [](double value) { return QString::number(value, 'g', std::numeric_limits<double>::max_digits10); };
+                appendRow({"Image", "ROI", "Z", "Channel", "Frame", xTitle, "Count", "Area", "Mean",
+                    "StdDev", "Min", "Max", "Sum", "Area unit", "Intensity unit"});
+                output->points.reserve(count);
+                for (std::size_t i = 0; i < count; ++i) {
+                    // Reuse the selected XY geometry on every plane; other axes stay fixed.
+                    const auto sliceZ = overTime ? z : i, frame = overTime ? i : time;
+                    const auto m = measure(image.slice(sliceZ, channel, frame), roi, true, stop);
+                    const double position = calibrated ? axis.origin + double(i) * axis.spacing : double(i + 1);
+                    if (!std::isfinite(position)) throw std::invalid_argument("The series axis coordinates are not finite.");
+                    output->points.emplace_back(position, m.mean);
+                    appendRow({m.imageName, roiName, QString::number(sliceZ + 1), QString::number(channel + 1),
+                        QString::number(frame + 1), number(position), QString::number(m.count), number(m.area),
+                        number(m.mean), number(m.standardDeviation), number(m.minimum), number(m.maximum),
+                        number(m.sum), m.areaUnit, m.intensityUnit});
+                    progress(double(i + 1) / double(count));
+                }
+            }, [this, output, title, xTitle, yTitle](auto error) {
+                if (showJobError(error)) return;
+                auto *window = new QDialog(this, Qt::Window);
+                window->setAttribute(Qt::WA_DeleteOnClose);
+                window->setObjectName("roiMeasurementsWindow");
+                window->setWindowTitle(title);
+                window->resize(640, 400);
+                window->setMinimumSize(420, 260);
+                auto *layout = new QVBoxLayout(window);
+                layout->setContentsMargins(0, 0, 0, 0);
+                auto *plot = new PlotWidget(window);
+                layout->addWidget(plot);
+                try { plot->setData(output->points, xTitle, yTitle); }
+                catch (...) { delete window; showJobError(std::current_exception()); return; }
+                auto *exportButton = new QPushButton(tr("Export CSV..."), window);
+                exportButton->setObjectName("exportRoiMeasurements");
+                layout->addWidget(exportButton, 0, Qt::AlignRight);
+                connect(exportButton, &QPushButton::clicked, window, [this, window, output] {
+                    const auto path = QFileDialog::getSaveFileName(window, tr("Export ROI measurements"),
+                        "roi-measurements.csv", "CSV (*.csv)");
+                    if (path.isEmpty()) return;
+                    QSaveFile file(path);
+                    if (!file.open(QIODevice::WriteOnly) || file.write(output->csv) != output->csv.size() || !file.commit())
+                        showError(tr("Cannot write ROI measurements."));
+                });
+                window->show(); window->raise(); window->activateWindow();
+            });
+    }});
     commands_.add({"analyze.mask", tr("Create mask from ROI"), "Analyze", {}, true, {}, [this](const QVariantMap &) {
         auto *doc = activeDocument(); const auto roi = selectedRoi();
         if (!doc || !roi || roi->type == RoiType::Line) { showError(tr("Select an area ROI first.")); return; }
@@ -2196,6 +2270,13 @@ void MainWindow::updateWindowMenu()
                 viewWindow->showNormal(); viewWindow->raise(); viewWindow->activateWindow();
             });
         }
+    }
+    for (auto *plot : findChildren<QDialog *>("roiMeasurementsWindow")) {
+        auto *action = windowMenu_->addAction(plot->windowTitle());
+        const QPointer<QDialog> target(plot);
+        connect(action, &QAction::triggered, this, [target] {
+            if (target) { target->showNormal(); target->raise(); target->activateWindow(); }
+        });
     }
     windowMenu_->addSeparator();
     windowMenu_->addAction(findChild<QAction *>("window.close"));
