@@ -66,7 +66,7 @@ private:
     double sliderMinimum_ = 0;
     double sliderMaximum_ = 1;
     QMenu *lutMenu_;
-    QCheckBox *inverted_;
+    QAction *invertLut_;
     QCheckBox *linear_;
     QCheckBox *composite_;
     QLabel *pixelStatus_;

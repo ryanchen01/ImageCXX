@@ -217,7 +217,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     }
     maximumSlider_->setValue(1000);
     gammaSlider_->setValue(500);
-    inverted_ = new QCheckBox(tr("Invert"), displayPanel);
     linear_ = new QCheckBox(tr("Linear interpolation"), displayPanel);
     composite_ = new QCheckBox(tr("Composite channels"), displayPanel);
     auto *autoRange = new QPushButton(tr("Auto range"), displayPanel);
@@ -234,7 +233,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         row->addWidget(spin);
         form->addRow(label, row);
     }
-    form->addRow(inverted_); form->addRow(linear_); form->addRow(composite_);
+    form->addRow(linear_); form->addRow(composite_);
     form->addRow(autoRange); form->addRow(fitButton);
 
     auto *propertiesPanel = new QDialog(this, Qt::Window);
@@ -1251,6 +1250,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     toolbar->addSeparator();
     lutMenu_ = new QMenu(tr("LUT"), toolbar);
     lutMenu_->setObjectName("lutMenu");
+    invertLut_ = lutMenu_->addAction(tr("Invert LUT"));
+    invertLut_->setCheckable(true);
+    connect(invertLut_, &QAction::triggered, this, [this](bool inverted) {
+        if (loadingPanels_) return;
+        if (auto *doc = activeDocument()) doc->viewer->setInverted(inverted);
+        updateDisplayControls();
+    });
+    lutMenu_->addSeparator();
     auto *luts = new QActionGroup(lutMenu_);
     for (const auto &name : QStringList{"grayscale", "hot", "viridis"}) {
         auto *action = lutMenu_->addAction(name);
@@ -1298,7 +1305,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             QScopedValueRollback applyingDisplay(loadingPanels_, true);
             if (maximum_->value() > minimum_->value()) doc->viewer->setWindow(minimum_->value(), maximum_->value());
             doc->viewer->setGamma(gamma_->value());
-            doc->viewer->setInverted(inverted_->isChecked()); doc->viewer->setLinearInterpolation(linear_->isChecked());
+            doc->viewer->setLinearInterpolation(linear_->isChecked());
             doc->viewer->setComposite(composite_->isChecked());
         }
         updateDisplayControls();
@@ -1316,7 +1323,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         if (loadingPanels_) return;
         gamma_->setValue(std::pow(20., (value - 500) / 500.));
     });
-    for (auto *check : {inverted_, linear_, composite_}) connect(check, &QCheckBox::toggled, this, applyDisplay);
+    for (auto *check : {linear_, composite_}) connect(check, &QCheckBox::toggled, this, applyDisplay);
     connect(removeRoi, &QPushButton::clicked, this, [this] {
         auto *doc = activeDocument(); const int index = rois_->currentRow(); if (!doc || index < 0) return;
         doc->rois.erase(doc->rois.begin() + index);
@@ -1974,9 +1981,10 @@ void MainWindow::updateDisplayControls()
     if (loadingPanels_) return;
     QScopedValueRollback loading(loadingPanels_, true);
     const auto *doc = activeDocument();
-    for (auto *widget : std::initializer_list<QWidget *>{minimum_, maximum_, gamma_, minimumSlider_, maximumSlider_, gammaSlider_, inverted_, linear_, composite_, channelIndex_, timeIndex_}) widget->setEnabled(doc != nullptr);
+    for (auto *widget : std::initializer_list<QWidget *>{minimum_, maximum_, gamma_, minimumSlider_, maximumSlider_, gammaSlider_, linear_, composite_, channelIndex_, timeIndex_}) widget->setEnabled(doc != nullptr);
     lutMenu_->menuAction()->setEnabled(doc != nullptr);
-    for (auto *action : lutMenu_->actions()) action->setChecked(doc && action->data().toString() == doc->viewer->lut());
+    for (auto *action : lutMenu_->actions())
+        action->setChecked(doc && (action == invertLut_ ? doc->viewer->isInverted() : action->data().toString() == doc->viewer->lut()));
     if (doc) {
         for (const auto &[spin, count, value] : {
                  std::tuple{channelIndex_, doc->image.channels(), doc->viewer->channel()},
@@ -2000,7 +2008,7 @@ void MainWindow::updateDisplayControls()
         }
         const QSignalBlocker gammaBlocker(gammaSlider_);
         gammaSlider_->setValue(int(std::lround(500 + 500 * std::log(gamma_->value()) / std::log(20.))));
-        inverted_->setChecked(doc->viewer->isInverted()); linear_->setChecked(doc->viewer->linearInterpolation()); composite_->setChecked(doc->viewer->composite());
+        linear_->setChecked(doc->viewer->linearInterpolation()); composite_->setChecked(doc->viewer->composite());
     }
 }
 

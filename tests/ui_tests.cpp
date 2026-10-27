@@ -1267,6 +1267,50 @@ TEST(Desktop, DisplayChannelTimeSelectorsSynchronizeViewsAndFollowTheActiveDocum
     EXPECT_FALSE(document->modified);
 }
 
+TEST(Desktop, InvertLutTracksDisplaySettingsAndActiveDocument)
+{
+    MainWindow window;
+    auto *menu = window.findChild<QMenu *>("lutMenu");
+    ASSERT_NE(menu, nullptr);
+    EXPECT_FALSE(menu->menuAction()->isEnabled());
+    const auto actions = menu->actions();
+    ASSERT_EQ(actions.size(), 5);
+    auto *invert = actions[0];
+    EXPECT_EQ(invert->text(), "Invert LUT");
+    EXPECT_TRUE(invert->isCheckable());
+    EXPECT_TRUE(actions[1]->isSeparator());
+    auto *first = window.addDocument(Image::allocate(PixelType::UInt8, {4, 4}));
+    EXPECT_TRUE(menu->menuAction()->isEnabled());
+    EXPECT_FALSE(invert->isChecked());
+    invert->trigger();
+    EXPECT_TRUE(first->viewer->isInverted());
+    EXPECT_TRUE(invert->isChecked());
+    actions[3]->trigger();
+    EXPECT_EQ(first->viewer->lut(), "hot");
+    EXPECT_TRUE(actions[3]->isChecked());
+    EXPECT_TRUE(invert->isChecked());
+    invert->trigger();
+    EXPECT_FALSE(first->viewer->isInverted());
+    EXPECT_EQ(first->viewer->lut(), "hot");
+    EXPECT_TRUE(actions[3]->isChecked());
+    first->viewer->setInverted(true);
+    EXPECT_TRUE(invert->isChecked());
+    auto *display = window.panel("display");
+    for (auto *check : display->findChildren<QCheckBox *>())
+        EXPECT_NE(check->text(), "Invert");
+    display->findChild<QDoubleSpinBox *>("displayGamma")->setValue(2);
+    EXPECT_TRUE(first->viewer->isInverted());
+    EXPECT_TRUE(invert->isChecked());
+    auto *second = window.addDocument(Image::allocate(PixelType::UInt8, {4, 4}));
+    EXPECT_FALSE(invert->isChecked());
+    QEvent activated(QEvent::WindowActivate); QCoreApplication::sendEvent(first, &activated);
+    EXPECT_TRUE(invert->isChecked());
+    EXPECT_TRUE(actions[3]->isChecked());
+    EXPECT_FALSE(second->viewer->isInverted());
+    EXPECT_FALSE(first->modified);
+    EXPECT_DOUBLE_EQ(first->image.sample(0, 0), 0);
+}
+
 TEST(Desktop, IntersectionNavigationPreservesDocumentPanels)
 {
     MainWindow window;
