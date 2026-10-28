@@ -149,10 +149,15 @@ TEST(Scheduler, CancelAllStopsActiveWorkDiscardsQueueAndAllowsReentrantStopCallb
     QObject::connect(&scheduler, &JobScheduler::progress, [&](auto, auto) { ++progress; });
     QObject::connect(&scheduler, &JobScheduler::finished, [&](auto) { ++terminalSignals; });
     scheduler.submit("active", [&, gate](std::stop_token stop, const JobScheduler::Progress &report) {
-        std::stop_callback callback(stop, [&] { reentered.store(scheduler.busy()); stopped.store(true); });
+        std::stop_callback callback(stop, [&] {
+            reentered.store(scheduler.busy());
+            stopped.store(true);
+            gate->release();
+        });
         report(.5);
         running.set_value();
-        gate->wait(stop);
+        // Keep the callback registered until it has released the worker.
+        gate->wait({});
     }, [&](auto) { ++callbacks; });
     ASSERT_EQ(running.get_future().wait_for(2s), std::future_status::ready);
     scheduler.submit("queued", [&](auto, auto) { queuedRan.store(true); }, [&](auto) { ++callbacks; });
@@ -216,11 +221,15 @@ TEST(Scheduler, DestructionStopsAndJoinsWithoutDeliveringQueuedCallbacks)
     QObject::connect(address, &JobScheduler::progress, [&](auto, auto) { ++delivered; });
     QObject::connect(address, &JobScheduler::finished, [&](auto) { ++delivered; });
     address->submit("active", [&, gate](std::stop_token stop, const JobScheduler::Progress &report) {
-        std::stop_callback callback(stop, [&] { reentered.store(address->busy()); stopped.store(true); });
+        std::stop_callback callback(stop, [&] {
+            reentered.store(address->busy());
+            stopped.store(true);
+            gate->release();
+        });
         escaped = report;
         report(.25);
         running.set_value();
-        gate->wait(stop);
+        gate->wait({});
     }, [&](auto) { ++delivered; });
     ASSERT_EQ(running.get_future().wait_for(2s), std::future_status::ready);
     address->submit("queued", [&](auto, auto) { queuedRan.store(true); }, [&](auto) { ++delivered; });

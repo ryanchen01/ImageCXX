@@ -142,7 +142,7 @@ jobs:
           QT_QPA_PLATFORM: xcb
           LIBGL_ALWAYS_SOFTWARE: '1'
           QSG_RHI_BACKEND: opengl
-        run: xvfb-run -a ./build/release-vcpkg/imagecxx_ui_tests --gtest_filter='Viewer.Gpu*:Plots.*'
+        run: xvfb-run -a ./build/release-vcpkg/imagecxx_ui_tests --gtest_filter='Viewer.Gpu*:Overlay.Gpu*:Plots.*'
 
       - name: Upload test logs
         if: always()
