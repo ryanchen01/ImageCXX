@@ -8,6 +8,7 @@ layout(std140, binding = 0) uniform Parameters {
     vec4 color1;
     vec4 color2;
     vec4 color3;
+    vec4 layer; // opacity
 };
 void main()
 {

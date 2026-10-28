@@ -20,9 +20,8 @@
 #include <limits>
 
 namespace imagecxx {
-namespace {
-std::optional<std::array<double, 3>> mapPosition(const Image &source, const Image &target,
-                                               std::array<double, 3> position)
+std::optional<std::array<double, 3>> mapImagePosition(const Image &source, const Image &target,
+                                                   std::array<double, 3> position)
 {
     const auto calibration = [](const Image &image) {
         std::array<std::array<double, 4>, 3> matrix{};
@@ -78,7 +77,6 @@ std::optional<std::array<double, 3>> mapPosition(const Image &source, const Imag
     if (!std::all_of(result.begin(), result.end(), [](double value) { return std::isfinite(value); })) return std::nullopt;
     return result;
 }
-} // namespace
 
 DocumentWidget::DocumentWidget(Image source, QWidget *parent) : ImageWindow(parent),
     image(std::move(source))
@@ -211,9 +209,9 @@ void DocumentWidget::synchronizeTransform(ImageViewer *source, int index)
         return document && document->synchronizing_;
     })) for (auto &document : linkedDocuments_) if (document) {
         const auto center = source->viewCenter();
-        const auto mapped = mapPosition(image, document->image,
+        const auto mapped = mapImagePosition(image, document->image,
             {center.x() - .5, center.y() - .5, double(source->slice())});
-        const auto next = mapPosition(image, document->image,
+        const auto next = mapImagePosition(image, document->image,
             {center.x() + .5, center.y() - .5, double(source->slice())});
         if (mapped && next) {
             const auto &metadata = document->image.metadata().axes;
@@ -264,7 +262,7 @@ void DocumentWidget::linkTo(QList<DocumentWidget *> documents)
     documents.removeAll(this);
     documents.removeAll(nullptr);
     for (auto *document : documents) {
-        if (!mapPosition(image, document->image, {}) || !mapPosition(document->image, image, {})) {
+        if (!mapImagePosition(image, document->image, {}) || !mapImagePosition(document->image, image, {})) {
             emit viewError(tr("These images have incompatible spatial units or an invalid spatial direction."));
             return;
         }
@@ -386,7 +384,7 @@ void DocumentWidget::setPosition(std::size_t x, std::size_t y, std::size_t z, st
         if (std::none_of(linkedDocuments_.begin(), linkedDocuments_.end(), [](const auto &document) {
             return document && document->synchronizing_;
         })) for (auto &document : linkedDocuments_) if (document) {
-            if (const auto mapped = mapPosition(image, document->image,
+            if (const auto mapped = mapImagePosition(image, document->image,
                 {double(spatial_[0]), double(spatial_[1]), double(spatial_[2])})) {
                 std::array<std::size_t, 3> position;
                 for (std::size_t axis = 0; axis < 3; ++axis)

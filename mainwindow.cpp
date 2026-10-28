@@ -5,6 +5,7 @@
 #include "plots/plot_widget.h"
 #include "processing/processing.h"
 #include "core/memory.h"
+#include "ui/overlay_window.h"
 #include <dcmtk/dcmdata/dctag.h>
 #include <QActionGroup>
 #include <QAbstractSpinBox>
@@ -1257,6 +1258,22 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             updatePanels();
         }});
     }
+    commands_.add({"view.overlay", tr("Overlay view"), "View", {}, true, {}, [this](const QVariantMap &) {
+        auto *document = activeDocument();
+        if (!document) return;
+        OverlayWindow *overlay = nullptr;
+        for (auto *window : findChildren<OverlayWindow *>(QString{}, Qt::FindDirectChildrenOnly))
+            if (window->document() == document) overlay = window;
+        if (!overlay) {
+            overlay = new OverlayWindow(document, this);
+            overlay->setScreen(document->screen());
+            overlay->move(document->pos() + QPoint(28, 28));
+            connect(overlay, &OverlayWindow::activated, this, [this, document] { setActiveDocument(document); });
+            connect(overlay, &OverlayWindow::viewError, this, [this](const QString &error) { statusBar()->showMessage(error, 15000); });
+        }
+        overlay->refreshDocuments(documents());
+        overlay->showEditor();
+    }});
     commands_.add({"process.repeat", tr("Repeat command"), "Process", QKeySequence("Shift+R"), true, {}, [this](const QVariantMap &) {
         if (!repeatCommand_.isEmpty()) commands_.execute(repeatCommand_, repeatParameters_);
     }});
@@ -1266,6 +1283,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     }});
     commands_.add({"window.showAll", tr("Show all windows"), "View", QKeySequence("Shift+F"), false, {}, [this](const QVariantMap &) {
         showNormal(); for (auto *doc : documents()) doc->showViews();
+        for (auto *overlay : findChildren<OverlayWindow *>(QString{}, Qt::FindDirectChildrenOnly)) overlay->showNormal();
         for (auto *panel : panels_) if (panel->isVisible() || panel->isMinimized()) panel->showNormal();
     }});
     commands_.add({"window.next", tr("Next image window"), "View", QKeySequence("Tab"), true, {}, [this](const QVariantMap &) {
@@ -1582,6 +1600,7 @@ void MainWindow::setActiveDocument(DocumentWidget *document)
 
 void MainWindow::clearDocuments()
 {
+    for (auto *overlay : findChildren<OverlayWindow *>(QString{}, Qt::FindDirectChildrenOnly)) delete overlay;
     // Include windows waiting for WA_DeleteOnClose's deferred destruction.
     const auto windows = findChildren<DocumentWidget *>(QString{}, Qt::FindDirectChildrenOnly);
     documents_.clear();
@@ -1649,6 +1668,7 @@ DocumentWidget *MainWindow::addDocument(Image image)
             statusBar()->showMessage(tr("Zoom %1%").arg(scale * 100, 0, 'f', 1), 2000);
     });
     setActiveDocument(document);
+    for (auto *overlay : findChildren<OverlayWindow *>(QString{}, Qt::FindDirectChildrenOnly)) overlay->refreshDocuments(documents());
     return document;
 }
 
@@ -2001,7 +2021,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
             || qobject_cast<QComboBox *>(parent);
     }
     const bool canvas = qobject_cast<ImageViewer *>(widget) != nullptr;
-    const bool selectionCanvas = canvas && activeDocument()
+    const bool selectionCanvas = canvas && !qobject_cast<OverlayWindow *>(top) && activeDocument()
         && (widget == activeDocument()->viewer || activeDocument()->viewMode() != DocumentWidget::ViewMode::Orthogonal);
     // Keep Tab/Enter and arrow navigation local to controls and ROI drafts.
     if ((key->key() == Qt::Key_Tab || key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter)
@@ -2359,6 +2379,10 @@ void MainWindow::updateWindowMenu()
                 viewWindow->showNormal(); viewWindow->raise(); viewWindow->activateWindow();
             });
         }
+    }
+    for (auto *overlay : findChildren<OverlayWindow *>(QString{}, Qt::FindDirectChildrenOnly)) {
+        auto *action = windowMenu_->addAction(overlay->windowTitle());
+        connect(action, &QAction::triggered, overlay, &OverlayWindow::showEditor);
     }
     for (auto *plot : findChildren<QDialog *>("roiMeasurementsWindow")) {
         auto *action = windowMenu_->addAction(plot->windowTitle());

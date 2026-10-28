@@ -117,6 +117,17 @@ QShader loadShader(const QString &path)
     return file.open(QIODevice::ReadOnly) ? QShader::fromSerialized(file.readAll()) : QShader{};
 }
 
+struct CanvasLayer {
+    std::shared_ptr<const DecodedSlice> frame;
+    QTransform transform;
+    ImageMetadata metadata;
+    double minimum = 0, maximum = 1, gamma = 1, opacity = 1;
+    int lut = 0;
+    bool inverted = false, linear = false;
+    QByteArray mask;
+    QSize maskSize;
+};
+
 // This is the only class that knows about the private Qt RHI API.
 class SliceCanvas final : public QRhiWidget {
 public:
@@ -133,9 +144,10 @@ public:
     ImageMetadata metadata;
     double minimum = 0, maximum = 1, gamma = 1;
     int lut = 0;
-    bool inverted = false, linear = false;
+    bool inverted = false, linear = false, overlayMode = false;
     QByteArray mask;
     QSize maskSize;
+    QList<CanvasLayer> layers;
     std::size_t gpuBudget = 128 * 1024 * 1024;
     std::size_t gpuBytes = 0;
     std::function<void(const QString &)> failed;
@@ -144,12 +156,11 @@ protected:
     void initialize(QRhiCommandBuffer *) override
     {
         releaseResources();
-        uniforms.reset(rhi()->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 160));
         nearest.reset(rhi()->newSampler(QRhiSampler::Nearest, QRhiSampler::Nearest,
                                       QRhiSampler::None, QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge));
         smooth.reset(rhi()->newSampler(QRhiSampler::Linear, QRhiSampler::Linear,
                                      QRhiSampler::None, QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge));
-        if (!uniforms->create() || !nearest->create() || !smooth->create()) {
+        if (!nearest->create() || !smooth->create()) {
             reportError(QStringLiteral("Could not create GPU display resources."));
             releaseResources();
         }
@@ -157,86 +168,141 @@ protected:
 
     void render(QRhiCommandBuffer *cb) override
     {
-        if (!uniforms || !frame) {
-            cb->beginPass(renderTarget(), QColor("#FAF7F2"), {1.0f, 0});
-            cb->endPass();
-            return;
+        QList<CanvasLayer> active = layers;
+        if (!overlayMode && frame) {
+            active = {{frame, QTransform(imageRect.width(), 0, 0, imageRect.height(), imageRect.x(), imageRect.y()),
+                metadata, minimum, maximum, gamma, 1, lut, inverted, linear, mask, maskSize}};
         }
-        const auto bytes = static_cast<std::size_t>(frame->pixels.size());
-        const auto maskBytes = mask.isEmpty() ? std::size_t(1) : static_cast<std::size_t>(mask.size());
+        const QColor background = overlayMode ? QColor(Qt::black) : QColor("#FAF7F2");
+        std::size_t bytes = 0;
         const auto sizeLimit = rhi()->resourceLimit(QRhi::TextureSizeMax);
-        if (bytes > gpuBudget || maskBytes > gpuBudget - bytes || frame->size.width() > sizeLimit
-            || frame->size.height() > sizeLimit) {
+        for (const auto &layer : active) {
+            const auto textureBytes = std::size_t(layer.frame->pixels.size());
+            const auto maskBytes = layer.mask.isEmpty() ? std::size_t(1) : std::size_t(layer.mask.size());
+            if (textureBytes > gpuBudget - bytes || maskBytes > gpuBudget - bytes - textureBytes
+                || layer.frame->size.width() > sizeLimit || layer.frame->size.height() > sizeLimit) {
+                pipeline.reset();
+                resources.clear();
+                gpuBytes = 0;
+                reportError(QStringLiteral("This view exceeds the GPU texture or memory limit."));
+                cb->beginPass(renderTarget(), background, {1.0f, 0});
+                cb->endPass();
+                return;
+            }
+            bytes += textureBytes + maskBytes;
+        }
+        gpuBytes = bytes;
+        if (!nearest || !smooth || active.isEmpty()) {
             pipeline.reset();
-            bindings.reset();
-            texture.reset();
-            maskTexture.reset();
-            gpuBytes = 0;
-            reportError(QStringLiteral("This slice exceeds the GPU texture or memory limit."));
-            cb->beginPass(renderTarget(), QColor("#FAF7F2"), {1.0f, 0});
+            resources.clear();
+            cb->beginPass(renderTarget(), background, {1.0f, 0});
             cb->endPass();
             return;
         }
-
-        QRhiResourceUpdateBatch *updates = rhi()->nextResourceUpdateBatch();
-        const QRhiTexture::Format format = frame->mode == 1 ? QRhiTexture::RGBA8
-            : frame->mode == 2 ? QRhiTexture::RGBA32F : QRhiTexture::R32F;
-        bool bindingsChanged = !bindings || boundLinear != linear;
-        if (!texture || texture->pixelSize() != frame->size || texture->format() != format) {
+        if (resources.size() != std::size_t(active.size())) {
             pipeline.reset();
-            bindings.reset();
-            texture.reset(rhi()->newTexture(format, frame->size));
-            if (!rhi()->isTextureFormatSupported(format) || !texture->create()) {
-                updates->release();
-                reportError(QStringLiteral("The graphics backend does not support this pixel texture format."));
-                return;
+            resources.resize(std::size_t(active.size()));
+        }
+        auto *updates = rhi()->nextResourceUpdateBatch();
+        for (qsizetype index = 0; index < active.size(); ++index) {
+            const auto &layer = active[index];
+            const auto &decoded = layer.frame;
+            auto &resource = resources[std::size_t(index)];
+            if (!resource) resource = std::make_unique<Resources>();
+            auto &slot = *resource;
+            if (!slot.uniforms) {
+                slot.uniforms.reset(rhi()->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 176));
+                if (!slot.uniforms->create()) {
+                    updates->release();
+                    reportError(QStringLiteral("Could not create GPU display resources."));
+                    return;
+                }
             }
-            uploaded.reset();
-            bindingsChanged = true;
-        }
-        const QSize requestedMaskSize = mask.isEmpty() ? QSize(1, 1) : maskSize;
-        if (!maskTexture || maskTexture->pixelSize() != requestedMaskSize) {
-            pipeline.reset();
-            bindings.reset();
-            maskTexture.reset(rhi()->newTexture(QRhiTexture::R8, requestedMaskSize));
-            if (!maskTexture->create()) {
-                updates->release();
-                reportError(QStringLiteral("Could not create the mask texture."));
-                return;
+            const auto format = decoded->mode == 1 ? QRhiTexture::RGBA8
+                : decoded->mode == 2 ? QRhiTexture::RGBA32F : QRhiTexture::R32F;
+            bool bindingsChanged = !slot.bindings || slot.boundLinear != layer.linear;
+            if (!slot.texture || slot.texture->pixelSize() != decoded->size || slot.texture->format() != format) {
+                pipeline.reset();
+                slot.bindings.reset();
+                slot.texture.reset(rhi()->newTexture(format, decoded->size));
+                if (!rhi()->isTextureFormatSupported(format) || !slot.texture->create()) {
+                    updates->release();
+                    reportError(QStringLiteral("The graphics backend does not support this pixel texture format."));
+                    return;
+                }
+                slot.uploaded.reset();
+                bindingsChanged = true;
             }
-            uploadedMask = QByteArray();
-            bindingsChanged = true;
-        }
-        if (uploaded.lock() != frame) {
-            QRhiTextureSubresourceUploadDescription data(frame->pixels);
-            data.setSourceSize(frame->size);
-            updates->uploadTexture(texture.get(), QRhiTextureUploadDescription({{0, 0, data}}));
-            uploaded = frame;
-        }
-        const QByteArray maskData = mask.isEmpty() ? QByteArray(1, '\0') : mask;
-        if (uploadedMask != maskData) {
-            QRhiTextureSubresourceUploadDescription data(maskData);
-            data.setSourceSize(requestedMaskSize);
-            updates->uploadTexture(maskTexture.get(), QRhiTextureUploadDescription({{0, 0, data}}));
-            uploadedMask = maskData;
-        }
-        gpuBytes = bytes + maskBytes;
-        if (bindingsChanged) {
-            pipeline.reset();
-            bindings.reset(rhi()->newShaderResourceBindings());
-            bindings->setBindings({
-                QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::VertexStage
-                                                           | QRhiShaderResourceBinding::FragmentStage, uniforms.get()),
-                QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage,
-                                                         texture.get(), linear ? smooth.get() : nearest.get()),
-                QRhiShaderResourceBinding::sampledTexture(2, QRhiShaderResourceBinding::FragmentStage,
-                                                         maskTexture.get(), nearest.get())});
-            if (!bindings->create()) {
-                updates->release();
-                reportError(QStringLiteral("Could not bind the image texture."));
-                return;
+            const QSize requestedMaskSize = layer.mask.isEmpty() ? QSize(1, 1) : layer.maskSize;
+            if (!slot.maskTexture || slot.maskTexture->pixelSize() != requestedMaskSize) {
+                pipeline.reset();
+                slot.bindings.reset();
+                slot.maskTexture.reset(rhi()->newTexture(QRhiTexture::R8, requestedMaskSize));
+                if (!slot.maskTexture->create()) {
+                    updates->release();
+                    reportError(QStringLiteral("Could not create the mask texture."));
+                    return;
+                }
+                slot.uploadedMask.clear();
+                bindingsChanged = true;
             }
-            boundLinear = linear;
+            if (slot.uploaded.lock() != decoded) {
+                QRhiTextureSubresourceUploadDescription data(decoded->pixels);
+                data.setSourceSize(decoded->size);
+                updates->uploadTexture(slot.texture.get(), QRhiTextureUploadDescription({{0, 0, data}}));
+                slot.uploaded = decoded;
+            }
+            const QByteArray maskData = layer.mask.isEmpty() ? QByteArray(1, '\0') : layer.mask;
+            if (slot.uploadedMask != maskData) {
+                QRhiTextureSubresourceUploadDescription data(maskData);
+                data.setSourceSize(requestedMaskSize);
+                updates->uploadTexture(slot.maskTexture.get(), QRhiTextureUploadDescription({{0, 0, data}}));
+                slot.uploadedMask = maskData;
+            }
+            if (bindingsChanged) {
+                pipeline.reset();
+                slot.bindings.reset(rhi()->newShaderResourceBindings());
+                slot.bindings->setBindings({
+                    QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::VertexStage
+                                                               | QRhiShaderResourceBinding::FragmentStage, slot.uniforms.get()),
+                    QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage,
+                        slot.texture.get(), layer.linear ? smooth.get() : nearest.get()),
+                    QRhiShaderResourceBinding::sampledTexture(2, QRhiShaderResourceBinding::FragmentStage,
+                        slot.maskTexture.get(), nearest.get())});
+                if (!slot.bindings->create()) {
+                    updates->release();
+                    reportError(QStringLiteral("Could not bind the image texture."));
+                    return;
+                }
+                slot.boundLinear = layer.linear;
+            }
+            std::array<float, 44> parameters{};
+            QMatrix4x4 matrix = rhi()->clipSpaceCorrMatrix();
+            matrix.ortho(0.0f, float(width()), float(height()), 0.0f, -1.0f, 1.0f);
+            matrix *= QMatrix4x4(layer.transform);
+            std::copy_n(matrix.constData(), 16, parameters.begin());
+            const double relativeMinimum = layer.minimum - decoded->offset;
+            parameters[16] = float(std::isfinite(relativeMinimum) ? relativeMinimum / decoded->scale
+                : layer.minimum / decoded->scale - decoded->offset / decoded->scale);
+            const double range = layer.maximum - layer.minimum;
+            parameters[17] = float(std::isfinite(range)
+                ? decoded->scale / std::max(range, std::numeric_limits<double>::denorm_min())
+                : (decoded->scale / 2) / (layer.maximum / 2 - layer.minimum / 2));
+            parameters[18] = float(1.0 / layer.gamma);
+            parameters[19] = layer.inverted ? 1.0f : 0.0f;
+            parameters[20] = float(decoded->mode);
+            parameters[21] = float(layer.lut);
+            parameters[22] = float(decoded->channels);
+            parameters[23] = layer.mask.isEmpty() ? 0.0f : 1.0f;
+            constexpr std::array<QRgb, 4> defaults{0xffff4545, 0xff55e887, 0xff529bff, 0xffeeeeee};
+            for (std::size_t c = 0; c < 4; ++c) {
+                const QColor color = QColor::fromRgba(c < layer.metadata.channels.size() ? layer.metadata.channels[c].color : defaults[c]);
+                parameters[24 + c * 4] = float(color.redF());
+                parameters[25 + c * 4] = float(color.greenF());
+                parameters[26 + c * 4] = float(color.blueF());
+            }
+            parameters[40] = float(layer.opacity);
+            updates->updateDynamicBuffer(slot.uniforms.get(), 0, sizeof(parameters), parameters.data());
         }
         if (!pipeline) {
             pipeline.reset(rhi()->newGraphicsPipeline());
@@ -244,7 +310,14 @@ protected:
             pipeline->setShaderStages({
                 {QRhiShaderStage::Vertex, loadShader(QStringLiteral(":/imagecxx/slice.vert.qsb"))},
                 {QRhiShaderStage::Fragment, loadShader(QStringLiteral(":/imagecxx/slice.frag.qsb"))}});
-            pipeline->setShaderResourceBindings(bindings.get());
+            QRhiGraphicsPipeline::TargetBlend blend;
+            blend.enable = true;
+            blend.srcColor = QRhiGraphicsPipeline::SrcAlpha;
+            blend.dstColor = QRhiGraphicsPipeline::OneMinusSrcAlpha;
+            blend.srcAlpha = QRhiGraphicsPipeline::One;
+            blend.dstAlpha = QRhiGraphicsPipeline::OneMinusSrcAlpha;
+            pipeline->setTargetBlends({blend});
+            pipeline->setShaderResourceBindings(resources.front()->bindings.get());
             pipeline->setRenderPassDescriptor(renderTarget()->renderPassDescriptor());
             pipeline->setSampleCount(sampleCount());
             if (!pipeline->create()) {
@@ -254,57 +327,35 @@ protected:
                 return;
             }
         }
-        std::array<float, 40> parameters{};
-        QMatrix4x4 matrix = rhi()->clipSpaceCorrMatrix();
-        matrix.ortho(0.0f, float(width()), float(height()), 0.0f, -1.0f, 1.0f);
-        matrix.translate(float(imageRect.x()), float(imageRect.y()));
-        matrix.scale(float(imageRect.width()), float(imageRect.height()));
-        std::copy_n(matrix.constData(), 16, parameters.begin());
-        const double relativeMinimum = minimum - frame->offset;
-        parameters[16] = float(std::isfinite(relativeMinimum) ? relativeMinimum / frame->scale
-            : minimum / frame->scale - frame->offset / frame->scale);
-        const double range = maximum - minimum;
-        parameters[17] = float(std::isfinite(range)
-            ? frame->scale / std::max(range, std::numeric_limits<double>::denorm_min())
-            : (frame->scale / 2) / (maximum / 2 - minimum / 2));
-        parameters[18] = float(1.0 / gamma);
-        parameters[19] = inverted ? 1.0f : 0.0f;
-        parameters[20] = float(frame->mode);
-        parameters[21] = float(lut);
-        parameters[22] = float(frame->channels);
-        parameters[23] = mask.isEmpty() ? 0.0f : 1.0f;
-        constexpr std::array<QRgb, 4> defaults{0xffff4545, 0xff55e887, 0xff529bff, 0xffeeeeee};
-        for (std::size_t c = 0; c < 4; ++c) {
-            const QColor color = QColor::fromRgba(c < metadata.channels.size() ? metadata.channels[c].color : defaults[c]);
-            parameters[24 + c * 4] = float(color.redF());
-            parameters[25 + c * 4] = float(color.greenF());
-            parameters[26 + c * 4] = float(color.blueF());
-        }
-        updates->updateDynamicBuffer(uniforms.get(), 0, sizeof(parameters), parameters.data());
-        cb->beginPass(renderTarget(), QColor("#FAF7F2"), {1.0f, 0}, updates);
+        cb->beginPass(renderTarget(), background, {1.0f, 0}, updates);
         cb->setGraphicsPipeline(pipeline.get());
         const QSize targetSize = renderTarget()->pixelSize();
         cb->setViewport({0, 0, float(targetSize.width()), float(targetSize.height())});
-        cb->setShaderResources(bindings.get());
-        cb->draw(4);
+        for (const auto &resource : resources) {
+            cb->setShaderResources(resource->bindings.get());
+            cb->draw(4);
+        }
         cb->endPass();
     }
 
     void releaseResources() override
     {
         pipeline.reset();
-        bindings.reset();
-        texture.reset();
-        maskTexture.reset();
-        uniforms.reset();
+        resources.clear();
         nearest.reset();
         smooth.reset();
-        uploaded.reset();
-        uploadedMask.clear();
         gpuBytes = 0;
     }
 
 private:
+    struct Resources {
+        std::unique_ptr<QRhiBuffer> uniforms;
+        std::unique_ptr<QRhiTexture> texture, maskTexture;
+        std::unique_ptr<QRhiShaderResourceBindings> bindings;
+        std::weak_ptr<const DecodedSlice> uploaded;
+        QByteArray uploadedMask;
+        bool boundLinear = false;
+    };
     void reportError(const QString &message)
     {
         if (lastError != message && failed) {
@@ -313,14 +364,9 @@ private:
         }
     }
     QString lastError;
-    std::unique_ptr<QRhiBuffer> uniforms;
-    std::unique_ptr<QRhiTexture> texture, maskTexture;
+    std::vector<std::unique_ptr<Resources>> resources;
     std::unique_ptr<QRhiSampler> nearest, smooth;
-    std::unique_ptr<QRhiShaderResourceBindings> bindings;
     std::unique_ptr<QRhiGraphicsPipeline> pipeline;
-    std::weak_ptr<const DecodedSlice> uploaded;
-    QByteArray uploadedMask;
-    bool boundLinear = false;
 };
 
 class ViewerOverlay final : public QWidget {
@@ -349,6 +395,8 @@ public:
         Image image;
         std::uint64_t serial = 0;
     };
+    QList<OverlayLayer> layers;
+    QList<QMetaObject::Connection> layerConnections;
     SliceCanvas *canvas = nullptr;
     ViewerOverlay *overlay = nullptr;
     Image image, mask;
@@ -849,6 +897,21 @@ void ImageViewer::setComposite(bool enabled)
 }
 bool ImageViewer::composite() const { return d->composite; }
 
+void ImageViewer::setOverlayLayers(const QList<OverlayLayer> &layers)
+{
+    for (const auto &connection : d->layerConnections) disconnect(connection);
+    d->layerConnections.clear();
+    d->layers = layers;
+    d->canvas->overlayMode = true;
+    for (const auto &layer : layers) if (layer.viewer && layer.viewer != this) {
+        d->layerConnections.append(connect(layer.viewer, &ImageViewer::sliceReady, this, &ImageViewer::updateCanvas));
+        d->layerConnections.append(connect(layer.viewer, &ImageViewer::displaySettingsChanged, this, &ImageViewer::updateCanvas));
+        d->layerConnections.append(connect(layer.viewer, &ImageViewer::loadFailed, this, [this] { updateCanvas(); }));
+        d->layerConnections.append(connect(layer.viewer, &QObject::destroyed, this, [this] { updateCanvas(); }));
+    }
+    updateCanvas();
+}
+
 void ImageViewer::fitToWindow()
 {
     d->fitted = true;
@@ -995,6 +1058,30 @@ void ImageViewer::updateCanvas()
     if (!d->image.empty())
         d->canvas->imageRect = QRectF(imageToWidget({0, 0}), QSizeF(double(d->image.width()) * d->zoom,
             double(d->image.height()) * d->zoom * d->pixelAspect));
+    if (d->canvas->overlayMode) {
+        d->canvas->layers.clear();
+        const auto origin = imageToWidget({0, 0});
+        const QTransform viewport(d->zoom, 0, 0, d->zoom * d->pixelAspect, origin.x(), origin.y());
+        for (const auto &layer : d->layers) {
+            if (!layer.viewer || layer.viewer == this || layer.opacity <= 0) continue;
+            const auto &source = *layer.viewer->d;
+            const auto *canvas = source.canvas;
+            if (!canvas->frame) continue;
+            CanvasLayer rendered;
+            rendered.frame = canvas->frame;
+            rendered.transform = QTransform::fromScale(double(source.image.width()), double(source.image.height()))
+                * layer.transform * viewport;
+            rendered.metadata = source.image.metadata();
+            rendered.minimum = canvas->minimum;
+            rendered.maximum = canvas->maximum;
+            rendered.gamma = canvas->gamma;
+            rendered.opacity = std::clamp(layer.opacity, 0.0, 1.0);
+            rendered.lut = layer.lut == "hot" ? 1 : layer.lut == "viridis" ? 2 : 0;
+            rendered.inverted = canvas->inverted;
+            rendered.linear = canvas->linear;
+            d->canvas->layers.append(std::move(rendered));
+        }
+    }
     d->canvas->update();
     d->overlay->update();
 }

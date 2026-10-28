@@ -3,6 +3,9 @@
 #include "core/image.h"
 #include "core/roi.h"
 #include <QWidget>
+#include <QList>
+#include <QPointer>
+#include <QTransform>
 #include <memory>
 #include <utility>
 
@@ -40,6 +43,14 @@ public:
     bool linearInterpolation() const;
     void setComposite(bool enabled);
     bool composite() const;
+    struct OverlayLayer {
+        QPointer<ImageViewer> viewer;
+        QString lut;
+        double opacity = 1;
+        QTransform transform;
+    };
+    // Layers are drawn from bottom to top in this viewer's image coordinates.
+    void setOverlayLayers(const QList<OverlayLayer> &layers);
     static constexpr double minimumZoom = 1e-6;
     static constexpr double maximumZoom = 256.0;
     void fitToWindow();

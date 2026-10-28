@@ -12,6 +12,8 @@ class QEvent;
 class QLabel;
 class QVBoxLayout;
 namespace imagecxx {
+std::optional<std::array<double, 3>> mapImagePosition(const Image &source, const Image &target,
+                                                   std::array<double, 3> position);
 class DocumentWidget : public ImageWindow {
     Q_OBJECT
 public:

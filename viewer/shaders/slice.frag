@@ -9,6 +9,7 @@ layout(std140, binding = 0) uniform Parameters {
     vec4 color1;
     vec4 color2;
     vec4 color3;
+    vec4 layer; // opacity
 };
 layout(binding = 1) uniform sampler2D sliceTexture;
 layout(binding = 2) uniform sampler2D maskTexture;
@@ -19,8 +20,6 @@ void main()
     if (modes.x > 0.5 && modes.x < 1.5) {
         result = pow(clamp((raw.rgb - vec3(window.x)) * window.y, 0.0, 1.0), vec3(window.z));
         if (window.w > 0.5) result = vec3(1.0) - result;
-        // Preserve native RGBA alpha against the canvas background.
-        result = mix(vec3(250.0, 247.0, 242.0) / 255.0, result, raw.a);
     } else {
         vec4 value = pow(clamp((raw - vec4(window.x)) * window.y, 0.0, 1.0), vec4(window.z));
         if (window.w > 0.5) value = vec4(1.0) - value;
@@ -45,5 +44,5 @@ void main()
     }
     if (modes.w > 0.5 && texture(maskTexture, uv).r > 0.0)
         result = mix(result, vec3(0.95, 0.25, 0.34), 0.36);
-    fragColor = vec4(result, 1.0);
+    fragColor = vec4(result, layer.x * (modes.x > 0.5 && modes.x < 1.5 ? raw.a : 1.0));
 }
