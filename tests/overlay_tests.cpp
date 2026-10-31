@@ -153,11 +153,12 @@ TEST(Overlay, GpuUpdatesLutsOpacityOrderVisibilityAndSourcePixelsLive)
         foreground.setValue(std::array<std::size_t, 2>{x, y}, 20);
         background.setValue(std::array<std::size_t, 2>{x, y}, 100);
     }
+    bool otherReady = false, currentReady = false;
     auto *other = window.addDocument(foreground);
+    QObject::connect(other->viewer, &ImageViewer::sliceReady, &window, [&] { otherReady = true; });
     auto *current = window.addDocument(background);
-    ASSERT_TRUE(waitForOverlay([&] { return other->viewer->decodedCacheBytes() && current->viewer->decodedCacheBytes(); }));
-    // Allow the decoded frames to reach the GUI before setting manual windows.
-    QApplication::processEvents();
+    QObject::connect(current->viewer, &ImageViewer::sliceReady, &window, [&] { currentReady = true; });
+    ASSERT_TRUE(waitForOverlay([&] { return otherReady && currentReady; }));
     other->viewer->setWindow(0, 100); current->viewer->setWindow(0, 100);
     window.commands().execute("view.overlay");
     auto *overlay = window.findChild<OverlayWindow *>();
