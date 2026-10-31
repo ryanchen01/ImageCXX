@@ -2,6 +2,8 @@
 #include "io/image_io.h"
 #include "core/memory.h"
 #include <QLineSeries>
+#include <QQuickWidget>
+#include <QQuickItem>
 #include <QValueAxis>
 #include "ui/theme.h"
 #include <dcmtk/dcmdata/dctk.h>
@@ -3183,6 +3185,123 @@ TEST(Desktop, SelectionPropertiesRequireAnActiveSelection)
     error.clear(); window.commands().execute("selection.properties"); EXPECT_EQ(error, "Select an ROI first.");
     EXPECT_EQ(window.findChild<QDialog *>("selectionPropertiesDialog"), nullptr);
     EXPECT_EQ(doc->rois.front().points, roi.points);
+}
+
+TEST(Desktop, GelCommandsPlotSnapshotMeasureLabelRemoveAndExportBands)
+{
+    MainWindow window;
+    auto image = Image::allocate(PixelType::UInt16, {6, 9, 2, 2, 2});
+    image.metadata().name = "Gel";
+    image.metadata().axes[1].spacing = .25; image.metadata().axes[1].unit = "mm";
+    image.metadata().intensityScale = 2; image.metadata().intensityOffset = 3; image.metadata().intensityUnit = "a.u.";
+    const std::array signal{0, 2, 4, 2, 0, 0, 6, 0, 0};
+    for (std::size_t y = 0; y < 9; ++y) for (std::size_t x = 0; x < 6; ++x)
+        image.setValue(std::array<std::size_t, 5>{x, y, 1, 1, 1}, 100 - signal[y] * (x >= 3 ? 2 : 1));
+    auto *doc = window.addDocument(image); doc->setPosition(0, 0, 1, 1, 1);
+    Roi roi; roi.points = {{0, 0}, {2, 9}}; roi.z = roi.channel = roi.time = 1;
+    doc->setSelection(roi); window.commands().execute("gel.first");
+    roi.points = {{3, 0}, {5, 9}}; doc->setSelection(roi); window.commands().execute("gel.next");
+    ASSERT_EQ(doc->gelLanes.size(), 2); EXPECT_TRUE(doc->rois.empty()); EXPECT_FALSE(doc->modified);
+    window.commands().execute("gel.plot");
+    doc->image.setValue(std::array<std::size_t, 5>{0, 2, 1, 1, 1}, 60000);
+    doc->setPosition(0, 0, 0); doc->setSelection({});
+    ASSERT_TRUE(finishJobs(window));
+    auto *plot = window.findChild<QDialog *>("gelWindow"); ASSERT_NE(plot, nullptr);
+    EXPECT_TRUE(plot->windowTitle().contains("Z2, C2, T2"));
+    auto *series = plot->findChild<QLineSeries *>(); ASSERT_NE(series, nullptr);
+    ASSERT_EQ(series->points().size(), 9); EXPECT_EQ(series->points()[2], QPointF(.5, -195));
+    auto *first = plot->findChild<QSpinBox *>("gelBandStart"); ASSERT_NE(first, nullptr);
+    auto *last = plot->findChild<QSpinBox *>("gelBandEnd"); ASSERT_NE(last, nullptr);
+    auto *measure = plot->findChild<QPushButton *>("gelMeasure"); ASSERT_NE(measure, nullptr);
+    auto *lane = plot->findChild<QComboBox *>("gelLane"); ASSERT_NE(lane, nullptr);
+    auto *table = plot->findChild<QTableView *>("gelResults"); ASSERT_NE(table, nullptr);
+    auto *model = table->model();
+    last->setValue(5); measure->click();
+    QString bandError;
+    QTimer dismissBand;
+    QObject::connect(&dismissBand, &QTimer::timeout, [&] {
+        if (auto *dialog = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+            bandError = dialog->text(); dialog->accept();
+        }
+    });
+    dismissBand.start(1); measure->click(); dismissBand.stop();
+    EXPECT_TRUE(bandError.contains("overlaps")); EXPECT_EQ(model->rowCount(), 1);
+    first->setValue(6); last->setValue(8); measure->click();
+    ASSERT_EQ(model->rowCount(), 2);
+    EXPECT_DOUBLE_EQ(model->index(0, 6).data().toDouble(), 4);
+    EXPECT_DOUBLE_EQ(model->index(1, 6).data().toDouble(), 3);
+    EXPECT_NEAR(model->index(0, 7).data().toDouble(), 400. / 7, 1e-12);
+    lane->setCurrentIndex(1); last->setValue(5); measure->click();
+    ASSERT_EQ(model->rowCount(), 3); EXPECT_DOUBLE_EQ(model->index(2, 6).data().toDouble(), 8);
+    EXPECT_DOUBLE_EQ(model->index(2, 7).data().toDouble(), 100);
+    table->selectRow(1); plot->findChild<QPushButton *>("gelRemove")->click();
+    ASSERT_EQ(model->rowCount(), 2); EXPECT_DOUBLE_EQ(model->index(0, 7).data().toDouble(), 100);
+    window.commands().execute("gel.label");
+    auto *quick = plot->findChild<QQuickWidget *>(); ASSERT_NE(quick, nullptr);
+    auto *root = quick->rootObject(); ASSERT_NE(root, nullptr);
+    EXPECT_EQ(root->property("bandLabels").toList().size(), 1);
+    EXPECT_TRUE(root->property("bandVisible").toBool());
+    EXPECT_EQ(root->property("bandStart").toPointF(), QPointF(0, -203));
+    EXPECT_EQ(root->property("bandEnd").toPointF(), QPointF(1, -203));
+    if (const auto path = qEnvironmentVariable("IMAGECXX_GEL_CAPTURE_PATH"); !path.isEmpty()) {
+        QElapsedTimer timer; timer.start();
+        while (timer.elapsed() < 200) { QCoreApplication::processEvents(); QThread::msleep(2); }
+        EXPECT_TRUE(plot->grab().save(path));
+    }
+    auto *menu = window.findChild<QMenu *>("windowMenu"); ASSERT_NE(menu, nullptr);
+    menu->aboutToShow();
+    bool listed = false; for (auto *action : menu->actions()) if (action->text() == plot->windowTitle()) listed = true;
+    EXPECT_TRUE(listed);
+    QTemporaryDir directory; ASSERT_TRUE(directory.isValid());
+    const auto path = directory.filePath("gel.csv");
+    QTimer picker;
+    QObject::connect(&picker, &QTimer::timeout, &window, [path] {
+        auto *dialog = qobject_cast<QFileDialog *>(QApplication::activeModalWidget()); if (!dialog) return;
+        dialog->setDirectory(QFileInfo(path).absolutePath()); dialog->selectFile(QFileInfo(path).fileName());
+        if (auto *name = dialog->findChild<QLineEdit *>("fileNameEdit")) name->setText(QFileInfo(path).fileName());
+        QMetaObject::invokeMethod(dialog, "accept", Qt::QueuedConnection);
+    });
+    picker.start(1); plot->findChild<QPushButton *>("gelExport")->click(); picker.stop();
+    QFile csv(path); ASSERT_TRUE(csv.open(QIODevice::ReadOnly));
+    const auto contents = csv.readAll(); EXPECT_TRUE(contents.contains("Percent of lane"));
+    EXPECT_TRUE(contents.contains("\"4\",\"100\",\"a.u.·mm\""));
+    EXPECT_EQ(contents.count('\n'), 3);
+}
+
+TEST(Desktop, GelCommandsValidateLaneScopeKeepDocumentsIndependentAndCancel)
+{
+    MainWindow window;
+    auto *doc = window.addDocument(Image::allocate(PixelType::UInt8, {8, 8, 2}));
+    QString error;
+    QTimer dismiss;
+    QObject::connect(&dismiss, &QTimer::timeout, [&] {
+        if (auto *dialog = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) { error = dialog->text(); dialog->accept(); }
+    }); dismiss.start(1);
+    window.commands().execute("gel.first"); EXPECT_TRUE(error.contains("rectangular"));
+    Roi roi; roi.points = {{0, 0}, {2, 8}}; doc->setSelection(roi);
+    window.commands().execute("gel.next"); EXPECT_TRUE(error.contains("first lane"));
+    window.commands().execute("gel.first"); ASSERT_EQ(doc->gelLanes.size(), 1);
+    roi.points = {{1, 0}, {3, 8}}; doc->setSelection(roi);
+    window.commands().execute("gel.next"); EXPECT_TRUE(error.contains("overlaps"));
+    roi.points = {{4, 0}, {7, 8}}; doc->setSelection(roi);
+    window.commands().execute("gel.next"); EXPECT_TRUE(error.contains("same size"));
+    roi.points = {{4, 0}, {6, 8}}; doc->setSelection(roi); doc->setPosition(0, 0, 1);
+    window.commands().execute("gel.next"); EXPECT_TRUE(error.contains("same size"));
+    auto *other = window.addDocument(Image::allocate(PixelType::UInt8, {8, 8}));
+    window.commands().execute("gel.plot"); EXPECT_TRUE(error.contains("first lane"));
+    EXPECT_TRUE(other->gelLanes.empty()); EXPECT_EQ(doc->gelLanes.size(), 1);
+    window.commands().execute("gel.options", {{"orientation", "Horizontal"}, {"darkBands", false}});
+    EXPECT_TRUE(other->gelHorizontal); EXPECT_FALSE(other->gelDarkBands);
+    QTimer::singleShot(0, &window, [] {
+        auto *form = qobject_cast<QDialog *>(QApplication::activeModalWidget()); ASSERT_NE(form, nullptr);
+        auto *direction = form->findChild<QComboBox *>("orientation"); ASSERT_NE(direction, nullptr);
+        auto *dark = form->findChild<QCheckBox *>("darkBands"); ASSERT_NE(dark, nullptr);
+        EXPECT_EQ(direction->currentText(), "Horizontal"); EXPECT_FALSE(dark->isChecked()); form->accept();
+    });
+    window.executeCommand("gel.options");
+    roi.points = {{0, 0}, {8, 2}}; other->setSelection(roi); window.commands().execute("gel.first");
+    window.commands().execute("gel.plot"); window.jobs().cancelAll(); ASSERT_TRUE(finishJobs(window));
+    EXPECT_EQ(window.findChild<QDialog *>("gelWindow"), nullptr);
 }
 
 int main(int argc, char **argv)

@@ -23,6 +23,9 @@ public:
     ~DocumentWidget() override;
     Image image;
     std::vector<Roi> rois;
+    std::vector<Roi> gelLanes;
+    bool gelHorizontal = false;
+    bool gelDarkBands = true;
     std::optional<Roi> selection;
     std::optional<Roi> previousSelection;
     bool selectionCleared = false;

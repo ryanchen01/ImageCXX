@@ -47,8 +47,8 @@ target_link_libraries(imagecxx_viewer PUBLIC imagecxx_core Qt6::Widgets PRIVATE 
 qt_add_shaders(imagecxx_viewer imagecxx_viewer_shaders PREFIX "/imagecxx"
     BASE "viewer/shaders" FILES viewer/shaders/slice.vert viewer/shaders/slice.frag)
 
-add_library(imagecxx_plots STATIC plots/plot_widget.cpp)
-target_link_libraries(imagecxx_plots PUBLIC Qt6::Widgets PRIVATE Qt6::QuickWidgets Qt6::Graphs)
+add_library(imagecxx_plots STATIC plots/plot_widget.cpp plots/gel_window.cpp)
+target_link_libraries(imagecxx_plots PUBLIC Qt6::Widgets PRIVATE Qt6::QuickWidgets Qt6::Graphs imagecxx_processing)
 set_source_files_properties(plots/Plot.qml PROPERTIES QT_RESOURCE_ALIAS Plot.qml)
 qt_add_qml_module(imagecxx_plots URI ImageCXX.Plots VERSION 1.0 NO_PLUGIN
     RESOURCE_PREFIX "/qt/qml" OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/qml/ImageCXX/Plots" QML_FILES plots/Plot.qml)
@@ -109,7 +109,7 @@ endforeach()
 
 if(BUILD_TESTING)
     find_package(GTest CONFIG REQUIRED)
-    add_executable(imagecxx_tests tests/core_tests.cpp tests/processing_tests.cpp tests/io_tests.cpp tests/app_tests.cpp tests/update_tests.cpp)
+    add_executable(imagecxx_tests tests/core_tests.cpp tests/processing_tests.cpp tests/gel_tests.cpp tests/io_tests.cpp tests/app_tests.cpp tests/update_tests.cpp)
     target_link_libraries(imagecxx_tests PRIVATE imagecxx_app TIFF::TIFF DCMTK::dcmdata GTest::gtest_main)
     include(GoogleTest)
     gtest_discover_tests(imagecxx_tests DISCOVERY_MODE PRE_TEST)

@@ -4,6 +4,10 @@ ImageCXX is a C++20 and Qt Widgets image viewer and analysis application with a 
 
 Select an area ROI and choose **Analyze > Plot ROI measurements...** to plot mean intensity across Time or Z. The ROI's XY shape, current channel and other axis stay fixed. Plots use calibrated coordinates when available and frame or slice numbers otherwise. Each plot has an **Export CSV...** button for per-plane statistics and keeps its measured values when the source image changes.
 
+Use **Analyze > Gels** to measure gel or blot bands. Draw a rectangle around a lane, choose **Select first lane** with `1`, then move the rectangle across the image and use **Select next lane** with `2`. Lanes must have the same size, lengthwise alignment, and Z/C/T plane; their numbered outlines appear on the image. **Plot lanes** with `3` measures the registered plane's current pixels in the background and opens an independent snapshot window. Choose a lane, set the one-based start/end samples around a band, and click **Measure band**. The blue line shows the straight baseline between the endpoints. **Label peaks** labels measured bands with their percentage of the total measured area in that lane. You can remove selected bands and export the results to CSV.
+
+**Gel analyzer options...** supports vertical or horizontal lanes and dark or bright bands. Set the direction before selecting lanes; changing it clears that document's lane registrations. Profiles average calibrated intensity across the rectangle's width. Dark-band profiles negate intensity so bands point upward. Areas use trapezoids over positive baseline-subtracted sample values, in intensity units times distance units. Percentages include only the bands you measure. This workflow requires scalar images with finite lane pixels; it does not apply optical-density conversion or automatic band detection.
+
 ## Build
 
 Install these first:

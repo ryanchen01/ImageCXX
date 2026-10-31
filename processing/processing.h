@@ -83,6 +83,13 @@ Histogram histogram(const Image &slice, std::size_t bins = 256,
                     const std::optional<Roi> &roi = {}, bool calibrated = true, std::stop_token stop = {});
 LineProfile lineProfile(const Image &slice, QPointF start, QPointF end,
                         std::size_t samples = 0, bool calibrated = true, std::stop_token stop = {});
+// Mean across the lane width, at pixel centers, in calibrated intensity units.
+// Dark bands are negated so peaks point upward. Distance starts at zero.
+LineProfile gelLaneProfile(const Image &slice, const Roi &lane, bool horizontal = false,
+                           bool darkBands = true, std::stop_token stop = {});
+// Integrate above the straight baseline joining two samples, using trapezoids.
+// Indices are zero-based and inclusive. Negative residuals contribute zero.
+double gelPeakArea(const LineProfile &profile, std::size_t first, std::size_t last);
 Mask createMask(const Image &slice, const Roi &roi, std::stop_token stop = {});
 
 } // namespace imagecxx

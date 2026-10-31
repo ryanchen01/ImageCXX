@@ -130,6 +130,51 @@ GraphsView {
         }
     }
 
+    // Optional gel annotations. Coordinates follow the plot's zoom and pan.
+    property var bandLabels: []
+    property point bandStart: Qt.point(0, 0)
+    property point bandEnd: Qt.point(0, 0)
+    property bool bandVisible: false
+    Item {
+        parent: graph
+        x: graph.plotArea.x
+        y: graph.plotArea.y
+        width: graph.plotArea.width
+        height: graph.plotArea.height
+        clip: true
+        z: 1
+        Rectangle {
+            readonly property real endX: (graph.bandEnd.x - graph.xValues.visualMin)
+                / (graph.xValues.visualMax - graph.xValues.visualMin) * parent.width
+            readonly property real endY: (graph.yValues.visualMax - graph.bandEnd.y)
+                / (graph.yValues.visualMax - graph.yValues.visualMin) * parent.height
+            visible: graph.bandVisible
+            x: (graph.bandStart.x - graph.xValues.visualMin)
+               / (graph.xValues.visualMax - graph.xValues.visualMin) * parent.width
+            y: (graph.yValues.visualMax - graph.bandStart.y)
+               / (graph.yValues.visualMax - graph.yValues.visualMin) * parent.height
+            width: Math.hypot(endX - x, endY - y)
+            height: 2
+            color: "#3874CB"
+            transformOrigin: Item.TopLeft
+            rotation: Math.atan2(endY - y, endX - x) * 180 / Math.PI
+        }
+        Repeater {
+            model: graph.bandLabels
+            Text {
+                required property var modelData
+                objectName: "gelPeakLabel"
+                x: (modelData.x - graph.xValues.visualMin)
+                   / (graph.xValues.visualMax - graph.xValues.visualMin) * parent.width - width / 2
+                y: (graph.yValues.visualMax - modelData.y)
+                   / (graph.yValues.visualMax - graph.yValues.visualMin) * parent.height - height
+                text: modelData.text
+                color: "#3874CB"
+                font.pointSize: 11
+            }
+        }
+    }
+
     CheckBox {
         id: interpolation
         parent: graph

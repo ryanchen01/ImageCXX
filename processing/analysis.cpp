@@ -163,6 +163,72 @@ LineProfile lineProfile(const Image &slice, QPointF start, QPointF end, std::siz
     return result;
 }
 
+LineProfile gelLaneProfile(const Image &slice, const Roi &lane, bool horizontal, bool darkBands,
+                           std::stop_token stop) {
+    checkCancelled(stop);
+    validateSlice(slice);
+    const auto bounds = lane.bounds();
+    if (lane.type != RoiType::Rectangle || lane.points.size() != 2
+        || !std::isfinite(bounds.left()) || !std::isfinite(bounds.top())
+        || !std::isfinite(bounds.right()) || !std::isfinite(bounds.bottom())
+        || bounds.left() < 0 || bounds.top() < 0 || bounds.right() > double(slice.width())
+        || bounds.bottom() > double(slice.height()) || bounds.isEmpty())
+        throw std::invalid_argument("Select a rectangular lane entirely inside the image.");
+    const auto x0 = std::size_t(std::max(0.0, std::ceil(bounds.left() - .5)));
+    const auto y0 = std::size_t(std::max(0.0, std::ceil(bounds.top() - .5)));
+    const auto x1 = std::size_t(std::max(0.0, std::ceil(bounds.right() - .5)));
+    const auto y1 = std::size_t(std::max(0.0, std::ceil(bounds.bottom() - .5)));
+    const auto count = horizontal ? x1 - x0 : y1 - y0;
+    const auto width = horizontal ? y1 - y0 : x1 - x0;
+    if (count < 2 || width == 0) throw std::invalid_argument("A lane needs at least two samples along its length and one across its width.");
+    const auto &axis = slice.metadata().axes[horizontal ? 0 : 1];
+    LineProfile result;
+    result.distanceUnit = axis.unit;
+    result.intensityUnit = slice.metadata().intensityUnit;
+    result.distance.reserve(count); result.intensity.reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        checkCancelled(stop);
+        long double sum = 0;
+        for (std::size_t j = 0; j < width; ++j) {
+            if ((j & 1023) == 0) checkCancelled(stop);
+            const double value = intensity(slice, x0 + (horizontal ? i : j), y0 + (horizontal ? j : i), true);
+            if (!std::isfinite(value)) throw std::invalid_argument("Gel lanes must contain finite intensity values.");
+            sum += static_cast<long double>(value) / width;
+        }
+        const double value = static_cast<double>(darkBands ? -sum : sum);
+        const double distance = double(i) * axis.spacing;
+        if (!std::isfinite(value) || !std::isfinite(distance) || (i && distance <= result.distance.back()))
+            throw std::invalid_argument("Gel profile values or spacing cannot be represented.");
+        result.distance.push_back(distance); result.intensity.push_back(value);
+    }
+    const auto [minimum, maximum] = std::minmax_element(result.intensity.begin(), result.intensity.end());
+    if (!std::isfinite(*maximum - *minimum)) throw std::invalid_argument("Gel intensity range is too wide to plot.");
+    return result;
+}
+
+double gelPeakArea(const LineProfile &profile, std::size_t first, std::size_t last) {
+    if (profile.distance.size() != profile.intensity.size() || first >= last || last >= profile.distance.size())
+        throw std::invalid_argument("Choose a band start before its end.");
+    const auto &x = profile.distance;
+    const auto &y = profile.intensity;
+    const long double span = static_cast<long double>(x[last]) - x[first];
+    if (!(span > 0) || !std::isfinite(span) || !std::isfinite(y[first]) || !std::isfinite(y[last]))
+        throw std::invalid_argument("Band samples must be finite and ordered.");
+    long double area = 0, previous = 0;
+    for (auto i = first + 1; i <= last; ++i) {
+        if (!std::isfinite(x[i - 1]) || !std::isfinite(x[i]) || !std::isfinite(y[i]) || x[i] <= x[i - 1])
+            throw std::invalid_argument("Band samples must be finite and ordered.");
+        const long double fraction = (static_cast<long double>(x[i]) - x[first]) / span;
+        const long double baseline = (1 - fraction) * y[first] + fraction * y[last];
+        const long double residual = std::max(0.0L, static_cast<long double>(y[i]) - baseline);
+        area += (previous / 2 + residual / 2) * (static_cast<long double>(x[i]) - x[i - 1]);
+        previous = residual;
+    }
+    const auto result = static_cast<double>(area);
+    if (!std::isfinite(result)) throw std::invalid_argument("Band area cannot be represented.");
+    return result;
+}
+
 Mask createMask(const Image &slice, const Roi &roi, std::stop_token stop) {
     checkCancelled(stop);
     validateSlice(slice, false);

@@ -455,9 +455,11 @@ void DocumentWidget::setSelection(std::optional<Roi> roi)
 
 void DocumentWidget::refreshRois()
 {
+    auto outlines = rois;
+    outlines.insert(outlines.end(), gelLanes.begin(), gelLanes.end());
     for (int i = 0; i < views_.size(); ++i) {
         const bool xy = viewAxes(i)[2] == 2;
-        views_[i]->setRois(xy ? rois : std::vector<Roi>{});
+        views_[i]->setRois(xy ? outlines : std::vector<Roi>{});
         views_[i]->setSelection(xy ? selection : std::nullopt);
     }
 }

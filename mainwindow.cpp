@@ -6,6 +6,7 @@
 #include "processing/processing.h"
 #include "core/memory.h"
 #include "ui/overlay_window.h"
+#include "plots/gel_window.h"
 #include <dcmtk/dcmdata/dctag.h>
 #include <QActionGroup>
 #include <QAbstractSpinBox>
@@ -590,6 +591,88 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     }});
     commands_.add({"analyze.histogram", tr("Histogram"), "Analyze", QKeySequence("H"), true, {}, [this](const QVariantMap &) { showPlot(false); }});
     commands_.add({"analyze.profile", tr("Line profile"), "Analyze", QKeySequence("K"), true, {}, [this](const QVariantMap &) { showPlot(true); }});
+    for (bool first : {true, false}) {
+        commands_.add({first ? "gel.first" : "gel.next", first ? tr("Select first lane") : tr("Select next lane"),
+            "Gels", QKeySequence(first ? "1" : "2"), true, {}, [this, first](const QVariantMap &) {
+            auto *doc = activeDocument(); if (!doc) return;
+            auto roi = selectedRoi();
+            if (!roi || roi->type != RoiType::Rectangle || roi->points.size() != 2) {
+                showError(tr("Select a rectangular lane first.")); return;
+            }
+            const auto bounds = roi->bounds();
+            if (!std::isfinite(bounds.left()) || !std::isfinite(bounds.top())
+                || !std::isfinite(bounds.right()) || !std::isfinite(bounds.bottom())
+                || bounds.isEmpty() || bounds.left() < 0 || bounds.top() < 0
+                || bounds.right() > double(doc->image.width()) || bounds.bottom() > double(doc->image.height())) {
+                showError(tr("Select a rectangular lane entirely inside the image.")); return;
+            }
+            if (componentCount(doc->image.pixelType()) != 1) {
+                showError(tr("Select a scalar channel before analyzing gels.")); return;
+            }
+            if (!first) {
+                if (doc->gelLanes.empty()) { showError(tr("Select the first lane before adding another.")); return; }
+                const auto &previous = doc->gelLanes.front();
+                const auto original = previous.bounds();
+                if (roi->z != previous.z || roi->channel != previous.channel || roi->time != previous.time
+                    || std::abs(bounds.width() - original.width()) > 1e-6
+                    || std::abs(bounds.height() - original.height()) > 1e-6
+                    || std::abs((doc->gelHorizontal ? bounds.left() : bounds.top())
+                                - (doc->gelHorizontal ? original.left() : original.top())) > 1e-6) {
+                    showError(tr("Use lanes of the same size and lengthwise alignment on the same Z/C/T plane.")); return;
+                }
+                for (const auto &lane : doc->gelLanes) if (lane.bounds().intersects(bounds)) {
+                    showError(tr("The lane overlaps an existing lane.")); return;
+                }
+            }
+            if (first) doc->gelLanes.clear();
+            roi->name = tr("Lane %1").arg(doc->gelLanes.size() + 1);
+            roi->id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            doc->gelLanes.push_back(*roi);
+            doc->refreshRois();
+            statusBar()->showMessage(tr("%1 selected (%2 lanes). Move the rectangle to the next lane and press 2.")
+                .arg(roi->name).arg(doc->gelLanes.size()), 5000);
+        }});
+    }
+    commands_.add({"gel.options", tr("Gel analyzer options..."), "Gels", {}, true,
+        {{"orientation", tr("Lane direction"), ParameterKind::Choice, "Vertical", 0, 0, {"Vertical", "Horizontal"}},
+         {"darkBands", tr("Dark bands on a light background"), ParameterKind::Boolean, true, 0, 0, {}}}, [this](const QVariantMap &p) {
+        auto *doc = activeDocument(); if (!doc) return;
+        const bool horizontal = p.value("orientation").toString() == "Horizontal";
+        if (horizontal != doc->gelHorizontal) { doc->gelLanes.clear(); doc->refreshRois(); }
+        doc->gelHorizontal = horizontal; doc->gelDarkBands = p.value("darkBands").toBool();
+    }});
+    commands_.add({"gel.plot", tr("Plot lanes"), "Gels", QKeySequence("3"), true, {}, [this](const QVariantMap &) {
+        auto *doc = activeDocument(); if (!doc) return;
+        if (doc->gelLanes.empty()) { showError(tr("Select the first lane before plotting.")); return; }
+        const auto lanes = doc->gelLanes;
+        const auto &first = lanes.front();
+        const auto slice = doc->image.slice(first.z, first.channel, first.time);
+        const bool horizontal = doc->gelHorizontal, dark = doc->gelDarkBands;
+        const QString title = tr("%1: gel lanes, Z%2, C%3, T%4").arg(doc->title())
+            .arg(first.z + 1).arg(first.channel + 1).arg(first.time + 1);
+        auto output = std::make_shared<std::vector<LineProfile>>();
+        jobs_.submit(tr("Plotting gel lanes"), [slice, lanes, horizontal, dark, output](auto stop, auto progress) {
+            for (const auto &lane : lanes) {
+                output->push_back(gelLaneProfile(slice, lane, horizontal, dark, stop));
+                progress(double(output->size()) / lanes.size());
+            }
+        }, [this, output, title, dark](auto error) {
+            if (showJobError(error)) return;
+            GelWindow *window = nullptr;
+            try { window = new GelWindow(std::move(*output), title, dark, this); }
+            catch (...) { showJobError(std::current_exception()); return; }
+            window->show(); window->raise(); window->activateWindow();
+        });
+    }});
+    commands_.add({"gel.label", tr("Label peaks"), "Gels", {}, false, {}, [this](const QVariantMap &) {
+        auto *window = qobject_cast<GelWindow *>(QApplication::activeWindow());
+        if (!window) {
+            const auto plots = findChildren<GelWindow *>();
+            if (!plots.empty()) window = plots.back();
+        }
+        if (!window) { showError(tr("Plot gel lanes and measure bands first.")); return; }
+        window->labelPeaks(); window->showNormal(); window->raise(); window->activateWindow();
+    }});
     commands_.add({"analyze.roiPlot", tr("Plot ROI measurements..."), "Analyze", {}, true,
         {{"axis", tr("Axis"), ParameterKind::Choice, "Time", 0, 0, {"Time", "Z"}}}, [this](const QVariantMap &p) {
         const auto *doc = activeDocument(); if (!doc) return;
@@ -1161,6 +1244,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     for (const auto &category : {"File", "Edit", "Process", "Analyze", "View"}) menus.insert(category, menuBar()->addMenu(tr(category)));
     auto *stacksMenu = new QMenu(tr("Stacks"), this); stacksMenu->setObjectName("stacksMenu");
     menus.insert("Stacks", stacksMenu);
+    menus.insert("Gels", menus["Analyze"]->addMenu(tr("Gels")));
     const QMap<QString, QStringList> bindings{
             {"file.open", {"O"}}, {"file.new", {"N"}}, {"file.save", {"S"}},
             {"file.next", {"Shift+O", "Alt+Shift+O"}}, {"file.revert", {"R", "Alt+R"}},
@@ -2110,6 +2194,10 @@ std::optional<QVariantMap> MainWindow::parameterForm(const Command &command, boo
         } else {
             auto *combo = new QComboBox(&dialog); combo->addItems(parameter.choices); combo->setCurrentText(parameter.defaultValue.toString()); editor = combo;
         }
+        if (command.id == "gel.options") if (const auto *doc = activeDocument()) {
+            if (auto *combo = qobject_cast<QComboBox *>(editor)) combo->setCurrentText(doc->gelHorizontal ? "Horizontal" : "Vertical");
+            if (auto *check = qobject_cast<QCheckBox *>(editor)) check->setChecked(doc->gelDarkBands);
+        }
         editor->setObjectName(parameter.id); editors.insert(parameter.id, editor);
         layout->addRow(parameter.label, editor);
     }
@@ -2432,6 +2520,12 @@ void MainWindow::updateWindowMenu()
         const QPointer<QDialog> target(plot);
         connect(action, &QAction::triggered, this, [target] {
             if (target) { target->showNormal(); target->raise(); target->activateWindow(); }
+        });
+    }
+    for (auto *plot : findChildren<GelWindow *>()) {
+        auto *action = windowMenu_->addAction(plot->windowTitle());
+        connect(action, &QAction::triggered, plot, [plot] {
+            plot->showNormal(); plot->raise(); plot->activateWindow();
         });
     }
     windowMenu_->addSeparator();

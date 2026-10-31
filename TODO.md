@@ -11,7 +11,7 @@ Register new commands through the existing `CommandRegistry`, with Qt actions, m
 - [ ] Add the overlay-add command. Use separate project-owned ROI/annotation models and the viewer's overlay layer.
 - [x] Add reslice. Use ITK for resampling and spatial transformations, preserve geometry and numeric types, and declare the operation's scope.
 - [x] Add orthogonal views as separate synchronized windows and keep image ownership in the model.
-- [ ] Add gel-lane analysis commands.
+- [x] Add gel-lane analysis commands. Register aligned rectangular lanes per document, plot calibrated width-averaged profiles from a fixed Z/C/T plane, measure bands against straight baselines, label per-lane percentages and export CSV.
 - [ ] Add the ImageJ control panel command.
 - [ ] Add the remaining ImageJ tool modifiers. Keep text fields and modal dialogs' keyboard handling intact.
 - [x] Add configurable drawing colors. Fill and Draw use the selected color with type-aware scalar intensity mapping. Clear uses zero.
