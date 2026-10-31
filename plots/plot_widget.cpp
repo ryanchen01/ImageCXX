@@ -19,7 +19,7 @@ PlotWidget::PlotWidget(QWidget *parent) : QWidget(parent), quick_(new QQuickWidg
     layout->setContentsMargins(0, 0, 0, 0);
     layout->addWidget(quick_);
     series_->setColor(QColor("#1A1C1F"));
-    series_->setWidth(2);
+    series_->setWidth(1);
     auto *theme = new QGraphsTheme(this);
     theme->setColorScheme(QGraphsTheme::ColorScheme::Light);
     theme->setBackgroundColor(QColor("#FAF7F2"));
