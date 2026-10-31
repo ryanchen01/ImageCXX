@@ -20,6 +20,7 @@ PixelType pixelTypeFromName(const QString &name);
 std::size_t componentCount(PixelType type);
 
 struct Axis {
+    bool operator==(const Axis &) const = default;
     QString name;
     double spacing = 1.0;
     double origin = 0.0;
@@ -27,11 +28,13 @@ struct Axis {
 };
 
 struct Channel {
+    bool operator==(const Channel &) const = default;
     QString name;
     std::uint32_t color = 0xffffffff;
 };
 
 struct ImageMetadata {
+    bool operator==(const ImageMetadata &) const = default;
     QString name;
     QString sourcePath;
     std::vector<Axis> axes;

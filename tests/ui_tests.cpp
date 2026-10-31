@@ -73,6 +73,16 @@ void sendKey(QWidget *target, Qt::Key key, Qt::KeyboardModifiers modifiers = {})
     QCoreApplication::sendEvent(target, &press);
 }
 
+bool waitFor(const std::function<bool()> &condition)
+{
+    QElapsedTimer timer; timer.start();
+    while (!condition() && timer.elapsed() < 5000) {
+        QCoreApplication::processEvents();
+        QThread::msleep(2);
+    }
+    return condition();
+}
+
 bool finishJobs(MainWindow &window)
 {
     QElapsedTimer timer; timer.start();
@@ -213,6 +223,7 @@ TEST(Shortcuts, SavedRoiKeyboardEditsSurviveReselectionAndKeepSavedSlice)
     EXPECT_EQ(doc->rois.front().bounds(), QRectF(3, 2, 4, 5));
     EXPECT_EQ(doc->rois.front().z, 0u);
     window.commands().execute("selection.none");
+    window.showPanel("rois");
     auto *list = window.panel("rois")->findChild<QListWidget *>("roiList");
     ASSERT_NE(list, nullptr);
     list->setCurrentRow(0);
@@ -1058,6 +1069,68 @@ TEST(Desktop, DicomSaveRetainsNestedMetadataAfterDocumentIsMarkedClean)
     EXPECT_EQ(saved.metadata().attributes.value("Experiment"), "Preserve this too");
 }
 
+TEST(Desktop, HiddenPanelsDeferRefreshAndPropertiesOnlyTrackMetadataChanges)
+{
+    MainWindow window;
+    auto *document = window.addDocument(Image::allocate(PixelType::UInt8, {8, 8, 3}));
+    for (const auto *id : {"display", "properties", "rois", "history", "measurements"})
+        EXPECT_EQ(window.panel(id), nullptr);
+    window.showPanel("properties");
+    window.showPanel("rois");
+    window.showPanel("history");
+    auto *properties = window.panel("properties")->findChild<QTreeWidget *>();
+    auto *rois = window.panel("rois")->findChild<QListWidget *>();
+    auto *history = window.panel("history")->findChild<QListWidget *>();
+    ASSERT_NE(properties, nullptr); ASSERT_NE(rois, nullptr); ASSERT_NE(history, nullptr);
+    QPersistentModelIndex propertyIndex(properties->model()->index(0, 0));
+    Roi roi; roi.name = "Patch"; roi.points = {{1, 1}, {3, 3}};
+    document->rois.push_back(roi); document->setSelection(roi);
+    EXPECT_TRUE(propertyIndex.isValid());
+    EXPECT_EQ(rois->count(), 1);
+    for (const auto *id : {"properties", "rois", "history"}) window.panel(id)->hide();
+    QPersistentModelIndex roiIndex(rois->model()->index(0, 0));
+    QPersistentModelIndex historyIndex(history->model()->index(0, 0));
+    document->image.metadata().name = "Renamed";
+    document->rois.push_back(roi);
+    document->history.push(document->image, "Snapshot");
+    document->changed();
+    EXPECT_TRUE(propertyIndex.isValid());
+    EXPECT_TRUE(roiIndex.isValid()); EXPECT_TRUE(historyIndex.isValid());
+    window.showPanel("properties");
+    EXPECT_FALSE(propertyIndex.isValid());
+    EXPECT_EQ(properties->topLevelItem(0)->text(1), "Renamed");
+    window.showPanel("rois");
+    window.showPanel("history");
+    EXPECT_EQ(rois->count(), 2);
+    EXPECT_EQ(history->item(0)->text(), "Snapshot");
+    window.showPanel("display");
+    auto *display = window.panel("display");
+    display->hide();
+    document->viewer->setGamma(2);
+    window.showPanel("display");
+    EXPECT_EQ(window.panel("display"), display);
+    EXPECT_DOUBLE_EQ(display->findChild<QDoubleSpinBox *>("displayGamma")->value(), 2);
+}
+
+TEST(Desktop, ActivatingAnotherDocumentTrimsPreviousViews)
+{
+    MainWindow window;
+    auto *first = window.addDocument(Image::allocate(PixelType::UInt8, {16, 16, 6}));
+    // Keep rendering out of this cache test, including platforms without QRhi.
+    QObject::disconnect(first->viewer, &ImageViewer::sliceReady, first, nullptr);
+    ASSERT_TRUE(waitFor([&] { return first->viewer->decodedCacheBytes() == 2 * 16 * 16 * sizeof(float); }));
+    auto *second = window.addDocument(Image::allocate(PixelType::UInt8, {16, 16, 6}));
+    QObject::disconnect(second->viewer, &ImageViewer::sliceReady, second, nullptr);
+    EXPECT_EQ(first->viewer->decodedCacheBytes(), 0u);
+    ASSERT_TRUE(waitFor([&] { return second->viewer->decodedCacheBytes() > 0; }));
+    QEvent activated(QEvent::WindowActivate);
+    QCoreApplication::sendEvent(first, &activated);
+    EXPECT_EQ(window.activeDocument(), first);
+    EXPECT_EQ(second->viewer->decodedCacheBytes(), 0u);
+    first->viewer->setSlice(3);
+    ASSERT_TRUE(waitFor([&] { return first->viewer->decodedCacheBytes() == 3 * 16 * 16 * sizeof(float); }));
+}
+
 TEST(Desktop, StartsCompactAndOpensIndependentImageAndToolWindows)
 {
     MainWindow window; window.show(); QCoreApplication::processEvents();
@@ -1066,7 +1139,7 @@ TEST(Desktop, StartsCompactAndOpensIndependentImageAndToolWindows)
     EXPECT_EQ(window.findChildren<QTabWidget *>().size(), 0);
     EXPECT_EQ(window.findChildren<QDockWidget *>().size(), 0);
     for (const auto *id : {"display", "properties", "rois", "history", "measurements"}) {
-        ASSERT_NE(window.panel(id), nullptr); EXPECT_FALSE(window.panel(id)->isVisible());
+        EXPECT_EQ(window.panel(id), nullptr);
     }
     auto *first = window.addDocument(Image::allocate(PixelType::UInt8, {16, 16}));
     auto *second = window.addDocument(Image::allocate(PixelType::UInt8, {16, 16}));
@@ -1258,6 +1331,7 @@ TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
     EXPECT_EQ(other->viewMode(), DocumentWidget::ViewMode::Linked);
     EXPECT_EQ(window.documents().size(), 2);
     document->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly)->setValue(28);
+    window.showPanel("display");
     window.panel("display")->findChild<QSpinBox *>("displayChannel")->setValue(2);
     window.panel("display")->findChild<QSpinBox *>("displayTime")->setValue(2);
     EXPECT_EQ(document->viewer->slice(), 28u);
@@ -1385,6 +1459,7 @@ TEST(Desktop, ShowingWindowsKeepsTheirFramesAndTitleBarsOnScreen)
         QCoreApplication::processEvents();
         EXPECT_TRUE(imageWindow->screen()->availableGeometry().contains(imageWindow->frameGeometry()));
     }
+    window.showPanel("display");
     auto *panel = window.panel("display");
     panel->hide(); panel->move(5000, -5000); panel->show();
     QCoreApplication::processEvents();
@@ -1396,6 +1471,7 @@ TEST(Desktop, DisplayChannelTimeSelectorsSynchronizeViewsAndFollowTheActiveDocum
     MainWindow window;
     auto *document = window.addDocument(Image::allocate(PixelType::UInt16, {10, 8, 6, 2, 4}));
     document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    window.showPanel("display");
     auto *channel = window.panel("display")->findChild<QSpinBox *>("displayChannel");
     auto *time = window.panel("display")->findChild<QSpinBox *>("displayTime");
     ASSERT_NE(channel, nullptr); ASSERT_NE(time, nullptr);
@@ -1444,6 +1520,7 @@ TEST(Desktop, InvertLutTracksDisplaySettingsAndActiveDocument)
     EXPECT_TRUE(actions[3]->isChecked());
     first->viewer->setInverted(true);
     EXPECT_TRUE(invert->isChecked());
+    window.showPanel("display");
     auto *display = window.panel("display");
     for (auto *check : display->findChildren<QCheckBox *>())
         EXPECT_NE(check->text(), "Invert");
@@ -1467,8 +1544,11 @@ TEST(Desktop, IntersectionNavigationPreservesDocumentPanels)
     document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
     Roi roi; roi.name = "Saved selection"; roi.points = {{1, 1}, {4, 4}};
     document->rois.push_back(roi); document->setSelection(roi);
+    window.showPanel("properties");
     auto *properties = window.panel("properties")->findChild<QTreeWidget *>();
+    window.showPanel("rois");
     auto *rois = window.panel("rois")->findChild<QListWidget *>();
+    window.showPanel("history");
     auto *history = window.panel("history")->findChild<QListWidget *>();
     ASSERT_NE(properties, nullptr); ASSERT_NE(rois, nullptr); ASSERT_NE(history, nullptr);
     properties->topLevelItem(0)->setExpanded(true);
@@ -1485,6 +1565,7 @@ TEST(Desktop, IntersectionNavigationPreservesDocumentPanels)
     EXPECT_TRUE(properties->topLevelItem(0)->isExpanded());
     ASSERT_NE(rois->currentItem(), nullptr);
     EXPECT_EQ(rois->currentItem()->data(Qt::UserRole), selectedId);
+    window.showPanel("display");
     EXPECT_EQ(window.panel("display")->findChild<QSpinBox *>("displayChannel")->value(), 2);
     EXPECT_EQ(window.panel("display")->findChild<QSpinBox *>("displayTime")->value(), 3);
     for (auto *view : document->views()) { EXPECT_EQ(view->channel(), 1u); EXPECT_EQ(view->time(), 2u); }
@@ -1493,6 +1574,7 @@ TEST(Desktop, IntersectionNavigationPreservesDocumentPanels)
 TEST(Desktop, DisplaySlidersTrackValuesAutoRangeAndActiveDocument)
 {
     MainWindow window;
+    window.showPanel("display");
     auto *panel = window.panel("display");
     auto *minimum = panel->findChild<QDoubleSpinBox *>("displayMinimum");
     auto *maximum = panel->findChild<QDoubleSpinBox *>("displayMaximum");
@@ -1513,6 +1595,7 @@ TEST(Desktop, DisplaySlidersTrackValuesAutoRangeAndActiveDocument)
     QElapsedTimer timer; timer.start();
     while (!ready && timer.elapsed() < 5000) { QCoreApplication::processEvents(); QThread::msleep(2); }
     ASSERT_TRUE(ready);
+    window.showPanel("properties");
     auto *properties = window.panel("properties")->findChild<QTreeWidget *>();
     ASSERT_NE(properties, nullptr);
     auto *property = properties->topLevelItem(0);
@@ -1640,6 +1723,7 @@ TEST(Desktop, ImagePropertiesShowDicomTagNamesWithoutChangingMetadata)
 
     MainWindow window;
     auto *document = window.addDocument(image);
+    window.showPanel("properties");
     auto *properties = window.panel("properties")->findChild<QTreeWidget *>();
     ASSERT_NE(properties, nullptr);
     const QMap<QString, QString> expected{{"(0010,0010) Patient Name", "Example^Patient"},
@@ -1701,6 +1785,7 @@ TEST(Desktop, NiftiPropertiesShowOnlyReadableHeaderFields)
 
         MainWindow window;
         auto *document = window.addDocument(image);
+        window.showPanel("properties");
         auto *properties = window.panel("properties")->findChild<QTreeWidget *>();
         ASSERT_NE(properties, nullptr);
         const QMap<QString, QString> expected{{"Data Type (datatype)", "512"},
@@ -1726,6 +1811,7 @@ TEST(Desktop, PropertySearchMatchesNamesTagsAndValuesAndKeepsSequenceParents)
         QJsonObject{{"DICOM.0008,103e", "Needle^Value"}}, QJsonObject{{"DICOM.0008,103e", "Other value"}}}}};
     MainWindow window;
     auto *document = window.addDocument(Image::allocate(PixelType::UInt16, {4, 4}, metadata));
+    window.showPanel("properties");
     auto *properties = window.panel("properties")->findChild<QTreeWidget *>();
     auto *search = window.panel("properties")->findChild<QLineEdit *>("propertiesSearch");
     ASSERT_NE(properties, nullptr); ASSERT_NE(search, nullptr);
@@ -1794,8 +1880,8 @@ TEST(Desktop, PropertyRowsSupportMultipleSelectionAndContextAndKeyboardCopy)
     metadata.attributes = {{"DICOM.0008,103e", description}, {"DICOM.0010,0010", "Example^Patient"}, {"DICOM.0028,0030", spacing}};
     MainWindow window;
     window.addDocument(Image::allocate(PixelType::UInt16, {4, 4}, metadata));
-    window.panel("properties")->resize(640, 400);
     window.showPanel("properties");
+    window.panel("properties")->resize(640, 400);
     QCoreApplication::processEvents();
     auto *properties = window.panel("properties")->findChild<QTreeWidget *>();
     auto *search = window.panel("properties")->findChild<QLineEdit *>("propertiesSearch");
@@ -1876,8 +1962,11 @@ TEST(Desktop, SliceNavigationKeepsMetadataRoiAndHistoryItems)
     auto *document = window.addDocument(Image::allocate(PixelType::UInt16, {8, 8, 3, 2, 2}));
     Roi roi; roi.name = "Saved patch"; roi.points = {{1, 1}, {3, 4}};
     document->rois.push_back(roi); document->changed();
+    window.showPanel("properties");
     auto *properties = window.panel("properties")->findChild<QTreeWidget *>();
+    window.showPanel("rois");
     auto *rois = window.panel("rois")->findChild<QListWidget *>();
+    window.showPanel("history");
     auto *history = window.panel("history")->findChild<QListWidget *>();
     ASSERT_NE(properties, nullptr); ASSERT_NE(rois, nullptr); ASSERT_NE(history, nullptr);
     properties->topLevelItem(0)->setExpanded(true);
@@ -1896,7 +1985,7 @@ TEST(Desktop, SliceNavigationKeepsMetadataRoiAndHistoryItems)
     ASSERT_NE(position, nullptr);
     EXPECT_EQ(position->text(), "3/3");
     document->setSelection(roi);
-    EXPECT_FALSE(propertyIndex.isValid()); // Document changes still refresh the panels.
+    EXPECT_TRUE(propertyIndex.isValid()); // ROI edits leave unchanged metadata intact.
 }
 
 TEST(Desktop, RoiMeasurementAndPixelEditsUseTheCurrentSliceAfterNavigation)
@@ -2675,6 +2764,7 @@ TEST(Desktop, RoiChangesDoNotPromptOnCloseButPixelChangesStillDo)
         document->viewer->roiEdited(edited);
         EXPECT_EQ(document->rois.front().points, edited.points);
         if (removeRoi) {
+            window.showPanel("rois");
             auto *list = window.panel("rois")->findChild<QListWidget *>("roiList");
             ASSERT_NE(list, nullptr); list->setCurrentRow(0);
             for (auto *button : window.panel("rois")->findChildren<QPushButton *>())
@@ -2723,6 +2813,7 @@ TEST(Desktop, MeasurementsWarnOnWindowCloseAndVisibleAppExitUntilExported)
         auto *document = window.addDocument(std::move(image));
         window.executeCommand("analyze.measure");
         ASSERT_TRUE(finishJobs(window));
+        window.showPanel("measurements");
         auto *table = window.panel("measurements")->findChild<QTableView *>();
         ASSERT_NE(table, nullptr); ASSERT_EQ(table->model()->rowCount(), 1);
         EXPECT_FALSE(document->modified);
@@ -2925,6 +3016,7 @@ TEST(Desktop, RoiRenameSurvivesAnAsynchronousPanelRefresh)
     Roi roi; roi.name = "Before"; roi.points = {{0, 0}, {4, 4}};
     document->rois.push_back(roi); document->changed();
     document->setSelection(roi);
+    window.showPanel("rois");
     auto *list = window.panel("rois")->findChild<QListWidget *>("roiList"); ASSERT_NE(list, nullptr);
     ASSERT_EQ(list->count(), 1);
     QTimer::singleShot(0, &window, [document] {
@@ -2939,6 +3031,7 @@ TEST(Desktop, RoiRenameSurvivesAnAsynchronousPanelRefresh)
     EXPECT_EQ(document->selection->name, "Renamed");
     window.commands().execute("analyze.measure");
     ASSERT_TRUE(finishJobs(window));
+    window.showPanel("measurements");
     auto *table = window.panel("measurements")->findChild<QTableView *>();
     ASSERT_NE(table, nullptr);
     EXPECT_EQ(table->model()->data(table->model()->index(0, 1)).toString(), "Renamed");
@@ -2994,6 +3087,7 @@ TEST(Desktop, SelectionPropertiesApplyAreaGeometryAndAppearanceWithoutEditingPix
         EXPECT_FALSE(doc->modified); EXPECT_FALSE(doc->history.canUndo());
         EXPECT_DOUBLE_EQ(doc->image.sample(3, 4, 2, 1, 1), 43210);
         window.commands().execute("analyze.measure"); ASSERT_TRUE(finishJobs(window));
+        window.showPanel("measurements");
         auto *results = window.panel("measurements")->findChild<QTableView *>(); ASSERT_NE(results, nullptr);
         EXPECT_EQ(results->model()->data(results->model()->index(0, 1)).toString(), "Measured area");
         if (type == RoiType::Rectangle) {

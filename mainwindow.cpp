@@ -182,148 +182,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         QStatusBar QProgressBar { border: 0; background: #E8E2D9; border-radius: 3px; height: 5px; }
         QStatusBar QProgressBar::chunk { background: #1A1C1F; border-radius: 3px; }
     )");
-    auto *displayPanel = new QDialog(this, Qt::Window);
-    displayPanel->setWindowTitle(tr("Display"));
-    displayPanel->setObjectName("displayWindow");
-    displayPanel->resize(380, 360);
-    panels_.insert("display", displayPanel);
-    auto *form = new QFormLayout(displayPanel);
-    form->setContentsMargins(12, 12, 12, 12);
-    form->setSpacing(10);
-    channelIndex_ = new QSpinBox(displayPanel);
-    timeIndex_ = new QSpinBox(displayPanel);
-    channelIndex_->setObjectName("displayChannel");
-    timeIndex_->setObjectName("displayTime");
-    for (auto *spin : {channelIndex_, timeIndex_}) spin->setRange(1, 1);
-    channelIndex_->setAccessibleName(tr("Channel"));
-    timeIndex_->setAccessibleName(tr("Time"));
-    form->addRow(tr("Channel"), channelIndex_);
-    form->addRow(tr("Time"), timeIndex_);
-    minimum_ = new QDoubleSpinBox(displayPanel);
-    maximum_ = new QDoubleSpinBox(displayPanel);
-    for (auto *spin : {minimum_, maximum_}) { spin->setRange(-1e15, 1e15); spin->setDecimals(5); }
-    minimum_->setObjectName("displayMinimum"); maximum_->setObjectName("displayMaximum");
-    gamma_ = new QDoubleSpinBox(displayPanel);
-    gamma_->setObjectName("displayGamma");
-    gamma_->setRange(.05, 20); gamma_->setSingleStep(.1); gamma_->setValue(1);
-    minimumSlider_ = new QSlider(Qt::Horizontal, displayPanel);
-    maximumSlider_ = new QSlider(Qt::Horizontal, displayPanel);
-    gammaSlider_ = new QSlider(Qt::Horizontal, displayPanel);
-    minimumSlider_->setObjectName("displayMinimumSlider");
-    maximumSlider_->setObjectName("displayMaximumSlider");
-    gammaSlider_->setObjectName("displayGammaSlider");
-    for (auto *slider : {minimumSlider_, maximumSlider_, gammaSlider_}) {
-        slider->setRange(0, 1000);
-        slider->setMinimumWidth(120);
-    }
-    maximumSlider_->setValue(1000);
-    gammaSlider_->setValue(500);
-    linear_ = new QCheckBox(tr("Linear interpolation"), displayPanel);
-    composite_ = new QCheckBox(tr("Composite channels"), displayPanel);
-    auto *autoRange = new QPushButton(tr("Auto range"), displayPanel);
-    auto *fitButton = new QPushButton(tr("Fit to window"), displayPanel);
-    const int displayValueWidth = gamma_->sizeHint().width();
-    for (const auto &[label, slider, spin] : {
-             std::tuple{tr("Minimum"), minimumSlider_, minimum_},
-             std::tuple{tr("Maximum"), maximumSlider_, maximum_},
-             std::tuple{tr("Gamma"), gammaSlider_, gamma_}}) {
-        auto *row = new QHBoxLayout;
-        slider->setAccessibleName(label);
-        spin->setFixedWidth(displayValueWidth);
-        row->addWidget(slider, 1);
-        row->addWidget(spin);
-        form->addRow(label, row);
-    }
-    form->addRow(linear_); form->addRow(composite_);
-    form->addRow(autoRange); form->addRow(fitButton);
-
-    auto *propertiesPanel = new QDialog(this, Qt::Window);
-    propertiesPanel->setWindowTitle(tr("Image properties"));
-    propertiesPanel->setObjectName("propertiesWindow");
-    propertiesPanel->resize(420, 420);
-    panels_.insert("properties", propertiesPanel);
-    auto *propertiesLayout = new QVBoxLayout(propertiesPanel);
-    propertiesLayout->setContentsMargins(0, 0, 0, 0);
-    metadataSearch_ = new QLineEdit(propertiesPanel);
-    metadataSearch_->setObjectName("propertiesSearch");
-    metadataSearch_->setPlaceholderText(tr("Search properties..."));
-    metadataSearch_->setAccessibleName(tr("Search properties"));
-    metadataSearch_->setClearButtonEnabled(true);
-    auto *searchLayout = new QHBoxLayout;
-    searchLayout->setContentsMargins(4, 0, 4, 0);
-    searchLayout->addWidget(metadataSearch_);
-    propertiesLayout->addLayout(searchLayout);
-    metadata_ = new QTreeWidget(propertiesPanel);
-    metadata_->setHeaderLabels({tr("Property"), tr("Value")});
-    metadata_->setSelectionMode(QAbstractItemView::ExtendedSelection);
-    metadata_->setSelectionBehavior(QAbstractItemView::SelectRows);
-    metadata_->setContextMenuPolicy(Qt::CustomContextMenu);
-    metadata_->setAlternatingRowColors(true);
-    metadata_->header()->setSectionResizeMode(QHeaderView::ResizeToContents);
-    propertiesLayout->addWidget(metadata_);
-    connect(metadataSearch_, &QLineEdit::textChanged, this, &MainWindow::filterProperties);
-    connect(metadata_, &QWidget::customContextMenuRequested, this, [this](const QPoint &position) {
-        const auto *item = metadata_->itemAt(position);
-        if (!item) return;
-        const bool multiple = item->isSelected() && metadata_->selectedItems().size() > 1;
-        const auto rows = propertyClipboardText(metadata_, -1, item);
-        const auto properties = propertyClipboardText(metadata_, 0, item);
-        const auto values = propertyClipboardText(metadata_, 1, item);
-        QMenu menu(metadata_);
-        auto *copyRows = menu.addAction(multiple ? tr("Copy Rows") : tr("Copy Row"));
-        auto *copyProperties = menu.addAction(multiple ? tr("Copy Properties") : tr("Copy Property"));
-        auto *copyValues = menu.addAction(multiple ? tr("Copy Values") : tr("Copy Value"));
-        const auto *action = menu.exec(metadata_->viewport()->mapToGlobal(position));
-        if (action == copyRows) QApplication::clipboard()->setText(rows);
-        else if (action == copyProperties) QApplication::clipboard()->setText(properties);
-        else if (action == copyValues) QApplication::clipboard()->setText(values);
-    });
-
-    auto *roiPanel = new QDialog(this, Qt::Window);
-    roiPanel->setWindowTitle(tr("ROI manager"));
-    roiPanel->setObjectName("roiManagerWindow");
-    roiPanel->resize(250, 320);
-    panels_.insert("rois", roiPanel);
-    auto *roiLayout = new QVBoxLayout(roiPanel);
-    roiLayout->setContentsMargins(8, 8, 8, 8);
-    rois_ = new QListWidget(roiPanel);
-    rois_->setObjectName("roiList");
-    rois_->setSelectionMode(QAbstractItemView::SingleSelection);
-    rois_->setToolTip(tr("Double-click a name to rename the ROI."));
-    roiLayout->addWidget(rois_);
-    auto *roiButtons = new QHBoxLayout;
-    auto *measureButton = new QPushButton(tr("Measure"), roiPanel);
-    auto *removeRoi = new QPushButton(tr("Remove"), roiPanel);
-    roiButtons->addWidget(measureButton); roiButtons->addWidget(removeRoi);
-    roiLayout->addLayout(roiButtons);
-
-    auto *historyPanel = new QDialog(this, Qt::Window);
-    historyPanel->setWindowTitle(tr("History"));
-    historyPanel->setObjectName("historyWindow");
-    historyPanel->resize(320, 280);
-    panels_.insert("history", historyPanel);
-    auto *historyLayout = new QVBoxLayout(historyPanel);
-    historyLayout->setContentsMargins(0, 0, 0, 0);
-    history_ = new QListWidget(historyPanel);
-    historyLayout->addWidget(history_);
-
-    auto *measurementsPanel = new QDialog(this, Qt::Window);
-    measurementsPanel->setWindowTitle(tr("Measurements"));
-    measurementsPanel->setObjectName("measurementsWindow");
-    measurementsPanel->resize(940, 300);
-    panels_.insert("measurements", measurementsPanel);
-    auto *measurementsLayout = new QVBoxLayout(measurementsPanel);
-    measurementsLayout->setContentsMargins(0, 0, 0, 0);
     results_ = new QStandardItemModel(0, 11, this);
     results_->setHorizontalHeaderLabels({tr("Image"), tr("ROI / slice"), tr("Pixels"), tr("Area"),
         tr("Mean"), tr("Std. dev."), tr("Min"), tr("Max"), tr("Sum"), tr("Area unit"), tr("Intensity unit")});
-    resultsView_ = new QTableView(measurementsPanel);
-    resultsView_->setObjectName("measurementTable");
-    resultsView_->setModel(results_);
-    resultsView_->setAlternatingRowColors(true);
-    resultsView_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    resultsView_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-    measurementsLayout->addWidget(resultsView_);
 
     pixelStatus_ = new QLabel(tr("Ready"), this);
     jobStatus_ = new QLabel(this);
@@ -723,6 +584,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                 const QList<QVariant> values{m.imageName, location, QVariant::fromValue<qulonglong>(m.count), m.area, m.mean,
                     m.standardDeviation, m.minimum, m.maximum, m.sum, m.areaUnit, m.intensityUnit};
                 for (const auto &value : values) { auto *item = new QStandardItem; item->setData(value, Qt::DisplayRole); row.append(item); }
+                ensurePanel("measurements");
                 results_->appendRow(row); showPanel("measurements");
             });
     }});
@@ -1470,65 +1332,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         if (auto *doc = activeDocument()) doc->viewer->setLut(action->data().toString());
         updateDisplayControls();
     });
-    connect(measureButton, &QPushButton::clicked, this, [this] { executeCommand("analyze.measure"); });
-    connect(autoRange, &QPushButton::clicked, this, [this] { if (auto *doc = activeDocument()) doc->viewer->autoWindow(); });
-    connect(fitButton, &QPushButton::clicked, this, [this] { if (auto *doc = activeDocument()) doc->viewer->fitToWindow(); });
-    const auto applyChannelTime = [this] {
-        if (loadingPanels_) return;
-        if (auto *doc = activeDocument())
-            doc->viewer->setSlice(doc->viewer->slice(), channelIndex_->value() - 1, timeIndex_->value() - 1);
-    };
-    connect(channelIndex_, &QSpinBox::valueChanged, this, applyChannelTime);
-    connect(timeIndex_, &QSpinBox::valueChanged, this, applyChannelTime);
-    const auto applyDisplay = [this] {
-        if (loadingPanels_) return;
-        if (auto *doc = activeDocument()) {
-            QScopedValueRollback applyingDisplay(loadingPanels_, true);
-            if (maximum_->value() > minimum_->value()) doc->viewer->setWindow(minimum_->value(), maximum_->value());
-            doc->viewer->setGamma(gamma_->value());
-            doc->viewer->setLinearInterpolation(linear_->isChecked());
-            doc->viewer->setComposite(composite_->isChecked());
-        }
-        updateDisplayControls();
-    };
-    for (auto *spin : {minimum_, maximum_, gamma_}) connect(spin, &QDoubleSpinBox::valueChanged, this, applyDisplay);
-    for (const auto &[slider, spin] : {std::pair{minimumSlider_, minimum_}, std::pair{maximumSlider_, maximum_}}) {
-        connect(slider, &QSlider::valueChanged, this, [this, spin](int value) {
-            if (loadingPanels_) return;
-            const double before = spin->value();
-            spin->setValue(std::lerp(sliderMinimum_, sliderMaximum_, value / 1000.));
-            if (spin->value() == before) updateDisplayControls();
-        });
-    }
-    connect(gammaSlider_, &QSlider::valueChanged, this, [this](int value) {
-        if (loadingPanels_) return;
-        gamma_->setValue(std::pow(20., (value - 500) / 500.));
-    });
-    for (auto *check : {linear_, composite_}) connect(check, &QCheckBox::toggled, this, applyDisplay);
-    connect(removeRoi, &QPushButton::clicked, this, [this] {
-        auto *doc = activeDocument(); const int index = rois_->currentRow(); if (!doc || index < 0) return;
-        doc->rois.erase(doc->rois.begin() + index);
-        doc->refreshRois(); updatePanels();
-    });
-    connect(rois_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) {
-        const QPointer<DocumentWidget> target = activeDocument();
-        const int row = rois_->row(item);
-        if (!target || row < 0 || row >= int(target->rois.size())) return;
-        const QString id = target->rois[std::size_t(row)].id;
-        const QString before = target->rois[std::size_t(row)].name;
-        bool ok;
-        const auto name = QInputDialog::getText(this, tr("Rename ROI"), tr("Name"), QLineEdit::Normal, before, &ok);
-        if (!ok || name.isEmpty() || !target) return;
-        const auto roi = std::find_if(target->rois.begin(), target->rois.end(), [&](const Roi &value) { return value.id == id; });
-        if (roi == target->rois.end()) return;
-        auto renamed = *roi;
-        renamed.name = name;
-        target->editRoi(std::move(renamed));
-    });
-    connect(rois_, &QListWidget::currentRowChanged, this, [this](int row) {
-        auto *doc = activeDocument(); if (!doc || row < 0 || row >= int(doc->rois.size())) return;
-        const auto roi = doc->rois[row]; doc->viewer->setSlice(roi.z, roi.channel, roi.time); doc->setSelection(roi);
-    });
     QSettings settings;
     recentFiles_ = settings.value("recentFiles").toStringList();
     settings.beginGroup("windowWorkflow/v1");
@@ -1569,13 +1372,225 @@ QWidget *MainWindow::panel(const QString &id) const
     return panels_.value(id, nullptr);
 }
 
+void MainWindow::ensurePanel(const QString &id)
+{
+    if (panel(id)) return;
+    if (id == "display") {
+        auto *displayPanel = new QDialog(this, Qt::Window);
+        displayPanel->setWindowTitle(tr("Display"));
+        displayPanel->setObjectName("displayWindow");
+        displayPanel->resize(380, 360);
+        panels_.insert("display", displayPanel);
+        auto *form = new QFormLayout(displayPanel);
+        form->setContentsMargins(12, 12, 12, 12);
+        form->setSpacing(10);
+        channelIndex_ = new QSpinBox(displayPanel);
+        timeIndex_ = new QSpinBox(displayPanel);
+        channelIndex_->setObjectName("displayChannel");
+        timeIndex_->setObjectName("displayTime");
+        for (auto *spin : {channelIndex_, timeIndex_}) spin->setRange(1, 1);
+        channelIndex_->setAccessibleName(tr("Channel"));
+        timeIndex_->setAccessibleName(tr("Time"));
+        form->addRow(tr("Channel"), channelIndex_);
+        form->addRow(tr("Time"), timeIndex_);
+        minimum_ = new QDoubleSpinBox(displayPanel);
+        maximum_ = new QDoubleSpinBox(displayPanel);
+        for (auto *spin : {minimum_, maximum_}) { spin->setRange(-1e15, 1e15); spin->setDecimals(5); }
+        minimum_->setObjectName("displayMinimum"); maximum_->setObjectName("displayMaximum");
+        gamma_ = new QDoubleSpinBox(displayPanel);
+        gamma_->setObjectName("displayGamma");
+        gamma_->setRange(.05, 20); gamma_->setSingleStep(.1); gamma_->setValue(1);
+        minimumSlider_ = new QSlider(Qt::Horizontal, displayPanel);
+        maximumSlider_ = new QSlider(Qt::Horizontal, displayPanel);
+        gammaSlider_ = new QSlider(Qt::Horizontal, displayPanel);
+        minimumSlider_->setObjectName("displayMinimumSlider");
+        maximumSlider_->setObjectName("displayMaximumSlider");
+        gammaSlider_->setObjectName("displayGammaSlider");
+        for (auto *slider : {minimumSlider_, maximumSlider_, gammaSlider_}) {
+            slider->setRange(0, 1000);
+            slider->setMinimumWidth(120);
+        }
+        maximumSlider_->setValue(1000);
+        gammaSlider_->setValue(500);
+        linear_ = new QCheckBox(tr("Linear interpolation"), displayPanel);
+        composite_ = new QCheckBox(tr("Composite channels"), displayPanel);
+        auto *autoRange = new QPushButton(tr("Auto range"), displayPanel);
+        auto *fitButton = new QPushButton(tr("Fit to window"), displayPanel);
+        const int displayValueWidth = gamma_->sizeHint().width();
+        for (const auto &[label, slider, spin] : {
+                 std::tuple{tr("Minimum"), minimumSlider_, minimum_},
+                 std::tuple{tr("Maximum"), maximumSlider_, maximum_},
+                 std::tuple{tr("Gamma"), gammaSlider_, gamma_}}) {
+            auto *row = new QHBoxLayout;
+            slider->setAccessibleName(label);
+            spin->setFixedWidth(displayValueWidth);
+            row->addWidget(slider, 1);
+            row->addWidget(spin);
+            form->addRow(label, row);
+        }
+        form->addRow(linear_); form->addRow(composite_);
+        form->addRow(autoRange); form->addRow(fitButton);
+        connect(autoRange, &QPushButton::clicked, this, [this] { if (auto *doc = activeDocument()) doc->viewer->autoWindow(); });
+        connect(fitButton, &QPushButton::clicked, this, [this] { if (auto *doc = activeDocument()) doc->viewer->fitToWindow(); });
+        const auto applyChannelTime = [this] {
+            if (loadingPanels_) return;
+            if (auto *doc = activeDocument())
+                doc->viewer->setSlice(doc->viewer->slice(), channelIndex_->value() - 1, timeIndex_->value() - 1);
+        };
+        connect(channelIndex_, &QSpinBox::valueChanged, this, applyChannelTime);
+        connect(timeIndex_, &QSpinBox::valueChanged, this, applyChannelTime);
+        const auto applyDisplay = [this] {
+            if (loadingPanels_) return;
+            if (auto *doc = activeDocument()) {
+                QScopedValueRollback applyingDisplay(loadingPanels_, true);
+                if (maximum_->value() > minimum_->value()) doc->viewer->setWindow(minimum_->value(), maximum_->value());
+                doc->viewer->setGamma(gamma_->value());
+                doc->viewer->setLinearInterpolation(linear_->isChecked());
+                doc->viewer->setComposite(composite_->isChecked());
+            }
+            updateDisplayControls();
+        };
+        for (auto *spin : {minimum_, maximum_, gamma_}) connect(spin, &QDoubleSpinBox::valueChanged, this, applyDisplay);
+        for (const auto &[slider, spin] : {std::pair{minimumSlider_, minimum_}, std::pair{maximumSlider_, maximum_}}) {
+            connect(slider, &QSlider::valueChanged, this, [this, spin](int value) {
+                if (loadingPanels_) return;
+                const double before = spin->value();
+                spin->setValue(std::lerp(sliderMinimum_, sliderMaximum_, value / 1000.));
+                if (spin->value() == before) updateDisplayControls();
+            });
+        }
+        connect(gammaSlider_, &QSlider::valueChanged, this, [this](int value) {
+            if (loadingPanels_) return;
+            gamma_->setValue(std::pow(20., (value - 500) / 500.));
+        });
+        for (auto *check : {linear_, composite_}) connect(check, &QCheckBox::toggled, this, applyDisplay);
+    }
+    else if (id == "properties") {
+        auto *propertiesPanel = new QDialog(this, Qt::Window);
+        propertiesPanel->setWindowTitle(tr("Image properties"));
+        propertiesPanel->setObjectName("propertiesWindow");
+        propertiesPanel->resize(420, 420);
+        panels_.insert("properties", propertiesPanel);
+        auto *propertiesLayout = new QVBoxLayout(propertiesPanel);
+        propertiesLayout->setContentsMargins(0, 0, 0, 0);
+        metadataSearch_ = new QLineEdit(propertiesPanel);
+        metadataSearch_->setObjectName("propertiesSearch");
+        metadataSearch_->setPlaceholderText(tr("Search properties..."));
+        metadataSearch_->setAccessibleName(tr("Search properties"));
+        metadataSearch_->setClearButtonEnabled(true);
+        auto *searchLayout = new QHBoxLayout;
+        searchLayout->setContentsMargins(4, 0, 4, 0);
+        searchLayout->addWidget(metadataSearch_);
+        propertiesLayout->addLayout(searchLayout);
+        metadata_ = new QTreeWidget(propertiesPanel);
+        metadata_->setHeaderLabels({tr("Property"), tr("Value")});
+        metadata_->setSelectionMode(QAbstractItemView::ExtendedSelection);
+        metadata_->setSelectionBehavior(QAbstractItemView::SelectRows);
+        metadata_->setContextMenuPolicy(Qt::CustomContextMenu);
+        metadata_->setAlternatingRowColors(true);
+        metadata_->header()->setSectionResizeMode(QHeaderView::ResizeToContents);
+        propertiesLayout->addWidget(metadata_);
+        connect(metadataSearch_, &QLineEdit::textChanged, this, &MainWindow::filterProperties);
+        connect(metadata_, &QWidget::customContextMenuRequested, this, [this](const QPoint &position) {
+            const auto *item = metadata_->itemAt(position);
+            if (!item) return;
+            const bool multiple = item->isSelected() && metadata_->selectedItems().size() > 1;
+            const auto rows = propertyClipboardText(metadata_, -1, item);
+            const auto properties = propertyClipboardText(metadata_, 0, item);
+            const auto values = propertyClipboardText(metadata_, 1, item);
+            QMenu menu(metadata_);
+            auto *copyRows = menu.addAction(multiple ? tr("Copy Rows") : tr("Copy Row"));
+            auto *copyProperties = menu.addAction(multiple ? tr("Copy Properties") : tr("Copy Property"));
+            auto *copyValues = menu.addAction(multiple ? tr("Copy Values") : tr("Copy Value"));
+            const auto *action = menu.exec(metadata_->viewport()->mapToGlobal(position));
+            if (action == copyRows) QApplication::clipboard()->setText(rows);
+            else if (action == copyProperties) QApplication::clipboard()->setText(properties);
+            else if (action == copyValues) QApplication::clipboard()->setText(values);
+        });
+    }
+    else if (id == "rois") {
+        auto *roiPanel = new QDialog(this, Qt::Window);
+        roiPanel->setWindowTitle(tr("ROI manager"));
+        roiPanel->setObjectName("roiManagerWindow");
+        roiPanel->resize(250, 320);
+        panels_.insert("rois", roiPanel);
+        auto *roiLayout = new QVBoxLayout(roiPanel);
+        roiLayout->setContentsMargins(8, 8, 8, 8);
+        rois_ = new QListWidget(roiPanel);
+        rois_->setObjectName("roiList");
+        rois_->setSelectionMode(QAbstractItemView::SingleSelection);
+        rois_->setToolTip(tr("Double-click a name to rename the ROI."));
+        roiLayout->addWidget(rois_);
+        auto *roiButtons = new QHBoxLayout;
+        auto *measureButton = new QPushButton(tr("Measure"), roiPanel);
+        auto *removeRoi = new QPushButton(tr("Remove"), roiPanel);
+        roiButtons->addWidget(measureButton); roiButtons->addWidget(removeRoi);
+        roiLayout->addLayout(roiButtons);
+        connect(measureButton, &QPushButton::clicked, this, [this] { executeCommand("analyze.measure"); });
+        connect(removeRoi, &QPushButton::clicked, this, [this] {
+            auto *doc = activeDocument(); const int index = rois_->currentRow(); if (!doc || index < 0) return;
+            doc->rois.erase(doc->rois.begin() + index);
+            doc->refreshRois(); updatePanels();
+        });
+        connect(rois_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) {
+            const QPointer<DocumentWidget> target = activeDocument();
+            const int row = rois_->row(item);
+            if (!target || row < 0 || row >= int(target->rois.size())) return;
+            const QString id = target->rois[std::size_t(row)].id;
+            const QString before = target->rois[std::size_t(row)].name;
+            bool ok;
+            const auto name = QInputDialog::getText(this, tr("Rename ROI"), tr("Name"), QLineEdit::Normal, before, &ok);
+            if (!ok || name.isEmpty() || !target) return;
+            const auto roi = std::find_if(target->rois.begin(), target->rois.end(), [&](const Roi &value) { return value.id == id; });
+            if (roi == target->rois.end()) return;
+            auto renamed = *roi;
+            renamed.name = name;
+            target->editRoi(std::move(renamed));
+        });
+        connect(rois_, &QListWidget::currentRowChanged, this, [this](int row) {
+            auto *doc = activeDocument(); if (!doc || row < 0 || row >= int(doc->rois.size())) return;
+            const auto roi = doc->rois[row]; doc->viewer->setSlice(roi.z, roi.channel, roi.time); doc->setSelection(roi);
+        });
+    }
+    else if (id == "history") {
+        auto *historyPanel = new QDialog(this, Qt::Window);
+        historyPanel->setWindowTitle(tr("History"));
+        historyPanel->setObjectName("historyWindow");
+        historyPanel->resize(320, 280);
+        panels_.insert("history", historyPanel);
+        auto *historyLayout = new QVBoxLayout(historyPanel);
+        historyLayout->setContentsMargins(0, 0, 0, 0);
+        history_ = new QListWidget(historyPanel);
+        historyLayout->addWidget(history_);
+    }
+    else if (id == "measurements") {
+        auto *measurementsPanel = new QDialog(this, Qt::Window);
+        measurementsPanel->setWindowTitle(tr("Measurements"));
+        measurementsPanel->setObjectName("measurementsWindow");
+        measurementsPanel->resize(940, 300);
+        panels_.insert("measurements", measurementsPanel);
+        auto *measurementsLayout = new QVBoxLayout(measurementsPanel);
+        measurementsLayout->setContentsMargins(0, 0, 0, 0);
+        resultsView_ = new QTableView(measurementsPanel);
+        resultsView_->setObjectName("measurementTable");
+        resultsView_->setModel(results_);
+        resultsView_->setAlternatingRowColors(true);
+        resultsView_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        resultsView_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+        measurementsLayout->addWidget(resultsView_);
+    }
+    if (auto *window = panel(id); window && panelGeometries_.contains(id))
+        window->restoreGeometry(panelGeometries_.value(id));
+}
+
 void MainWindow::showPanel(const QString &id)
 {
+    ensurePanel(id);
     auto *window = panel(id);
     if (!window && (id == "histogram" || id == "profile")) window = plotWindow(id == "profile");
     if (!window) return;
-    updatePanels();
     window->showNormal();
+    updatePanels();
     window->raise();
     window->activateWindow();
 }
@@ -1995,7 +2010,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
     auto *widget = qobject_cast<QWidget *>(watched);
     if (!widget) return false;
     auto *key = static_cast<QKeyEvent *>(event);
-    if ((widget == metadata_ || metadata_->isAncestorOf(widget)) && key->matches(QKeySequence::Copy)) {
+    if (metadata_ && (widget == metadata_ || metadata_->isAncestorOf(widget)) && key->matches(QKeySequence::Copy)) {
         if (event->type() == QEvent::KeyPress && !metadata_->selectedItems().isEmpty())
             QApplication::clipboard()->setText(propertyClipboardText(metadata_, -1));
         key->accept(); return true;
@@ -2116,7 +2131,9 @@ std::optional<QVariantMap> MainWindow::parameterForm(const Command &command, boo
 
 std::optional<Roi> MainWindow::selectedRoi() const
 {
-    const auto *document = activeDocument(); const auto index = rois_->currentRow();
+    const auto *document = activeDocument();
+    const auto index = rois_ && panel("rois")->isVisible() ? rois_->currentRow()
+        : document && !document->rois.empty() ? int(document->rois.size() - 1) : -1;
     if (!document || document->selectionCleared) return {};
     auto roi = document->selection;
     if (!roi) {
@@ -2164,10 +2181,11 @@ void MainWindow::updateDisplayControls()
     if (loadingPanels_) return;
     QScopedValueRollback loading(loadingPanels_, true);
     const auto *doc = activeDocument();
-    for (auto *widget : std::initializer_list<QWidget *>{minimum_, maximum_, gamma_, minimumSlider_, maximumSlider_, gammaSlider_, linear_, composite_, channelIndex_, timeIndex_}) widget->setEnabled(doc != nullptr);
     lutMenu_->menuAction()->setEnabled(doc != nullptr);
     for (auto *action : lutMenu_->actions())
         action->setChecked(doc && (action == invertLut_ ? doc->viewer->isInverted() : action->data().toString() == doc->viewer->lut()));
+    if (!minimum_ || !panel("display")->isVisible()) return;
+    for (auto *widget : std::initializer_list<QWidget *>{minimum_, maximum_, gamma_, minimumSlider_, maximumSlider_, gammaSlider_, linear_, composite_, channelIndex_, timeIndex_}) widget->setEnabled(doc != nullptr);
     if (doc) {
         for (const auto &[spin, count, value] : {
                  std::tuple{channelIndex_, doc->image.channels(), doc->viewer->channel()},
@@ -2237,95 +2255,120 @@ void MainWindow::updatePanels()
     }
     findChild<QAction *>("view.orthogonal")->setEnabled(doc && doc->image.depth() > 1);
     findChild<QAction *>("view.linked")->setEnabled(doc && documents().size() > 1);
-    metadata_->clear(); history_->clear();
-    const QString selectedId = rois_->currentItem() ? rois_->currentItem()->data(Qt::UserRole).toString() : QString{};
-    QSignalBlocker roiSignals(rois_); rois_->clear();
+    for (auto *document : documents())
+        for (auto *view : document->views()) view->setCacheActive(document == doc);
+    const bool showProperties = metadata_ && panel("properties")->isVisible();
+    const bool showRois = rois_ && panel("rois")->isVisible();
+    const bool showHistory = history_ && panel("history")->isVisible();
+    const QString selectedId = rois_ && rois_->currentItem() ? rois_->currentItem()->data(Qt::UserRole).toString() : QString{};
+    QSignalBlocker roiSignals(rois_);
+    if (showRois) rois_->clear();
+    if (showHistory) history_->clear();
+    if (!doc && showProperties) {
+        metadata_->clear();
+        propertiesMetadata_.reset();
+        propertiesDocument_.clear();
+    }
     if (doc) {
         doc->setWindowTitle(doc->title());
-        const auto &metadata = doc->image.metadata();
-        const bool dicom = !metadata.dicomSequences.isEmpty() || std::any_of(metadata.attributes.keyBegin(), metadata.attributes.keyEnd(),
-            [](const QString &key) { return key.startsWith("DICOM."); });
-        const bool nifti = metadata.attributes.contains("nifti_type");
-        if (!dicom && !nifti) {
-            QStringList shape; for (const auto size : doc->image.shape()) shape << QString::number(size);
-            const QList<QPair<QString, QString>> properties{{tr("Name"), metadata.name}, {tr("Pixel type"), pixelTypeName(doc->image.pixelType())},
-                {tr("Shape X,Y,Z,C,T"), shape.join(" × ")}, {tr("Storage"), doc->image.storageKind()},
-                {tr("Pixel data"), tr("%1 MiB").arg(double(doc->image.byteCount()) / (1024 * 1024), 0, 'f', 2)},
-                {tr("Source"), metadata.sourcePath}, {tr("Intensity scale"), QString::number(metadata.intensityScale, 'g', 12)},
-                {tr("Intensity offset"), QString::number(metadata.intensityOffset, 'g', 12)}, {tr("Intensity unit"), metadata.intensityUnit}};
-            for (const auto &property : properties) new QTreeWidgetItem(metadata_, {property.first, property.second});
-            for (const auto &axis : metadata.axes) {
-                auto *item = new QTreeWidgetItem(metadata_, {tr("Axis %1").arg(axis.name), tr("%1 %2").arg(axis.spacing, 0, 'g', 8).arg(axis.unit)});
-                new QTreeWidgetItem(item, {tr("Origin"), QString::number(axis.origin, 'g', 12)});
-            }
-            QStringList direction; for (const auto value : metadata.direction) direction << QString::number(value, 'g', 6);
-            if (!direction.empty()) new QTreeWidgetItem(metadata_, {tr("Direction"), direction.join(", ")});
-            for (const auto &channel : metadata.channels) new QTreeWidgetItem(metadata_, {tr("Channel"), channel.name});
-        }
-        QJsonObject attributes = metadata.dicomSequences;
-        for (auto it = metadata.attributes.begin(); it != metadata.attributes.end(); ++it) attributes.insert(it.key(), it.value());
-        const auto addAttributes = [dicom, nifti](auto &&self, QTreeWidgetItem *parent, const QJsonObject &attributes) -> void {
-            for (auto it = attributes.begin(); it != attributes.end(); ++it) {
-                QString label = it.key();
-                if (nifti) {
-                    static const QMap<QString, QString> fieldNames{
-                        {"dim_info", tr("MRI Dimension Encoding")}, {"dim", tr("Dimensions")},
-                        {"intent_p1", tr("Intent Parameter 1")}, {"intent_p2", tr("Intent Parameter 2")},
-                        {"intent_p3", tr("Intent Parameter 3")}, {"intent_code", tr("Intent Code")},
-                        {"datatype", tr("Data Type")}, {"bitpix", tr("Bits per Voxel")},
-                        {"slice_start", tr("First Slice Index")}, {"pixdim", tr("Grid Spacing")},
-                        {"vox_offset", tr("Pixel Data Offset")}, {"scl_slope", tr("Intensity Scale")},
-                        {"scl_inter", tr("Intensity Offset")}, {"slice_end", tr("Last Slice Index")},
-                        {"slice_code", tr("Slice Timing Order")}, {"xyzt_units", tr("Spatial and Time Units")},
-                        {"cal_max", tr("Display Maximum")}, {"cal_min", tr("Display Minimum")},
-                        {"slice_duration", tr("Slice Duration")}, {"toffset", tr("Time Offset")},
-                        {"descrip", tr("Description")}, {"aux_file", tr("Auxiliary File")},
-                        {"qform_code", tr("Q-form Code")}, {"sform_code", tr("S-form Code")},
-                        {"quatern_b", tr("Quaternion B")}, {"quatern_c", tr("Quaternion C")},
-                        {"quatern_d", tr("Quaternion D")}, {"qoffset_x", tr("Q-form X Offset")},
-                        {"qoffset_y", tr("Q-form Y Offset")}, {"qoffset_z", tr("Q-form Z Offset")},
-                        {"srow_x", tr("Affine Transform X Row")}, {"srow_y", tr("Affine Transform Y Row")},
-                        {"srow_z", tr("Affine Transform Z Row")}, {"intent_name", tr("Intent Name")}};
-                    const auto name = fieldNames.value(it.key().section('[', 0, 0));
-                    if (name.isEmpty()) continue;
-                    label = QStringLiteral("%1 (%2)").arg(name, it.key());
-                    new QTreeWidgetItem(parent, {label, it.value().toString()});
-                    continue;
+        if (showProperties && (propertiesDocument_ != doc || !propertiesMetadata_
+            || *propertiesMetadata_ != doc->image.metadata() || propertiesShape_ != doc->image.shape()
+            || propertiesType_ != doc->image.pixelType() || propertiesStorage_ != doc->image.storageKind())) {
+            metadata_->clear();
+            propertiesDocument_ = doc;
+            propertiesMetadata_ = doc->image.metadata();
+            propertiesShape_ = doc->image.shape();
+            propertiesType_ = doc->image.pixelType();
+            propertiesStorage_ = doc->image.storageKind();
+            const auto &metadata = doc->image.metadata();
+            const bool dicom = !metadata.dicomSequences.isEmpty() || std::any_of(metadata.attributes.keyBegin(), metadata.attributes.keyEnd(),
+                [](const QString &key) { return key.startsWith("DICOM."); });
+            const bool nifti = metadata.attributes.contains("nifti_type");
+            if (!dicom && !nifti) {
+                QStringList shape; for (const auto size : doc->image.shape()) shape << QString::number(size);
+                const QList<QPair<QString, QString>> properties{{tr("Name"), metadata.name}, {tr("Pixel type"), pixelTypeName(doc->image.pixelType())},
+                    {tr("Shape X,Y,Z,C,T"), shape.join(" × ")}, {tr("Storage"), doc->image.storageKind()},
+                    {tr("Pixel data"), tr("%1 MiB").arg(double(doc->image.byteCount()) / (1024 * 1024), 0, 'f', 2)},
+                    {tr("Source"), metadata.sourcePath}, {tr("Intensity scale"), QString::number(metadata.intensityScale, 'g', 12)},
+                    {tr("Intensity offset"), QString::number(metadata.intensityOffset, 'g', 12)}, {tr("Intensity unit"), metadata.intensityUnit}};
+                for (const auto &property : properties) new QTreeWidgetItem(metadata_, {property.first, property.second});
+                for (const auto &axis : metadata.axes) {
+                    auto *item = new QTreeWidgetItem(metadata_, {tr("Axis %1").arg(axis.name), tr("%1 %2").arg(axis.spacing, 0, 'g', 8).arg(axis.unit)});
+                    new QTreeWidgetItem(item, {tr("Origin"), QString::number(axis.origin, 'g', 12)});
                 }
-                static const QRegularExpression dicomTag(QStringLiteral("^DICOM\\.([0-9a-fA-F]{4}),([0-9a-fA-F]{4})$"));
-                const auto match = dicomTag.match(label);
-                if (dicom && !match.hasMatch()) continue;
-                if (match.hasMatch()) {
-                    DcmTag tag(match.captured(1).toUShort(nullptr, 16), match.captured(2).toUShort(nullptr, 16));
-                    label = QStringLiteral("(%1,%2)").arg(match.captured(1), match.captured(2));
-                    QString name = QString::fromLatin1(tag.getTagName());
-                    if (name != QLatin1String(DcmTag_ERROR_TagName)) {
-                        static const QRegularExpression wordBoundary(QStringLiteral("(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])"));
-                        label.append(QLatin1Char(' ') + name.replace(wordBoundary, QStringLiteral(" ")));
+                QStringList direction; for (const auto value : metadata.direction) direction << QString::number(value, 'g', 6);
+                if (!direction.empty()) new QTreeWidgetItem(metadata_, {tr("Direction"), direction.join(", ")});
+                for (const auto &channel : metadata.channels) new QTreeWidgetItem(metadata_, {tr("Channel"), channel.name});
+            }
+            QJsonObject attributes = metadata.dicomSequences;
+            for (auto it = metadata.attributes.begin(); it != metadata.attributes.end(); ++it) attributes.insert(it.key(), it.value());
+            const auto addAttributes = [dicom, nifti](auto &&self, QTreeWidgetItem *parent, const QJsonObject &attributes) -> void {
+                for (auto it = attributes.begin(); it != attributes.end(); ++it) {
+                    QString label = it.key();
+                    if (nifti) {
+                        static const QMap<QString, QString> fieldNames{
+                            {"dim_info", tr("MRI Dimension Encoding")}, {"dim", tr("Dimensions")},
+                            {"intent_p1", tr("Intent Parameter 1")}, {"intent_p2", tr("Intent Parameter 2")},
+                            {"intent_p3", tr("Intent Parameter 3")}, {"intent_code", tr("Intent Code")},
+                            {"datatype", tr("Data Type")}, {"bitpix", tr("Bits per Voxel")},
+                            {"slice_start", tr("First Slice Index")}, {"pixdim", tr("Grid Spacing")},
+                            {"vox_offset", tr("Pixel Data Offset")}, {"scl_slope", tr("Intensity Scale")},
+                            {"scl_inter", tr("Intensity Offset")}, {"slice_end", tr("Last Slice Index")},
+                            {"slice_code", tr("Slice Timing Order")}, {"xyzt_units", tr("Spatial and Time Units")},
+                            {"cal_max", tr("Display Maximum")}, {"cal_min", tr("Display Minimum")},
+                            {"slice_duration", tr("Slice Duration")}, {"toffset", tr("Time Offset")},
+                            {"descrip", tr("Description")}, {"aux_file", tr("Auxiliary File")},
+                            {"qform_code", tr("Q-form Code")}, {"sform_code", tr("S-form Code")},
+                            {"quatern_b", tr("Quaternion B")}, {"quatern_c", tr("Quaternion C")},
+                            {"quatern_d", tr("Quaternion D")}, {"qoffset_x", tr("Q-form X Offset")},
+                            {"qoffset_y", tr("Q-form Y Offset")}, {"qoffset_z", tr("Q-form Z Offset")},
+                            {"srow_x", tr("Affine Transform X Row")}, {"srow_y", tr("Affine Transform Y Row")},
+                            {"srow_z", tr("Affine Transform Z Row")}, {"intent_name", tr("Intent Name")}};
+                        const auto name = fieldNames.value(it.key().section('[', 0, 0));
+                        if (name.isEmpty()) continue;
+                        label = QStringLiteral("%1 (%2)").arg(name, it.key());
+                        new QTreeWidgetItem(parent, {label, it.value().toString()});
+                        continue;
+                    }
+                    static const QRegularExpression dicomTag(QStringLiteral("^DICOM\\.([0-9a-fA-F]{4}),([0-9a-fA-F]{4})$"));
+                    const auto match = dicomTag.match(label);
+                    if (dicom && !match.hasMatch()) continue;
+                    if (match.hasMatch()) {
+                        DcmTag tag(match.captured(1).toUShort(nullptr, 16), match.captured(2).toUShort(nullptr, 16));
+                        label = QStringLiteral("(%1,%2)").arg(match.captured(1), match.captured(2));
+                        QString name = QString::fromLatin1(tag.getTagName());
+                        if (name != QLatin1String(DcmTag_ERROR_TagName)) {
+                            static const QRegularExpression wordBoundary(QStringLiteral("(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])"));
+                            label.append(QLatin1Char(' ') + name.replace(wordBoundary, QStringLiteral(" ")));
+                        }
+                    }
+                    auto *item = new QTreeWidgetItem(parent, {label, it.value().toString()});
+                    if (it.value().isArray()) {
+                        item->setChildIndicatorPolicy(QTreeWidgetItem::ShowIndicator);
+                        const auto items = it.value().toArray();
+                        for (qsizetype index = 0; index < items.size(); ++index) {
+                            auto *sequenceItem = new QTreeWidgetItem(item, {tr("Item %1").arg(index + 1)});
+                            self(self, sequenceItem, items[index].toObject());
+                        }
                     }
                 }
-                auto *item = new QTreeWidgetItem(parent, {label, it.value().toString()});
-                if (it.value().isArray()) {
-                    item->setChildIndicatorPolicy(QTreeWidgetItem::ShowIndicator);
-                    const auto items = it.value().toArray();
-                    for (qsizetype index = 0; index < items.size(); ++index) {
-                        auto *sequenceItem = new QTreeWidgetItem(item, {tr("Item %1").arg(index + 1)});
-                        self(self, sequenceItem, items[index].toObject());
-                    }
-                }
-            }
-        };
-        addAttributes(addAttributes, metadata_->invisibleRootItem(), attributes);
-        metadata_->expandAll();
-        filterProperties();
-        for (const auto &roi : doc->rois) {
-            auto *item = new QListWidgetItem(roi.name, rois_); item->setData(Qt::UserRole, roi.id);
-            item->setToolTip(tr("Z %1 C %2 T %3").arg(roi.z + 1).arg(roi.channel + 1).arg(roi.time + 1));
-            if (!doc->selectionCleared && roi.id == selectedId) rois_->setCurrentItem(item);
+            };
+            addAttributes(addAttributes, metadata_->invisibleRootItem(), attributes);
+            metadata_->expandAll();
+            filterProperties();
         }
-        if (!doc->selectionCleared && rois_->currentRow() < 0 && rois_->count()) rois_->setCurrentRow(rois_->count() - 1);
-        history_->addItems(doc->history.labels());
-        history_->addItem(tr("Undo storage: %1 / %2 MiB").arg(double(doc->history.retainedBytes()) / (1024 * 1024), 0, 'f', 1).arg(doc->history.byteBudget() / (1024 * 1024)));
+        if (showRois) {
+            for (const auto &roi : doc->rois) {
+                auto *item = new QListWidgetItem(roi.name, rois_); item->setData(Qt::UserRole, roi.id);
+                item->setToolTip(tr("Z %1 C %2 T %3").arg(roi.z + 1).arg(roi.channel + 1).arg(roi.time + 1));
+                if (!doc->selectionCleared && roi.id == selectedId) rois_->setCurrentItem(item);
+            }
+            if (!doc->selectionCleared && rois_->currentRow() < 0 && rois_->count()) rois_->setCurrentRow(rois_->count() - 1);
+        }
+        if (showHistory) {
+            history_->addItems(doc->history.labels());
+            history_->addItem(tr("Undo storage: %1 / %2 MiB").arg(double(doc->history.retainedBytes()) / (1024 * 1024), 0, 'f', 1).arg(doc->history.byteBudget() / (1024 * 1024)));
+        }
         if (auto *undo = findChild<QAction *>("edit.undo")) undo->setEnabled(doc->history.canUndo());
         if (auto *redo = findChild<QAction *>("edit.redo")) redo->setEnabled(doc->history.canRedo());
         if (auto *revert = findChild<QAction *>("file.revert")) revert->setEnabled(!doc->image.metadata().sourcePath.isEmpty());
@@ -2457,7 +2500,7 @@ void MainWindow::showError(const QString &message)
 bool MainWindow::confirmDiscardMeasurements()
 {
     auto *window = panel("measurements");
-    if (!window->isVisible() || results_->rowCount() <= exportedMeasurementRows_) return true;
+    if (!window || !window->isVisible() || results_->rowCount() <= exportedMeasurementRows_) return true;
     QStringList unsavedMeasurements;
     for (int row = exportedMeasurementRows_; row < results_->rowCount(); ++row) {
         auto name = results_->data(results_->index(row, 0)).toString();

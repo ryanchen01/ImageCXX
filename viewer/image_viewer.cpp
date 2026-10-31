@@ -421,6 +421,7 @@ public:
     std::condition_variable condition;
     std::optional<Request> pending;
     std::deque<std::shared_ptr<const DecodedSlice>> cache;
+    bool cacheActive = true;
     std::size_t cacheBytes = 0, decodedBudget = 128 * 1024 * 1024;
     std::atomic<std::uint64_t> serial{0};
     std::jthread worker;
@@ -544,6 +545,10 @@ ImageViewer::ImageViewer(QWidget *parent) : QWidget(parent), d(std::make_unique<
                 request.key.z > 0 ? request.key.z - 1 : request.key.z};
             for (std::size_t index = 0; index < slices.size(); ++index) {
                 if (stop.stop_requested() || request.serial != d->serial.load()) break;
+                if (index) {
+                    std::lock_guard lock(d->mutex);
+                    if (!d->cacheActive) break;
+                }
                 SliceKey key = request.key;
                 key.z = slices[index];
                 if (index && key.z == request.key.z) continue;
@@ -684,7 +689,7 @@ ImageViewer::ImageViewer(QWidget *parent) : QWidget(parent), d(std::make_unique<
                                 d->cacheBytes -= std::size_t(d->cache.back()->pixels.capacity());
                                 d->cache.pop_back();
                             }
-                            if (retainedBytes <= d->decodedBudget) {
+                            if (d->cacheActive && retainedBytes <= d->decodedBudget) {
                                 d->cache.push_front(decoded);
                                 d->cacheBytes += retainedBytes;
                             }
@@ -1022,6 +1027,17 @@ void ImageViewer::setNavigationCrosshair(std::optional<QPointF> position)
 bool ImageViewer::crosshairVisible() const { return d->crosshair; }
 bool ImageViewer::scaleBarVisible() const { return d->scaleBar; }
 void ImageViewer::setViewLabel(const QString &label) { d->viewLabel = label; d->overlay->update(); }
+void ImageViewer::setCacheActive(bool active)
+{
+    std::lock_guard lock(d->mutex);
+    if (d->cacheActive == active) return;
+    d->cacheActive = active;
+    if (!active) {
+        d->cache.clear();
+        d->cacheBytes = 0;
+    }
+}
+
 void ImageViewer::setCacheBudgets(std::size_t decodedBytes, std::size_t gpuBytes)
 {
     {

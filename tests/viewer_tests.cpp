@@ -682,6 +682,30 @@ TEST(Viewer, PublishesNewestLazySliceAndBoundsDecodedCache)
     EXPECT_LT(storage->reads.load(), 1000);
 }
 
+TEST(Viewer, InactiveViewsKeepCurrentSliceWithoutCachingOrPrefetching)
+{
+    auto storage = std::make_shared<SlowSlices>();
+    ImageViewer viewer;
+    constexpr std::size_t oneSlice = 16 * 16 * sizeof(float);
+    viewer.setImage(Image::fromStorage(PixelType::UInt16, {16, 16, 6}, storage));
+    ASSERT_TRUE(waitFor([&] { return viewer.decodedCacheBytes() == oneSlice * 2; }));
+    viewer.setCacheActive(false);
+    EXPECT_EQ(viewer.decodedCacheBytes(), 0u);
+    const auto reads = storage->reads.load();
+    bool ready = false;
+    QObject::connect(&viewer, &ImageViewer::sliceReady, [&] { ready = true; });
+    viewer.setSlice(4);
+    ASSERT_TRUE(waitFor([&] { return ready; }));
+    EXPECT_EQ(viewer.decodedCacheBytes(), 0u);
+    EXPECT_EQ(storage->reads.load() - reads, 256);
+    viewer.autoWindow();
+    EXPECT_DOUBLE_EQ(viewer.windowMinimum(), 400);
+    EXPECT_DOUBLE_EQ(viewer.windowMaximum(), 655);
+    viewer.setCacheActive(true);
+    viewer.setSlice(3);
+    ASSERT_TRUE(waitFor([&] { return viewer.decodedCacheBytes() == oneSlice * 3; }));
+}
+
 TEST(Viewer, ConvertsContiguousMappedAndStridedSlicesAcrossPixelTypes)
 {
     QTemporaryDir directory;

@@ -74,6 +74,8 @@ public:
     // middle-button and Space drags continue to pan the image.
     void setNavigationCrosshair(std::optional<QPointF> position);
     // Limits for retained decoded slices and GPU textures. Oversized slices fail.
+    // Inactive views keep their displayed frame without retaining or prefetching other slices.
+    void setCacheActive(bool active);
     void setCacheBudgets(std::size_t decodedBytes, std::size_t gpuBytes);
     std::size_t decodedCacheBytes() const;
     std::size_t gpuCacheBytes() const;
