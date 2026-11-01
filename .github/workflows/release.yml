@@ -35,7 +35,8 @@ jobs:
       VCPKG_ROOT: ${{ github.workspace }}/build/vcpkg
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/build/vcpkg-cache
       VCPKG_MAX_CONCURRENCY: 2
-      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      CMAKE_BUILD_PARALLEL_LEVEL: ${{ matrix.os == 'macos-26' && '3' || '4' }}
+      SCCACHE_GHA_ENABLED: 'true'
       QT_QPA_PLATFORM: offscreen
     steps:
       - name: Check out source
@@ -63,10 +64,18 @@ jobs:
         shell: pwsh
         run: '"VCPKG_ROOT=$env:GITHUB_WORKSPACE/build/vcpkg" >> $env:GITHUB_ENV'
 
+      - name: Set up Python for Windows Qt installer
+        if: runner.os == 'Windows'
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          # Avoid building Python 3.15 dependencies from source.
+          python-version: '3.14'
+
       - name: Install official Qt binaries
         uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125 # v4.4.1
         with:
           version: '6.12.0'
+          setup-python: ${{ runner.os != 'Windows' }}
           aqtsource: 'git+https://github.com/miurahr/aqtinstall.git@7e5a5c3d95cf962cfc2f36c86ffa0d2c07f1a0d4'
           arch: ${{ matrix.qt-arch }}
           modules: 'qtshadertools qtgraphs qtimageformats qtquick3d qtquicktimeline'
@@ -112,6 +121,11 @@ jobs:
         shell: bash
         run: bash packaging/download-tools.sh ${{ runner.os == 'macOS' && 'macos' || 'linux' }}
 
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: 'v0.19.0'
+
       - name: Configure
         shell: bash
         env:
@@ -121,7 +135,8 @@ jobs:
           if [[ "$RUNNER_OS" == macOS ]]; then
             args+=(-DIMAGECXX_SPARKLE_ROOT="$GITHUB_WORKSPACE/build/tools" -DCMAKE_OSX_DEPLOYMENT_TARGET=14.4 -DVCPKG_OVERLAY_TRIPLETS="$GITHUB_WORKSPACE/packaging/triplets")
           fi
-          cmake --preset release-vcpkg "${args[@]}"
+          cmake --preset release-vcpkg "${args[@]}" \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
 
       - name: Save scientific dependency cache
         if: steps.vcpkg-cache.outputs.cache-hit != 'true'
