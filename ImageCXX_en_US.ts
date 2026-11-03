@@ -652,18 +652,23 @@
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="io/image_import.cpp" line="105"/>
-        <source>DICOM series exceeds the addressable size</source>
+        <location filename="io/image_import.cpp" line="86"/>
+        <source>Cannot open %1: unsupported or invalid image format.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
         <location filename="io/image_import.cpp" line="111"/>
+        <source>DICOM series exceeds the addressable size</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="io/image_import.cpp" line="117"/>
         <source>No supported image files found in the selected paths</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="io/image_import.cpp" line="121"/>
-        <location filename="io/image_import.cpp" line="126"/>
+        <location filename="io/image_import.cpp" line="127"/>
+        <location filename="io/image_import.cpp" line="132"/>
         <source>DICOM import exceeds the addressable size</source>
         <translation type="unfinished"></translation>
     </message>

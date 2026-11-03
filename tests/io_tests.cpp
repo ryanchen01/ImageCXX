@@ -758,10 +758,23 @@ TEST(ImageIo, ImportDiscoveryReportsEmptyMissingAndUnsupportedInputsAndSupportsC
     plan = discoverImageImports({directory.path()});
     EXPECT_TRUE(plan.images.isEmpty());
     EXPECT_FALSE(plan.errors.isEmpty());
-    // An explicitly selected unknown file is retained so its read error is visible.
+    // Explicit unsupported selections report their path instead of a DICOM stream error.
     plan = discoverImageImports({notes.fileName()});
+    EXPECT_TRUE(plan.images.isEmpty());
+    ASSERT_EQ(plan.errors.size(), 1);
+    EXPECT_TRUE(plan.errors.front().contains(notes.fileName()));
+    EXPECT_TRUE(plan.errors.front().contains("unsupported or invalid image format"));
+    // An unknown extension can still contain a supported raster image.
+    const auto png = directory.filePath("image.png");
+    const auto renamed = directory.filePath("image.unknown");
+    const auto original = fixture(PixelType::UInt8, {5, 3});
+    writeImage(original, png);
+    ASSERT_TRUE(QFile::rename(png, renamed));
+    plan = discoverImageImports({renamed});
+    EXPECT_TRUE(plan.errors.isEmpty());
     ASSERT_EQ(plan.images.size(), 1);
-    EXPECT_EQ(plan.images.front().paths.front(), notes.fileName());
+    EXPECT_EQ(plan.images.front().paths.front(), renamed);
+    expectPixels(readImage(renamed), original);
     std::stop_source cancellation;
     EXPECT_THROW(discoverImageImports({directory.path()}, cancellation.get_token(), [&](double) {
         cancellation.request_stop();

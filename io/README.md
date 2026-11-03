@@ -44,7 +44,8 @@ scalar files by Study Instance UID and Series Instance UID. Multiframe and color
 files remain separate. Each group goes through the existing series validation;
 files with inconsistent geometry are rejected together rather than silently split.
 Other supported images in the selection still open. Unrecognized non-image files
-in folders are skipped; explicitly selected files retain their read errors.
+in folders are skipped; explicitly selected unsupported files report their path
+and an unsupported or invalid format error.
 Unreadable files report errors. Folder-discovered raw files need a JSON sidecar;
 otherwise they are skipped so detached MHD/NHDR payloads are not imported twice.
 Single-file DICOM reloads use the same reader fallback as ordinary imports.

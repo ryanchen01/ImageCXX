@@ -78,8 +78,14 @@ ImageImportPlan discoverImageImports(const QStringList &paths, std::stop_token s
         const bool dicom = status.good() && dataset->findAndGetUint16(DCM_Rows, rows).good()
             && dataset->findAndGetUint16(DCM_Columns, columns).good() && rows && columns;
         if (!dicom) {
-            if (candidate.explicitFile || suffix == "dcm" || suffix == "dicom")
-                plan.images.append({{path}});
+            if (candidate.explicitFile || suffix == "dcm" || suffix == "dicom") {
+                QImageReader reader(path);
+                if (suffix == "dcm" || suffix == "dicom" || reader.canRead())
+                    plan.images.append({{path}});
+                else
+                    plan.errors.append(QCoreApplication::translate("ImageImport",
+                        "Cannot open %1: unsupported or invalid image format.").arg(path));
+            }
             continue;
         }
         OFString studyUid, seriesUid;

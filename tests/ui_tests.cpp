@@ -2430,25 +2430,90 @@ TEST(Desktop, CancellingRawImportContinuesOpeningOtherFiles)
 {
     QSettings settings; settings.remove("rawImport");
     QTemporaryDir directory;
-    const auto rawPath = directory.filePath("cancel.bin");
-    QFile file(rawPath); ASSERT_TRUE(file.open(QIODevice::WriteOnly));
-    file.write(QByteArray(16, char(0))); file.close();
+    QStringList rawPaths;
+    for (const auto *name : {"cancel.bin", "cancel.raw", "cancel.RAW"}) {
+        const auto path = directory.filePath(name);
+        QFile file(path); ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+        file.write(QByteArray(16, char(0))); file.close();
+        rawPaths.append(path);
+    }
     const auto imagePath = directory.filePath("next.tif");
     auto image = Image::allocate(PixelType::UInt8, {4, 4});
     image.mutableData()[15] = std::byte{173};
     writeImage(image, imagePath);
-    MainWindow window;
-    bool cancelled = false;
-    QTimer::singleShot(0, &window, [&] {
-        if (auto *dialog = window.findChild<QDialog *>("rawImportDialog")) {
-            cancelled = true;
-            dialog->reject();
+    for (bool onDocument : {false, true}) {
+        MainWindow window; window.show();
+        auto *document = onDocument ? window.addDocument(Image::allocate(PixelType::UInt8, {4, 4})) : nullptr;
+        int cancelled = 0;
+        QStringList errors;
+        QTimer dismiss;
+        QObject::connect(&dismiss, &QTimer::timeout, &window, [&] {
+            auto *modal = QApplication::activeModalWidget();
+            if (auto *message = qobject_cast<QMessageBox *>(modal)) {
+                errors.append(message->text());
+                message->accept();
+            } else if (auto *dialog = qobject_cast<QDialog *>(modal);
+                       dialog && dialog->objectName() == "rawImportDialog") {
+                ++cancelled;
+                dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Cancel)->click();
+            }
+        });
+        dismiss.start(1);
+        auto paths = rawPaths;
+        paths.append(rawPaths.front());
+        paths.append(imagePath);
+        dropPaths(document ? static_cast<QWidget *>(document) : &window, paths);
+        EXPECT_EQ(cancelled, rawPaths.size());
+        ASSERT_TRUE(finishJobs(window));
+        EXPECT_TRUE(errors.isEmpty()) << errors.join('\n').toStdString();
+        ASSERT_EQ(window.documents().size(), onDocument ? 2 : 1);
+        EXPECT_EQ(window.activeDocument()->image.sample(3, 3), 173);
+        EXPECT_EQ(window.activeDocument()->image.metadata().sourcePath, imagePath);
+    }
+}
+
+TEST(Desktop, UnsupportedFileInRawDropReportsItsNameAndOtherImagesStillOpen)
+{
+    QSettings settings; settings.remove("rawImport");
+    QTemporaryDir directory;
+    QStringList paths;
+    for (const auto *name : {"first.raw", "notes.txt", "second.bin"}) {
+        QFile file(directory.filePath(name));
+        ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+        file.write("Not an image\n"); file.close();
+        paths.append(file.fileName());
+    }
+    const auto unsupported = paths[1];
+    const auto imagePath = directory.filePath("next.tif");
+    auto image = Image::allocate(PixelType::UInt8, {4, 4});
+    image.mutableData()[15] = std::byte{173};
+    writeImage(image, imagePath);
+    paths.append(imagePath);
+    MainWindow window; window.show();
+    int cancelled = 0;
+    QStringList errors;
+    QTimer dismiss;
+    QObject::connect(&dismiss, &QTimer::timeout, &window, [&] {
+        auto *modal = QApplication::activeModalWidget();
+        if (auto *message = qobject_cast<QMessageBox *>(modal)) {
+            errors.append(message->text());
+            message->accept();
+        } else if (auto *dialog = qobject_cast<QDialog *>(modal);
+                   dialog && dialog->objectName() == "rawImportDialog") {
+            ++cancelled;
+            dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Cancel)->click();
         }
     });
-    window.openPaths({rawPath, imagePath});
-    ASSERT_TRUE(cancelled);
+    dismiss.start(1);
+    dropPaths(&window, paths);
+    EXPECT_EQ(cancelled, 2);
     ASSERT_TRUE(finishJobs(window));
+    ASSERT_EQ(errors.size(), 1);
+    EXPECT_TRUE(errors.front().contains(unsupported)) << errors.front().toStdString();
+    EXPECT_TRUE(errors.front().contains("unsupported or invalid image format")) << errors.front().toStdString();
+    EXPECT_FALSE(errors.front().contains("I/O suspension"));
     ASSERT_EQ(window.documents().size(), 1);
+    EXPECT_EQ(window.activeDocument()->image.metadata().sourcePath, imagePath);
     EXPECT_EQ(window.activeDocument()->image.sample(3, 3), 173);
 }
 
