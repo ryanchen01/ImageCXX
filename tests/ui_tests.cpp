@@ -2431,7 +2431,7 @@ TEST(Desktop, CancellingRawImportContinuesOpeningOtherFiles)
     QSettings settings; settings.remove("rawImport");
     QTemporaryDir directory;
     QStringList rawPaths;
-    for (const auto *name : {"cancel.bin", "cancel.raw", "cancel.RAW"}) {
+    for (const auto *name : {"cancel.bin", "cancel.raw", "cancel-uppercase.RAW"}) {
         const auto path = directory.filePath(name);
         QFile file(path); ASSERT_TRUE(file.open(QIODevice::WriteOnly));
         file.write(QByteArray(16, char(0))); file.close();
