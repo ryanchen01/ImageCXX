@@ -1,4 +1,5 @@
 #include "job_scheduler.h"
+#include <QCoreApplication>
 #include <QDebug>
 #include <QMetaObject>
 #include <QPointer>
@@ -80,7 +81,7 @@ JobScheduler::~JobScheduler()
 
 quint64 JobScheduler::submit(QString title, Work work, Finished done, int priority)
 {
-    if (!work) throw std::invalid_argument("A background job needs a work function");
+    if (!work) throw std::invalid_argument(QCoreApplication::translate("JobScheduler", "A background job needs a work function").toStdString());
     auto job = std::make_shared<Job>();
     job->priority = priority;
     job->title = std::move(title);
@@ -88,7 +89,7 @@ quint64 JobScheduler::submit(QString title, Work work, Finished done, int priori
     job->done = std::move(done);
     {
         std::lock_guard lock(mutex_);
-        if (shuttingDown_) throw std::logic_error("The job scheduler is shutting down");
+        if (shuttingDown_) throw std::logic_error(QCoreApplication::translate("JobScheduler", "The job scheduler is shutting down").toStdString());
         job->id = nextId_++;
         queue_.push(job);
     }

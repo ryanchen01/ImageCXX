@@ -1,4 +1,5 @@
 #include "processing/processing.h"
+#include <QCoreApplication>
 #include "core/memory.h"
 #include <itkMultiThreaderBase.h>
 #include <algorithm>
@@ -22,25 +23,25 @@ struct ProjectedPixel {
 
 std::size_t projectionSize(double value) {
     if (!std::isfinite(value) || value < 1 || value > std::numeric_limits<int>::max())
-        throw std::overflow_error("3D projection dimensions exceed the supported size");
+        throw std::overflow_error(QCoreApplication::translate("Projection", "3D projection dimensions exceed the supported size").toStdString());
     return static_cast<std::size_t>(std::ceil(value));
 }
 }
 
 ProjectionGeometry projectionGeometry(const Image &image, const ProjectionOptions &options) {
     if (image.empty() || image.depth() < 2 || image.shape().size() > 5)
-        throw std::invalid_argument("3D Project requires a Z stack with at least two slices and at most five axes");
+        throw std::invalid_argument(QCoreApplication::translate("Projection", "3D Project requires a Z stack with at least two slices and at most five axes").toStdString());
     if (options.method != ProjectionMethod::NearestPoint && options.method != ProjectionMethod::BrightestPoint
         && options.method != ProjectionMethod::MeanValue)
-        throw std::invalid_argument("Invalid projection method");
+        throw std::invalid_argument(QCoreApplication::translate("Projection", "Invalid projection method").toStdString());
     if (options.rotationAxis < 0 || options.rotationAxis > 2 || !std::isfinite(options.sliceSpacing) || options.sliceSpacing <= 0
         || options.initialAngle < 0 || options.initialAngle > 359 || options.totalRotation < 0 || options.totalRotation > 360
         || options.angleIncrement < 1 || options.angleIncrement > 360)
-        throw std::invalid_argument("Invalid rotation axis, spacing or angles");
+        throw std::invalid_argument(QCoreApplication::translate("Projection", "Invalid rotation axis, spacing or angles").toStdString());
     if (!std::isfinite(options.lower) || !std::isfinite(options.upper) || options.lower > options.upper
         || options.opacity < 0 || options.opacity > 100 || options.surfaceDepthCue < 0 || options.surfaceDepthCue > 100
         || options.interiorDepthCue < 0 || options.interiorDepthCue > 100)
-        throw std::invalid_argument("Invalid transparency bounds, opacity or depth cueing");
+        throw std::invalid_argument(QCoreApplication::translate("Projection", "Invalid transparency bounds, opacity or depth cueing").toStdString());
     const double depth = double(image.depth()) * options.sliceSpacing;
     projectionSize(std::max(depth, 1.));
     projectionSize(double(image.width())); projectionSize(double(image.height()));
@@ -55,7 +56,7 @@ ProjectionGeometry projectionGeometry(const Image &image, const ProjectionOption
     geometry.byteCount = bytesPerPixel(image.pixelType());
     for (auto length : geometry.shape) {
         if (geometry.byteCount > std::numeric_limits<std::size_t>::max() / length)
-            throw std::overflow_error("3D projection buffer exceeds the addressable size");
+            throw std::overflow_error(QCoreApplication::translate("Projection", "3D projection buffer exceeds the addressable size").toStdString());
         geometry.byteCount *= length;
     }
     geometry.requiredMemoryBytes = geometry.byteCount;
@@ -65,12 +66,12 @@ ProjectionGeometry projectionGeometry(const Image &image, const ProjectionOption
 Image project3D(const Image &image, const ProjectionOptions &options, std::stop_token stop, Progress progress) {
     static std::mutex allocationMutex;
     const std::unique_lock lock(allocationMutex);
-    if (stop.stop_requested()) throw std::runtime_error("3D projection cancelled");
+    if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("Projection", "3D projection cancelled").toStdString());
     const auto geometry = projectionGeometry(image, options);
     detail::checkMemoryBudget(geometry.requiredMemoryBytes, detail::availableMemoryBytes());
     try {
         auto metadata = image.metadata();
-        metadata.name += QStringLiteral(" · 3D Projection"); metadata.sourcePath.clear(); metadata.direction.clear();
+        metadata.name += QCoreApplication::translate("Projection", " · 3D Projection"); metadata.sourcePath.clear(); metadata.direction.clear();
         metadata.axes[0] = {"X", 1, 0, "px"}; metadata.axes[1] = {"Y", 1, 0, "px"};
         metadata.axes[2] = {"Angle", double(options.angleIncrement), double(options.initialAngle), "degrees"};
         metadata.attributes.insert("ImageCXX.LastOperation", "3D Project");
@@ -103,7 +104,7 @@ Image project3D(const Image &image, const ProjectionOptions &options, std::stop_
         threader->ParallelizeArray(0, rows, [&](std::size_t row) {
             try {
                 if (failed.load()) return;
-                if (stop.stop_requested()) throw std::runtime_error("3D projection cancelled");
+                if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("Projection", "3D projection cancelled").toStdString());
                 auto remainder = row;
                 const auto y = remainder % output.height(); remainder /= output.height();
                 const auto k = remainder % components; remainder /= components;
@@ -129,7 +130,7 @@ Image project3D(const Image &image, const ProjectionOptions &options, std::stop_
                     case PixelType::Float32: { float value; std::memcpy(&value, at, sizeof(value)); return value; }
                     case PixelType::Float64: { double value; std::memcpy(&value, at, sizeof(value)); return value; }
                     }
-                    throw std::invalid_argument("Unknown pixel type");
+                    throw std::invalid_argument(QCoreApplication::translate("Projection", "Unknown pixel type").toStdString());
                 };
                 for (std::size_t x = 0; x < output.width(); ++x) {
                     const double px = double(x) - outputCenterX, py = double(y) - outputCenterY;
@@ -155,7 +156,7 @@ Image project3D(const Image &image, const ProjectionOptions &options, std::stop_
                         length * std::abs(direction[2]) / options.sliceSpacing}));
                     ProjectedPixel pixel;
                     for (std::size_t sample = 0; sample < samples; ++sample) {
-                        if ((sample & 4095) == 0 && (stop.stop_requested() || failed.load())) throw std::runtime_error("3D projection cancelled");
+                        if ((sample & 4095) == 0 && (stop.stop_requested() || failed.load())) throw std::runtime_error(QCoreApplication::translate("Projection", "3D projection cancelled").toStdString());
                         const double depthPosition = std::lerp(entry, exit, (double(sample) + .5) / samples);
                         std::array<std::size_t, 3> low, high;
                         std::array<double, 3> fraction;
@@ -222,11 +223,11 @@ Image project3D(const Image &image, const ProjectionOptions &options, std::stop_
             }
         }, nullptr);
         if (error) std::rethrow_exception(error);
-        if (stop.stop_requested()) throw std::runtime_error("3D projection cancelled");
+        if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("Projection", "3D projection cancelled").toStdString());
         if (progress) progress(1);
         return output;
     } catch (const std::bad_alloc &) {
-        throw std::runtime_error("Memory allocation failed during 3D projection. The source image is unchanged.");
+        throw std::runtime_error(QCoreApplication::translate("Projection", "Memory allocation failed during 3D projection. The source image is unchanged.").toStdString());
     }
 }
 } // namespace imagecxx

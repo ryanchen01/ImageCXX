@@ -1,5 +1,6 @@
 #include "viewer/image_viewer.h"
 
+#include <QCoreApplication>
 #include <QFile>
 #include <QKeyEvent>
 #include <QMatrix4x4>
@@ -135,7 +136,7 @@ public:
     {
         setAttribute(Qt::WA_TransparentForMouseEvents);
         connect(this, &QRhiWidget::renderFailed, this, [this] {
-            reportError(QStringLiteral("The graphics backend could not initialize the image viewer."));
+            reportError(QCoreApplication::translate("ImageViewer", "The graphics backend could not initialize the image viewer."));
         });
     }
     ~SliceCanvas() override { releaseResources(); }
@@ -161,7 +162,7 @@ protected:
         smooth.reset(rhi()->newSampler(QRhiSampler::Linear, QRhiSampler::Linear,
                                      QRhiSampler::None, QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge));
         if (!nearest->create() || !smooth->create()) {
-            reportError(QStringLiteral("Could not create GPU display resources."));
+            reportError(QCoreApplication::translate("ImageViewer", "Could not create GPU display resources."));
             releaseResources();
         }
     }
@@ -184,7 +185,7 @@ protected:
                 pipeline.reset();
                 resources.clear();
                 gpuBytes = 0;
-                reportError(QStringLiteral("This view exceeds the GPU texture or memory limit."));
+                reportError(QCoreApplication::translate("ImageViewer", "This view exceeds the GPU texture or memory limit."));
                 cb->beginPass(renderTarget(), background, {1.0f, 0});
                 cb->endPass();
                 return;
@@ -214,7 +215,7 @@ protected:
                 slot.uniforms.reset(rhi()->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 176));
                 if (!slot.uniforms->create()) {
                     updates->release();
-                    reportError(QStringLiteral("Could not create GPU display resources."));
+                    reportError(QCoreApplication::translate("ImageViewer", "Could not create GPU display resources."));
                     return;
                 }
             }
@@ -227,7 +228,7 @@ protected:
                 slot.texture.reset(rhi()->newTexture(format, decoded->size));
                 if (!rhi()->isTextureFormatSupported(format) || !slot.texture->create()) {
                     updates->release();
-                    reportError(QStringLiteral("The graphics backend does not support this pixel texture format."));
+                    reportError(QCoreApplication::translate("ImageViewer", "The graphics backend does not support this pixel texture format."));
                     return;
                 }
                 slot.uploaded.reset();
@@ -240,7 +241,7 @@ protected:
                 slot.maskTexture.reset(rhi()->newTexture(QRhiTexture::R8, requestedMaskSize));
                 if (!slot.maskTexture->create()) {
                     updates->release();
-                    reportError(QStringLiteral("Could not create the mask texture."));
+                    reportError(QCoreApplication::translate("ImageViewer", "Could not create the mask texture."));
                     return;
                 }
                 slot.uploadedMask.clear();
@@ -271,7 +272,7 @@ protected:
                         slot.maskTexture.get(), nearest.get())});
                 if (!slot.bindings->create()) {
                     updates->release();
-                    reportError(QStringLiteral("Could not bind the image texture."));
+                    reportError(QCoreApplication::translate("ImageViewer", "Could not bind the image texture."));
                     return;
                 }
                 slot.boundLinear = layer.linear;
@@ -323,7 +324,7 @@ protected:
             if (!pipeline->create()) {
                 pipeline.reset();
                 updates->release();
-                reportError(QStringLiteral("Could not create the image shader pipeline."));
+                reportError(QCoreApplication::translate("ImageViewer", "Could not create the image shader pipeline."));
                 return;
             }
         }
@@ -584,7 +585,7 @@ ImageViewer::ImageViewer(QWidget *parent) : QWidget(parent), d(std::make_unique<
                         if (image.width() > std::size_t(std::numeric_limits<int>::max())
                             || image.height() > std::size_t(std::numeric_limits<int>::max())
                             || image.width() > budget / perPixel / image.height())
-                            throw std::runtime_error("The decoded slice exceeds the viewer cache memory limit.");
+                            throw std::runtime_error(QCoreApplication::translate("ImageViewer", "The decoded slice exceeds the viewer cache memory limit.").toStdString());
                         result->size = QSize(int(image.width()), int(image.height()));
                         const auto byteCount = image.width() * image.height() * perPixel;
                         result->pixels = QByteArray(qsizetype(byteCount), Qt::Uninitialized);

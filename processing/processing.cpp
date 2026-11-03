@@ -1,4 +1,5 @@
 #include "processing/processing.h"
+#include <QCoreApplication>
 #include "processing_detail.h"
 
 #include <itkBinaryBallStructuringElement.h>
@@ -54,7 +55,7 @@ Image runVolume(const Image &source, std::size_t volume, const ProcessingOptions
             for (unsigned int col = 0; col < Dimension; ++col)
                 direction[row][col] = orientation[row * orientationDimension + col];
         if (std::abs(vnl_determinant(direction.GetVnlMatrix())) < 1e-12)
-            throw std::invalid_argument("Spatial image direction is singular");
+            throw std::invalid_argument(QCoreApplication::translate("Processing", "Spatial image direction is singular").toStdString());
     }
     typename ItkImage::RegionType region;
     region.SetIndex(start); region.SetSize(size);
@@ -71,9 +72,9 @@ Image runVolume(const Image &source, std::size_t volume, const ProcessingOptions
         auto observer = detail::ProgressObserver::New();
         observer->stop = stop; observer->progress = progress;
         filter->AddObserver(itk::ProgressEvent(), observer);
-        if (stop.stop_requested()) throw std::runtime_error("Processing cancelled");
+        if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("Processing", "Processing cancelled").toStdString());
         filter->Update();
-        if (stop.stop_requested()) throw std::runtime_error("Processing cancelled");
+        if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("Processing", "Processing cancelled").toStdString());
         const auto output = filter->GetOutput();
         const auto outputSize = output->GetLargestPossibleRegion().GetSize();
         std::vector<std::size_t> shape;
@@ -134,7 +135,7 @@ Image runVolume(const Image &source, std::size_t volume, const ProcessingOptions
         auto binary = MaskImage::New();
         binary->CopyInformation(input); binary->SetRegions(region); binary->Allocate();
         for (std::size_t pixel = 0; pixel < count; ++pixel) {
-            if ((pixel & 65535) == 0 && stop.stop_requested()) throw std::runtime_error("Processing cancelled");
+            if ((pixel & 65535) == 0 && stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("Processing", "Processing cancelled").toStdString());
             binary->GetBufferPointer()[pixel] = std::isfinite(static_cast<double>(inputBuffer[pixel]))
                                                && inputBuffer[pixel] != T{} ? 255 : 0;
         }
@@ -163,10 +164,10 @@ Image runVolume(const Image &source, std::size_t volume, const ProcessingOptions
             outputSpacing[axis] = options.outputSpacing[axis];
             const auto intervals = std::floor((size[axis] - 1) * spacing[axis] / outputSpacing[axis] + 1e-9);
             if (!std::isfinite(intervals) || intervals > static_cast<double>(std::numeric_limits<typename ItkImage::SizeValueType>::max() - 1))
-                throw std::overflow_error("Resampled axis is too large");
+                throw std::overflow_error(QCoreApplication::translate("Processing", "Resampled axis is too large").toStdString());
             outputSize[axis] = static_cast<typename ItkImage::SizeValueType>(intervals) + 1;
             if (outputSize[axis] > std::numeric_limits<std::size_t>::max() / outputBytes)
-                throw std::overflow_error("Resampled image exceeds the addressable buffer size");
+                throw std::overflow_error(QCoreApplication::translate("Processing", "Resampled image exceeds the addressable buffer size").toStdString());
             outputBytes *= outputSize[axis];
         }
         filter->SetInput(input); filter->SetSize(outputSize);
@@ -179,7 +180,7 @@ Image runVolume(const Image &source, std::size_t volume, const ProcessingOptions
         return collect.template operator()<Filter>(filter, source.pixelType());
     }
     }
-    throw std::invalid_argument("Unknown processing operation");
+    throw std::invalid_argument(QCoreApplication::translate("Processing", "Unknown processing operation").toStdString());
 }
 
 template <unsigned int Dimension>
@@ -191,7 +192,7 @@ Image dispatchVolume(const Image &source, std::size_t volume, const ProcessingOp
     case PixelType::Int16: return runVolume<std::int16_t, Dimension>(source, volume, options, stop, progress);
     case PixelType::Float32: return runVolume<float, Dimension>(source, volume, options, stop, progress);
     case PixelType::Float64: return runVolume<double, Dimension>(source, volume, options, stop, progress);
-    default: throw std::invalid_argument("Processing requires a scalar image; split color components first");
+    default: throw std::invalid_argument(QCoreApplication::translate("Processing", "Processing requires a scalar image; split color components first").toStdString());
     }
 }
 
@@ -199,40 +200,40 @@ Image dispatchVolume(const Image &source, std::size_t volume, const ProcessingOp
 
 QString operationName(Operation operation) {
     switch (operation) {
-    case Operation::Gaussian: return QStringLiteral("Gaussian blur");
-    case Operation::Median: return QStringLiteral("Median filter");
-    case Operation::Threshold: return QStringLiteral("Threshold");
-    case Operation::Dilate: return QStringLiteral("Binary dilation");
-    case Operation::Erode: return QStringLiteral("Binary erosion");
-    case Operation::Resample: return QStringLiteral("Resample");
+    case Operation::Gaussian: return QCoreApplication::translate("Processing", "Gaussian blur");
+    case Operation::Median: return QCoreApplication::translate("Processing", "Median filter");
+    case Operation::Threshold: return QCoreApplication::translate("Processing", "Threshold");
+    case Operation::Dilate: return QCoreApplication::translate("Processing", "Binary dilation");
+    case Operation::Erode: return QCoreApplication::translate("Processing", "Binary erosion");
+    case Operation::Resample: return QCoreApplication::translate("Processing", "Resample");
     }
-    throw std::invalid_argument("Unknown processing operation");
+    throw std::invalid_argument(QCoreApplication::translate("Processing", "Unknown processing operation").toStdString());
 }
 
 Image process(const Image &image, const ProcessingOptions &options, std::stop_token stop, Progress progress) {
-    if (image.empty()) throw std::invalid_argument("Cannot process an empty image");
-    if (componentCount(image.pixelType()) != 1) throw std::invalid_argument("Processing requires a scalar image");
+    if (image.empty()) throw std::invalid_argument(QCoreApplication::translate("Processing", "Cannot process an empty image").toStdString());
+    if (componentCount(image.pixelType()) != 1) throw std::invalid_argument(QCoreApplication::translate("Processing", "Processing requires a scalar image").toStdString());
     if (!std::isfinite(options.sigma) || options.sigma < 0 || options.sigma > 1e6)
-        throw std::invalid_argument("Gaussian sigma must be finite and between 0 and 1000000");
-    if (options.radius > 128) throw std::invalid_argument("Filter radius cannot exceed 128 voxels");
+        throw std::invalid_argument(QCoreApplication::translate("Processing", "Gaussian sigma must be finite and between 0 and 1000000").toStdString());
+    if (options.radius > 128) throw std::invalid_argument(QCoreApplication::translate("Processing", "Filter radius cannot exceed 128 voxels").toStdString());
     if (!std::isfinite(options.lower) || !std::isfinite(options.upper) || options.lower > options.upper)
-        throw std::invalid_argument("Threshold lower bound must be finite and no greater than upper bound");
+        throw std::invalid_argument(QCoreApplication::translate("Processing", "Threshold lower bound must be finite and no greater than upper bound").toStdString());
     const unsigned int dimensions = image.depth() > 1 ? 3 : 2;
     if (options.operation == Operation::Resample) {
         if (options.outputSpacing.size() != dimensions)
-            throw std::invalid_argument("Supply output spacing for every spatial image axis");
+            throw std::invalid_argument(QCoreApplication::translate("Processing", "Supply output spacing for every spatial image axis").toStdString());
         for (auto spacing : options.outputSpacing)
             if (!std::isfinite(spacing) || spacing <= 0)
-                throw std::invalid_argument("Resampling spacing must be positive and finite");
+                throw std::invalid_argument(QCoreApplication::translate("Processing", "Resampling spacing must be positive and finite").toStdString());
     }
-    if (stop.stop_requested()) throw std::runtime_error("Processing cancelled");
+    if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("Processing", "Processing cancelled").toStdString());
     if (progress) progress(0.0);
     const Image source = image.materialized();
     const auto volumePixels = image.width() * image.height() * (dimensions == 3 ? image.depth() : 1);
     const auto volumes = image.pixelCount() / volumePixels;
     Image result;
     for (std::size_t volume = 0; volume < volumes; ++volume) {
-        if (stop.stop_requested()) throw std::runtime_error("Processing cancelled");
+        if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("Processing", "Processing cancelled").toStdString());
         Progress volumeProgress = [&progress, volume, volumes](double value) {
             if (progress) progress((static_cast<double>(volume) + value) / static_cast<double>(volumes));
         };

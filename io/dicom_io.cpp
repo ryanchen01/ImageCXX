@@ -1,4 +1,5 @@
 #include "io/image_io.h"
+#include <QCoreApplication>
 #include "io/io_detail.h"
 #include "core/memory.h"
 
@@ -42,7 +43,7 @@ std::size_t detail::dicomImageBytes(DcmItem &dataset)
     std::size_t bytes = bits / 8;
     for (const auto size : {std::size_t(rows), std::size_t(columns), std::size_t(samples), std::size_t(frames)}) {
         if (size > std::numeric_limits<std::size_t>::max() / 2 / bytes)
-            throw std::length_error("DICOM image exceeds the addressable size");
+            throw std::length_error(QCoreApplication::translate("DicomIo", "DICOM image exceeds the addressable size").toStdString());
         bytes *= size;
     }
     return bytes;
@@ -97,7 +98,7 @@ double dicomNumber(DcmItem *dataset, const DcmTagKey &tag, double fallback, unsi
 {
     double value = fallback;
     if (dataset->findAndGetFloat64(tag, value, position).good()) return value;
-    if (dataset->tagExists(tag)) throw std::runtime_error("Invalid DICOM numeric metadata");
+    if (dataset->tagExists(tag)) throw std::runtime_error(QCoreApplication::translate("DicomIo", "Invalid DICOM numeric metadata").toStdString());
     return fallback;
 }
 } // namespace
@@ -111,7 +112,7 @@ Image readDicom(const QString &path, std::stop_token stop, IoProgress progress)
     auto *dataset = file.getDataset();
     dicomCheck(dataset->convertToUTF8());
     if (dataset->tagExists(DCM_PerFrameFunctionalGroupsSequence))
-        throw std::runtime_error("Enhanced DICOM per-frame geometry is unsupported");
+        throw std::runtime_error(QCoreApplication::translate("DicomIo", "Enhanced DICOM per-frame geometry is unsupported").toStdString());
     Uint16 rows = 0, columns = 0, samples = 1, bits = 0, stored = 0, highBit = 0, representation = 0;
     dicomCheck(dataset->findAndGetUint16(DCM_Rows, rows));
     dicomCheck(dataset->findAndGetUint16(DCM_Columns, columns));
@@ -121,7 +122,7 @@ Image readDicom(const QString &path, std::stop_token stop, IoProgress progress)
     dicomCheck(dataset->findAndGetUint16(DCM_HighBit, highBit));
     dataset->findAndGetUint16(DCM_PixelRepresentation, representation);
     if (!rows || !columns || stored == 0 || stored > bits || highBit >= bits || highBit + 1 < stored)
-        throw std::runtime_error("Invalid DICOM pixel encoding");
+        throw std::runtime_error(QCoreApplication::translate("DicomIo", "Invalid DICOM pixel encoding").toStdString());
     OFString photometric;
     dicomCheck(dataset->findAndGetOFString(DCM_PhotometricInterpretation, photometric));
     PixelType type;
@@ -129,17 +130,17 @@ Image readDicom(const QString &path, std::stop_token stop, IoProgress progress)
     else if (samples == 1 && bits == 16 && representation == 0) type = PixelType::UInt16;
     else if (samples == 1 && bits == 16 && representation == 1) type = PixelType::Int16;
     else if (samples == 3 && bits == 8 && representation == 0 && photometric == "RGB") type = PixelType::RGB8;
-    else throw std::runtime_error("Unsupported DICOM pixel type");
+    else throw std::runtime_error(QCoreApplication::translate("DicomIo", "Unsupported DICOM pixel type").toStdString());
     if (samples == 1 && photometric != "MONOCHROME1" && photometric != "MONOCHROME2")
-        throw std::runtime_error("Unsupported DICOM photometric interpretation");
+        throw std::runtime_error(QCoreApplication::translate("DicomIo", "Unsupported DICOM photometric interpretation").toStdString());
     Sint32 frames = 1;
     if (dataset->tagExists(DCM_NumberOfFrames)) dicomCheck(dataset->findAndGetSint32(DCM_NumberOfFrames, frames));
-    if (frames <= 0) throw std::runtime_error("Invalid DICOM frame count");
+    if (frames <= 0) throw std::runtime_error(QCoreApplication::translate("DicomIo", "Invalid DICOM frame count").toStdString());
     const bool compressed = DcmXfer(dataset->getOriginalXfer()).isPixelDataCompressed();
     const auto pixelBytes = detail::dicomImageBytes(*dataset) * 2;
     const auto encodedBytes = compressed ? std::size_t(QFileInfo(path).size()) : 0;
     if (encodedBytes > std::numeric_limits<std::size_t>::max() - pixelBytes)
-        throw std::length_error("DICOM image exceeds the addressable size");
+        throw std::length_error(QCoreApplication::translate("DicomIo", "DICOM image exceeds the addressable size").toStdString());
     detail::checkMemoryBudget(pixelBytes + encodedBytes, detail::availableMemoryBytes());
     if (compressed) {
         static std::once_flag codecs;
@@ -150,7 +151,7 @@ Image readDicom(const QString &path, std::stop_token stop, IoProgress progress)
         });
         dicomCheck(dataset->chooseRepresentation(EXS_LittleEndianExplicit, nullptr));
         if (!dataset->canWriteXfer(EXS_LittleEndianExplicit))
-            throw std::runtime_error("DICOM compression is unsupported by the installed DCMTK codecs");
+            throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM compression is unsupported by the installed DCMTK codecs").toStdString());
     }
     ImageMetadata metadata;
     metadata.name = QFileInfo(path).fileName();
@@ -173,15 +174,15 @@ Image readDicom(const QString &path, std::stop_token stop, IoProgress progress)
         dot += orientation[i] * orientation[i + 3];
     }
     if (!std::isfinite(xLength + yLength + dot) || std::abs(xLength - 1) > 1e-3 || std::abs(yLength - 1) > 1e-3 || std::abs(dot) > 1e-3)
-        throw std::runtime_error("DICOM patient orientation is not orthonormal");
+        throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM patient orientation is not orthonormal").toStdString());
     metadata.direction = {orientation[0], orientation[3], normal[0], orientation[1], orientation[4], normal[1], orientation[2], orientation[5], normal[2]};
     metadata.axes = {{"X", spacingX, origin[0], "mm"}, {"Y", spacingY, origin[1], "mm"}, {"Z", spacingZ, origin[2], "mm"}};
     for (double spacing : {spacingX, spacingY, spacingZ})
-        if (!std::isfinite(spacing) || spacing <= 0) throw std::runtime_error("Invalid DICOM spacing");
+        if (!std::isfinite(spacing) || spacing <= 0) throw std::runtime_error(QCoreApplication::translate("DicomIo", "Invalid DICOM spacing").toStdString());
     metadata.intensityScale = dicomNumber(dataset, DCM_RescaleSlope, 1);
     metadata.intensityOffset = dicomNumber(dataset, DCM_RescaleIntercept, 0);
     if (!std::isfinite(metadata.intensityScale) || !std::isfinite(metadata.intensityOffset) || metadata.intensityScale == 0)
-        throw std::runtime_error("DICOM intensity calibration is invalid");
+        throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM intensity calibration is invalid").toStdString());
     OFString unit;
     if (dataset->findAndGetOFString(DCM_RescaleType, unit).good()) metadata.intensityUnit = QString::fromUtf8(unit.c_str());
     const auto attributes = dicomAttributes(*dataset, stop);
@@ -230,7 +231,7 @@ Image readDicom(const QString &path, std::stop_token stop, IoProgress progress)
         const Uint8 *source = nullptr;
         unsigned long length = 0;
         dicomCheck(dataset->findAndGetUint8Array(DCM_PixelData, source, &length));
-        if (length < count) throw std::runtime_error("DICOM pixel data is truncated");
+        if (length < count) throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM pixel data is truncated").toStdString());
         Uint16 planar = 0;
         if (samples == 3) dataset->findAndGetUint16(DCM_PlanarConfiguration, planar);
         if (samples == 3 && planar == 1) {
@@ -241,7 +242,7 @@ Image readDicom(const QString &path, std::stop_token stop, IoProgress progress)
                     for (std::size_t component = 0; component < 3; ++component)
                         output[(frame * plane + pixel) * 3 + component] = source[frame * plane * 3 + component * plane + pixel];
         } else {
-            if (planar > 1) throw std::runtime_error("Invalid DICOM planar configuration");
+            if (planar > 1) throw std::runtime_error(QCoreApplication::translate("DicomIo", "Invalid DICOM planar configuration").toStdString());
             std::memcpy(destination, source, image.byteCount());
         }
         if (samples == 1 && (stored < 8 || highBit != 7)) {
@@ -252,7 +253,7 @@ Image readDicom(const QString &path, std::stop_token stop, IoProgress progress)
         const Uint16 *source = nullptr;
         unsigned long length = 0;
         dicomCheck(dataset->findAndGetUint16Array(DCM_PixelData, source, &length));
-        if (length < count) throw std::runtime_error("DICOM pixel data is truncated");
+        if (length < count) throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM pixel data is truncated").toStdString());
         auto *output = reinterpret_cast<Uint16 *>(destination);
         const unsigned int mask = (1u << stored) - 1;
         const unsigned int sign = 1u << (stored - 1);
@@ -268,17 +269,17 @@ Image readDicom(const QString &path, std::stop_token stop, IoProgress progress)
 
 Image readDicomSeries(const QStringList &paths, std::stop_token stop, IoProgress progress)
 {
-    if (paths.isEmpty()) throw std::runtime_error("DICOM series is empty");
+    if (paths.isEmpty()) throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM series is empty").toStdString());
     const auto admission = lockDicomImport(stop);
     std::vector<Image> slices;
     for (int i = 0; i < paths.size(); ++i) {
         detail::checkIo(stop, progress, 0.8 * i / paths.size());
         auto slice = readDicom(paths[i], stop);
         if (slice.depth() != 1 || componentCount(slice.pixelType()) != 1)
-            throw std::runtime_error("Series import requires single-frame scalar DICOM files");
+            throw std::runtime_error(QCoreApplication::translate("DicomIo", "Series import requires single-frame scalar DICOM files").toStdString());
         if (slices.empty()) {
             if (std::size_t(paths.size()) > std::numeric_limits<std::size_t>::max() / slice.byteCount())
-                throw std::length_error("DICOM series exceeds the addressable size");
+                throw std::length_error(QCoreApplication::translate("DicomIo", "DICOM series exceeds the addressable size").toStdString());
             checkDicomImportMemory({{paths, slice.byteCount() * paths.size()}}, detail::availableMemoryBytes());
         }
         slices.push_back(std::move(slice));
@@ -287,7 +288,7 @@ Image readDicomSeries(const QStringList &paths, std::stop_token stop, IoProgress
     const auto &metadata = reference.metadata();
     const auto &direction = metadata.direction;
     if (metadata.attributes.value("DICOM.0020,000e").isEmpty())
-        throw std::runtime_error("DICOM series requires a Series Instance UID");
+        throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM series requires a Series Instance UID").toStdString());
     const std::array<double, 3> normal{direction[2], direction[5], direction[8]};
     std::vector<double> positions;
     for (const auto &slice : slices) {
@@ -299,14 +300,14 @@ Image readDicomSeries(const QStringList &paths, std::stop_token stop, IoProgress
             current.attributes.value("DICOM.0028,0004") != metadata.attributes.value("DICOM.0028,0004") ||
             current.intensityUnit != metadata.intensityUnit ||
             current.intensityScale != metadata.intensityScale || current.intensityOffset != metadata.intensityOffset)
-            throw std::runtime_error("DICOM files have inconsistent series or pixel encoding");
+            throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM files have inconsistent series or pixel encoding").toStdString());
         if (!current.attributes.contains("DICOM.0020,0032") || !current.attributes.contains("DICOM.0020,0037"))
-            throw std::runtime_error("DICOM series requires patient position and orientation on every slice");
+            throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM series requires patient position and orientation on every slice").toStdString());
         for (std::size_t i = 0; i < 9; ++i)
-            if (std::abs(current.direction[i] - direction[i]) > 1e-5) throw std::runtime_error("DICOM series has inconsistent orientation");
+            if (std::abs(current.direction[i] - direction[i]) > 1e-5) throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM series has inconsistent orientation").toStdString());
         for (std::size_t axis = 0; axis < 2; ++axis)
             if (std::abs(current.axes[axis].spacing - metadata.axes[axis].spacing) > 1e-5)
-                throw std::runtime_error("DICOM series has inconsistent pixel spacing");
+                throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM series has inconsistent pixel spacing").toStdString());
         double position = 0;
         for (std::size_t axis = 0; axis < 3; ++axis) position += current.axes[axis].origin * normal[axis];
         positions.push_back(position);
@@ -319,19 +320,19 @@ Image readDicomSeries(const QStringList &paths, std::stop_token stop, IoProgress
     if (paths.size() > 1) outputMetadata.sourcePath.clear();
     if (slices.size() > 1) {
         const auto spacing = positions[order[1]] - positions[order[0]];
-        if (spacing < 1e-6) throw std::runtime_error("DICOM series contains duplicate slice positions");
+        if (spacing < 1e-6) throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM series contains duplicate slice positions").toStdString());
         outputMetadata.axes[2].spacing = spacing;
         for (std::size_t i = 1; i < order.size(); ++i) {
             if (std::abs(positions[order[i]] - positions[order[i - 1]] - spacing) > std::max(1e-4, spacing * 1e-3))
-                throw std::runtime_error("DICOM series has nonuniform slice spacing");
+                throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM series has nonuniform slice spacing").toStdString());
             // Reject gantry tilt rather than silently assigning incorrect orthogonal geometry.
             for (std::size_t axis = 0; axis < 3; ++axis)
                 if (std::abs(slices[order[i]].metadata().axes[axis].origin - outputMetadata.axes[axis].origin - normal[axis] * spacing * i) > 1e-3)
-                    throw std::runtime_error("DICOM series has a shifted slice grid");
+                    throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM series has a shifted slice grid").toStdString());
         }
     }
     if (slices.size() > std::numeric_limits<std::size_t>::max() / reference.byteCount())
-        throw std::length_error("DICOM series exceeds the addressable size");
+        throw std::length_error(QCoreApplication::translate("DicomIo", "DICOM series exceeds the addressable size").toStdString());
     detail::checkMemoryBudget(reference.byteCount() * slices.size(), detail::availableMemoryBytes());
     auto image = Image::allocate(reference.pixelType(), {reference.width(), reference.height(), slices.size()}, outputMetadata);
     auto *destination = image.mutableData();
@@ -347,9 +348,9 @@ void writeDicom(const Image &input, const QString &path, std::stop_token stop, I
 {
     detail::checkIo(stop, progress, 0);
     if (input.empty() || input.width() > 65535 || input.height() > 65535 || input.channels() != 1 || input.frames() != 1 || input.depth() > 1 || input.byteCount() > UINT32_MAX - 1)
-        throw std::runtime_error("DICOM export supports one 2D image; save volumes as TIFF or a scientific format");
+        throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM export supports one 2D image; save volumes as TIFF or a scientific format").toStdString());
     if (input.pixelType() != PixelType::UInt8 && input.pixelType() != PixelType::UInt16 && input.pixelType() != PixelType::Int16 && input.pixelType() != PixelType::RGB8)
-        throw std::runtime_error("DICOM export requires UInt8, UInt16, Int16 or RGB8 pixels");
+        throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM export requires UInt8, UInt16, Int16 or RGB8 pixels").toStdString());
     const Image image = input.materialized();
     const auto &metadata = image.metadata();
     DcmFileFormat file;
@@ -394,21 +395,21 @@ void writeDicom(const Image &input, const QString &path, std::stop_token stop, I
                 metadata.axes.size() > 2 ? metadata.axes[2].unit : metadata.axes[0].unit))};
         const double spacingX = metadata.axes[0].spacing * factors[0], spacingY = metadata.axes[1].spacing * factors[1];
         if (!std::isfinite(spacingX) || spacingX <= 0 || !std::isfinite(spacingY) || spacingY <= 0)
-            throw std::runtime_error("DICOM pixel spacing is invalid");
+            throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM pixel spacing is invalid").toStdString());
         const auto spacing = QString::number(spacingY, 'g', 12) + "\\" + QString::number(spacingX, 'g', 12);
         dicomCheck(dataset->putAndInsertString(DCM_PixelSpacing, spacing.toLatin1().constData()));
         std::array<double, 3> origin{metadata.axes[0].origin, metadata.axes[1].origin, metadata.axes.size() > 2 ? metadata.axes[2].origin : 0};
         if (metadata.attributes.contains("ImageCXX.EmbeddedPlaneOrigin")) {
             const auto embedded = QJsonDocument::fromJson(metadata.attributes.value("ImageCXX.EmbeddedPlaneOrigin").toUtf8()).array();
-            if (embedded.size() != 3) throw std::runtime_error("Invalid embedded DICOM plane origin");
+            if (embedded.size() != 3) throw std::runtime_error(QCoreApplication::translate("DicomIo", "Invalid embedded DICOM plane origin").toStdString());
             for (int axis = 0; axis < 3; ++axis) {
-                if (!embedded[axis].isDouble() || !std::isfinite(embedded[axis].toDouble())) throw std::runtime_error("Invalid embedded DICOM plane origin");
+                if (!embedded[axis].isDouble() || !std::isfinite(embedded[axis].toDouble())) throw std::runtime_error(QCoreApplication::translate("DicomIo", "Invalid embedded DICOM plane origin").toStdString());
                 origin[axis] = embedded[axis].toDouble();
             }
         }
         for (std::size_t axis = 0; axis < 3; ++axis) {
             origin[axis] *= factors[axis];
-            if (!std::isfinite(origin[axis])) throw std::runtime_error("DICOM patient position is invalid");
+            if (!std::isfinite(origin[axis])) throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM patient position is invalid").toStdString());
         }
         const auto position = QString::number(origin[0], 'g', 12) + "\\" + QString::number(origin[1], 'g', 12) + "\\" + QString::number(origin[2], 'g', 12);
         dicomCheck(dataset->putAndInsertString(DCM_ImagePositionPatient, position.toLatin1().constData()));
@@ -434,9 +435,9 @@ void writeDicom(const Image &input, const QString &path, std::stop_token stop, I
         }
         if (!occupied) break;
     }
-    if (archiveSlot > 0xff) throw std::runtime_error("No private DICOM block available to preserve ImageCXX metadata");
+    if (archiveSlot > 0xff) throw std::runtime_error(QCoreApplication::translate("DicomIo", "No private DICOM block available to preserve ImageCXX metadata").toStdString());
     const auto description = QJsonDocument(detail::imageDescription(image)).toJson(QJsonDocument::Compact);
-    if (description.size() > UINT32_MAX - 1) throw std::runtime_error("DICOM metadata exceeds the format length limit");
+    if (description.size() > UINT32_MAX - 1) throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM metadata exceeds the format length limit").toStdString());
     dicomCheck(dataset->putAndInsertString(DcmTag(DcmTagKey(0x7777, archiveSlot), EVR_LO), "IMAGECXX_METADATA"));
     dicomCheck(dataset->putAndInsertUint8Array(DcmTag(DcmTagKey(0x7777, (archiveSlot << 8) | 1), EVR_OB),
         reinterpret_cast<const Uint8 *>(description.constData()), static_cast<unsigned long>(description.size())));
@@ -444,7 +445,7 @@ void writeDicom(const Image &input, const QString &path, std::stop_token stop, I
     if (bits == 8) dicomCheck(dataset->putAndInsertUint8Array(DCM_PixelData, reinterpret_cast<const Uint8 *>(image.data()), static_cast<unsigned long>(image.byteCount())));
     else dicomCheck(dataset->putAndInsertUint16Array(DCM_PixelData, reinterpret_cast<const Uint16 *>(image.data()), static_cast<unsigned long>(image.pixelCount())));
     QTemporaryDir staging(QDir(QFileInfo(path).absolutePath()).filePath(".imagecxx-XXXXXX"));
-    if (!staging.isValid()) throw std::runtime_error("Cannot create temporary DICOM output");
+    if (!staging.isValid()) throw std::runtime_error(QCoreApplication::translate("DicomIo", "Cannot create temporary DICOM output").toStdString());
     const auto stagedPath = staging.filePath("image.dcm");
     dicomCheck(file.saveFile(QFile::encodeName(stagedPath).constData(), EXS_LittleEndianExplicit));
     detail::checkIo(stop, progress, 0.85);

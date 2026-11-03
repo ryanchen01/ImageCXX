@@ -60,7 +60,9 @@ OverlayWindow::OverlayWindow(DocumentWidget *document, QWidget *parent)
     lut_ = new QComboBox(editor_);
     lut_->setObjectName("overlayLut");
     lut_->setAccessibleName(tr("LUT"));
-    lut_->addItems({"grayscale", "hot", "viridis"});
+    lut_->addItem(tr("grayscale"), "grayscale");
+    lut_->addItem(tr("hot"), "hot");
+    lut_->addItem(tr("viridis"), "viridis");
     opacity_ = new QSpinBox(editor_);
     opacity_->setObjectName("overlayOpacity");
     opacity_->setAccessibleName(tr("Opacity"));
@@ -87,8 +89,8 @@ OverlayWindow::OverlayWindow(DocumentWidget *document, QWidget *parent)
     connect(images_->model(), &QAbstractItemModel::rowsRemoved, this, [this] { updateLayers(); });
     connect(images_, &QTreeWidget::itemChanged, this, [this] { updateLayers(); });
     connect(images_, &QTreeWidget::currentItemChanged, this, [this] { refreshEditor(); });
-    connect(lut_, &QComboBox::currentTextChanged, this, [this](const QString &name) {
-        if (auto *item = images_->currentItem()) item->setData(0, Qt::UserRole + 1, name);
+    connect(lut_, &QComboBox::currentIndexChanged, this, [this](int) {
+        if (auto *item = images_->currentItem()) item->setData(0, Qt::UserRole + 1, lut_->currentData());
     });
     connect(opacity_, &QSpinBox::valueChanged, this, [this](int value) {
         if (auto *item = images_->currentItem()) item->setData(0, Qt::UserRole + 2, value);
@@ -192,7 +194,7 @@ void OverlayWindow::refreshEditor()
     opacity_->setEnabled(item != nullptr);
     opacitySlider_->setEnabled(item != nullptr);
     if (item) {
-        lut_->setCurrentText(item->data(0, Qt::UserRole + 1).toString());
+        lut_->setCurrentIndex(lut_->findData(item->data(0, Qt::UserRole + 1)));
         opacity_->setValue(item->data(0, Qt::UserRole + 2).toInt());
         opacitySlider_->setValue(opacity_->value());
     }

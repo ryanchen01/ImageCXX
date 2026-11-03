@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include <QCoreApplication>
 #include "app/batch.h"
 #include "app/processing_commands.h"
 #include "io/image_io.h"
@@ -115,7 +116,7 @@ Image imageFromRaster(QImage raster)
     } else {
         type = PixelType::RGB8; raster = raster.convertToFormat(QImage::Format_RGB888);
     }
-    if (raster.isNull()) throw std::runtime_error("Cannot convert clipboard image");
+    if (raster.isNull()) throw std::runtime_error(QCoreApplication::translate("MainWindow", "Cannot convert clipboard image").toStdString());
     auto image = Image::allocate(type, {std::size_t(raster.width()), std::size_t(raster.height())});
     auto *data = image.mutableData(); const auto rowBytes = image.width() * bytesPerPixel(type);
     for (int y = 0; y < raster.height(); ++y) std::memcpy(data + y * rowBytes, raster.constScanLine(y), rowBytes);
@@ -135,7 +136,7 @@ Image cropToBounds(const Image &image, const QRectF &bounds)
 QImage displayRaster(const Image &image, double minimum, double maximum, std::stop_token stop = {})
 {
     QImage raster(int(image.width()), int(image.height()), QImage::Format_RGBA8888);
-    if (raster.isNull()) throw std::runtime_error("Cannot allocate display image");
+    if (raster.isNull()) throw std::runtime_error(QCoreApplication::translate("MainWindow", "Cannot allocate display image").toStdString());
     const auto components = componentCount(image.pixelType());
     for (int y = 0; y < raster.height(); ++y) {
         if (stop.stop_requested()) return {};
@@ -212,22 +213,22 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         if (!busy) jobStatus_->clear();
     });
 
-    commands_.add({"file.open", tr("Open images..."), "File", QKeySequence::Open, false, {}, [this](const QVariantMap &) {
+    commands_.add({"file.open", tr("Open images..."), QT_TRANSLATE_NOOP("CommandCategories", "File"), QKeySequence::Open, false, {}, [this](const QVariantMap &) {
         openPaths(QFileDialog::getOpenFileNames(this, tr("Open images"), {}, imageFileFilter()));
     }});
-    commands_.add({"file.folder", tr("Open folder..."), "File", {}, false, {}, [this](const QVariantMap &) {
+    commands_.add({"file.folder", tr("Open folder..."), QT_TRANSLATE_NOOP("CommandCategories", "File"), {}, false, {}, [this](const QVariantMap &) {
         const auto path = QFileDialog::getExistingDirectory(this, tr("Open image folder"));
         if (!path.isEmpty()) openPaths({path});
     }});
-    commands_.add({"file.raw", tr("Import raw binary..."), "File", {}, false, {}, [this](const QVariantMap &) {
+    commands_.add({"file.raw", tr("Import raw binary..."), QT_TRANSLATE_NOOP("CommandCategories", "File"), {}, false, {}, [this](const QVariantMap &) {
         const auto path = QFileDialog::getOpenFileName(this, tr("Import raw binary"));
         if (path.isEmpty()) return;
         importRaw(path);
     }});
-    commands_.add({"file.dicomSeries", tr("Open DICOM series..."), "File", {}, false, {}, [this](const QVariantMap &) {
-        openPaths(QFileDialog::getOpenFileNames(this, tr("Select DICOM files"), {}, "DICOM (*.dcm *.dicom);;All files (*)"));
+    commands_.add({"file.dicomSeries", tr("Open DICOM series..."), QT_TRANSLATE_NOOP("CommandCategories", "File"), {}, false, {}, [this](const QVariantMap &) {
+        openPaths(QFileDialog::getOpenFileNames(this, tr("Select DICOM files"), {}, tr("DICOM (*.dcm *.dicom);;All files (*)")));
     }});
-    commands_.add({"file.save", tr("Save image as..."), "File", QKeySequence::Save, true, {}, [this](const QVariantMap &) {
+    commands_.add({"file.save", tr("Save image as..."), QT_TRANSLATE_NOOP("CommandCategories", "File"), QKeySequence::Save, true, {}, [this](const QVariantMap &) {
         const QPointer<DocumentWidget> document = activeDocument(); if (!document) return;
         const auto path = QFileDialog::getSaveFileName(this, tr("Save image"), (document->image.metadata().name.isEmpty() ? tr("Untitled") : QFileInfo(document->image.metadata().name).completeBaseName()) + ".tif", imageSaveFilter());
         if (path.isEmpty() || !document) return;
@@ -258,8 +259,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                 statusBar()->showMessage(tr("Saved %1").arg(path), 5000);
             });
     }});
-    commands_.add({"file.sample", tr("Open sample stack"), "File", {}, false, {}, [this](const QVariantMap &) {
-        ImageMetadata metadata; metadata.name = "Cells · sample stack";
+    commands_.add({"file.sample", tr("Open sample stack"), QT_TRANSLATE_NOOP("CommandCategories", "File"), {}, false, {}, [this](const QVariantMap &) {
+        ImageMetadata metadata; metadata.name = tr("Cells · sample stack");
         metadata.axes = {{"X", .25, 0, "µm"}, {"Y", .25, 0, "µm"}, {"Z", 1, 0, "µm"}};
         metadata.intensityUnit = "a.u.";
         auto image = Image::allocate(PixelType::UInt16, {384, 320, 12}, metadata);
@@ -275,12 +276,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         }
         addDocument(std::move(image));
     }});
-    commands_.add({"edit.undo", tr("Undo processing"), "Edit", QKeySequence::Undo, true, {}, [this](const QVariantMap &) {
+    commands_.add({"edit.undo", tr("Undo processing"), QT_TRANSLATE_NOOP("CommandCategories", "Edit"), QKeySequence::Undo, true, {}, [this](const QVariantMap &) {
         if (auto *doc = activeDocument()) if (auto image = doc->history.undo(doc->image)) {
             doc->image = std::move(*image); doc->modified = true; ++doc->revision; doc->refresh(); updatePanels();
         }
     }});
-    commands_.add({"edit.redo", tr("Redo processing"), "Edit", QKeySequence::Redo, true, {}, [this](const QVariantMap &) {
+    commands_.add({"edit.redo", tr("Redo processing"), QT_TRANSLATE_NOOP("CommandCategories", "Edit"), QKeySequence::Redo, true, {}, [this](const QVariantMap &) {
         if (auto *doc = activeDocument()) if (auto image = doc->history.redo(doc->image)) {
             doc->image = std::move(*image); doc->modified = true; ++doc->revision; doc->refresh(); updatePanels();
         }
@@ -318,13 +319,13 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                 updatePanels();
             });
     });
-    commands_.add({"stacks.reslice", tr("Reslice..."), "Stacks", {}, true, {}, [this](const QVariantMap &) {
+    commands_.add({"stacks.reslice", tr("Reslice..."), QT_TRANSLATE_NOOP("CommandCategories", "Stacks"), {}, true, {}, [this](const QVariantMap &) {
         const auto *document = activeDocument(); if (!document) return;
         const Image input = document->image;
         QSettings settings; settings.beginGroup("reslice/v1");
         ResliceOptions options;
         options.outputSpacing = settings.value("outputSpacing", input.metadata().axes.size() > 2 ? input.metadata().axes[2].spacing : 1).toDouble();
-        if (input.depth() < 2) throw std::invalid_argument("Reslice requires a Z stack with at least two slices");
+        if (input.depth() < 2) throw std::invalid_argument(QCoreApplication::translate("MainWindow", "Reslice requires a Z stack with at least two slices").toStdString());
         QDialog dialog(this);
         dialog.setObjectName("resliceDialog"); dialog.setWindowTitle(tr("Reslice")); dialog.setMinimumWidth(360);
         auto *layout = new QFormLayout(&dialog);
@@ -413,7 +414,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             addDocument(*output)->modified = true; updatePanels();
         });
     }});
-    commands_.add({"stacks.project3d", tr("3D Project..."), "Stacks", {}, true, {}, [this](const QVariantMap &) {
+    commands_.add({"stacks.project3d", tr("3D Project..."), QT_TRANSLATE_NOOP("CommandCategories", "Stacks"), {}, true, {}, [this](const QVariantMap &) {
         const auto *document = activeDocument(); if (!document) return;
         const Image input = document->image;
         QSettings settings; settings.beginGroup("projection3d/v1");
@@ -500,7 +501,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             options.surfaceDepthCue = int(surface->value()); options.interiorDepthCue = int(interior->value());
             options.interpolate = interpolate->isChecked();
             try {
-                if (!lowerValid || !upperValid) throw std::invalid_argument("Enter numeric transparency bounds");
+                if (!lowerValid || !upperValid) throw std::invalid_argument(QCoreApplication::translate("MainWindow", "Enter numeric transparency bounds").toStdString());
                 const auto geometry = projectionGeometry(input, options);
                 detail::checkMemoryBudget(geometry.requiredMemoryBytes, detail::availableMemoryBytes());
                 size->setText(tr("Output: %1 × %2 × %3 angles, %4 MiB").arg(geometry.shape[0]).arg(geometry.shape[1])
@@ -537,7 +538,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             for (std::size_t t = 0; t < input.frames(); ++t) for (std::size_t c = 0; c < input.channels(); ++c)
                 for (std::size_t z = 0; z < input.depth(); ++z) for (std::size_t y = 0; y < input.height(); ++y) {
                     if (stop.stop_requested() || rangeCancellation.stop_requested())
-                        throw std::runtime_error("Intensity range calculation cancelled");
+                        throw std::runtime_error(QCoreApplication::translate("MainWindow", "Intensity range calculation cancelled").toStdString());
                     for (std::size_t x = 0; x < input.width(); ++x)
                         for (std::size_t k = 0; k < componentCount(input.pixelType()); ++k) {
                             const double value = input.sample(x, y, z, c, t, k);
@@ -546,7 +547,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                         }
                     progress(double(++rows) / totalRows);
                 }
-            if (!std::isfinite((*range)[0])) throw std::invalid_argument("The image has no finite intensity values");
+            if (!std::isfinite((*range)[0])) throw std::invalid_argument(QCoreApplication::translate("MainWindow", "The image has no finite intensity values").toStdString());
         }, [guard = QPointer<QDialog>(&dialog), range, lower, upper, size, update](auto error) {
             if (!guard) return;
             if (error) {
@@ -571,7 +572,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             addDocument(*output)->modified = true; updatePanels();
         });
     }});
-    commands_.add({"analyze.measure", tr("Measure selection"), "Analyze", QKeySequence("M"), true, {}, [this](const QVariantMap &) {
+    commands_.add({"analyze.measure", tr("Measure selection"), QT_TRANSLATE_NOOP("CommandCategories", "Analyze"), QKeySequence("M"), true, {}, [this](const QVariantMap &) {
         const auto *doc = activeDocument(); if (!doc) return;
         const auto slice = doc->image.slice(doc->viewer->slice(), doc->viewer->channel(), doc->viewer->time());
         const auto roi = selectedRoi();
@@ -589,11 +590,11 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                 results_->appendRow(row); showPanel("measurements");
             });
     }});
-    commands_.add({"analyze.histogram", tr("Histogram"), "Analyze", QKeySequence("H"), true, {}, [this](const QVariantMap &) { showPlot(false); }});
-    commands_.add({"analyze.profile", tr("Line profile"), "Analyze", QKeySequence("K"), true, {}, [this](const QVariantMap &) { showPlot(true); }});
+    commands_.add({"analyze.histogram", tr("Histogram"), QT_TRANSLATE_NOOP("CommandCategories", "Analyze"), QKeySequence("H"), true, {}, [this](const QVariantMap &) { showPlot(false); }});
+    commands_.add({"analyze.profile", tr("Line profile"), QT_TRANSLATE_NOOP("CommandCategories", "Analyze"), QKeySequence("K"), true, {}, [this](const QVariantMap &) { showPlot(true); }});
     for (bool first : {true, false}) {
         commands_.add({first ? "gel.first" : "gel.next", first ? tr("Select first lane") : tr("Select next lane"),
-            "Gels", QKeySequence(first ? "1" : "2"), true, {}, [this, first](const QVariantMap &) {
+            QT_TRANSLATE_NOOP("CommandCategories", "Gels"), QKeySequence(first ? "1" : "2"), true, {}, [this, first](const QVariantMap &) {
             auto *doc = activeDocument(); if (!doc) return;
             auto roi = selectedRoi();
             if (!roi || roi->type != RoiType::Rectangle || roi->points.size() != 2) {
@@ -633,15 +634,15 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                 .arg(roi->name).arg(doc->gelLanes.size()), 5000);
         }});
     }
-    commands_.add({"gel.options", tr("Gel analyzer options..."), "Gels", {}, true,
-        {{"orientation", tr("Lane direction"), ParameterKind::Choice, "Vertical", 0, 0, {"Vertical", "Horizontal"}},
+    commands_.add({"gel.options", tr("Gel analyzer options..."), QT_TRANSLATE_NOOP("CommandCategories", "Gels"), {}, true,
+        {{"orientation", tr("Lane direction"), ParameterKind::Choice, QT_TRANSLATE_NOOP("CommandChoices", "Vertical"), 0, 0, {QT_TRANSLATE_NOOP("CommandChoices", "Vertical"), QT_TRANSLATE_NOOP("CommandChoices", "Horizontal")}},
          {"darkBands", tr("Dark bands on a light background"), ParameterKind::Boolean, true, 0, 0, {}}}, [this](const QVariantMap &p) {
         auto *doc = activeDocument(); if (!doc) return;
         const bool horizontal = p.value("orientation").toString() == "Horizontal";
         if (horizontal != doc->gelHorizontal) { doc->gelLanes.clear(); doc->refreshRois(); }
         doc->gelHorizontal = horizontal; doc->gelDarkBands = p.value("darkBands").toBool();
     }});
-    commands_.add({"gel.plot", tr("Plot lanes"), "Gels", QKeySequence("3"), true, {}, [this](const QVariantMap &) {
+    commands_.add({"gel.plot", tr("Plot lanes"), QT_TRANSLATE_NOOP("CommandCategories", "Gels"), QKeySequence("3"), true, {}, [this](const QVariantMap &) {
         auto *doc = activeDocument(); if (!doc) return;
         if (doc->gelLanes.empty()) { showError(tr("Select the first lane before plotting.")); return; }
         const auto lanes = doc->gelLanes;
@@ -664,7 +665,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             window->show(); window->raise(); window->activateWindow();
         });
     }});
-    commands_.add({"gel.label", tr("Label peaks"), "Gels", {}, false, {}, [this](const QVariantMap &) {
+    commands_.add({"gel.label", tr("Label peaks"), QT_TRANSLATE_NOOP("CommandCategories", "Gels"), {}, false, {}, [this](const QVariantMap &) {
         auto *window = qobject_cast<GelWindow *>(QApplication::activeWindow());
         if (!window) {
             const auto plots = findChildren<GelWindow *>();
@@ -673,8 +674,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         if (!window) { showError(tr("Plot gel lanes and measure bands first.")); return; }
         window->labelPeaks(); window->showNormal(); window->raise(); window->activateWindow();
     }});
-    commands_.add({"analyze.roiPlot", tr("Plot ROI measurements..."), "Analyze", {}, true,
-        {{"axis", tr("Axis"), ParameterKind::Choice, "Time", 0, 0, {"Time", "Z"}}}, [this](const QVariantMap &p) {
+    commands_.add({"analyze.roiPlot", tr("Plot ROI measurements..."), QT_TRANSLATE_NOOP("CommandCategories", "Analyze"), {}, true,
+        {{"axis", tr("Axis"), ParameterKind::Choice, QT_TRANSLATE_NOOP("CommandChoices", "Time"), 0, 0, {QT_TRANSLATE_NOOP("CommandChoices", "Time"), QT_TRANSLATE_NOOP("CommandChoices", "Z")}}}, [this](const QVariantMap &p) {
         const auto *doc = activeDocument(); if (!doc) return;
         const auto roi = selectedRoi();
         if (!roi || roi->type == RoiType::Line) { showError(tr("Select an area ROI first.")); return; }
@@ -703,15 +704,15 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                     output->csv += fields.join(',').toUtf8() + '\n';
                 };
                 const auto number = [](double value) { return QString::number(value, 'g', std::numeric_limits<double>::max_digits10); };
-                appendRow({"Image", "ROI", "Z", "Channel", "Frame", xTitle, "Count", "Area", "Mean",
-                    "StdDev", "Min", "Max", "Sum", "Area unit", "Intensity unit"});
+                appendRow({tr("Image"), tr("ROI"), tr("Z"), tr("Channel"), tr("Frame"), xTitle, tr("Count"), tr("Area"), tr("Mean"),
+                    tr("StdDev"), tr("Min"), tr("Max"), tr("Sum"), tr("Area unit"), tr("Intensity unit")});
                 output->points.reserve(count);
                 for (std::size_t i = 0; i < count; ++i) {
                     // Reuse the selected XY geometry on every plane; other axes stay fixed.
                     const auto sliceZ = overTime ? z : i, frame = overTime ? i : time;
                     const auto m = measure(image.slice(sliceZ, channel, frame), roi, true, stop);
                     const double position = calibrated ? axis.origin + double(i) * axis.spacing : double(i + 1);
-                    if (!std::isfinite(position)) throw std::invalid_argument("The series axis coordinates are not finite.");
+                    if (!std::isfinite(position)) throw std::invalid_argument(QCoreApplication::translate("MainWindow", "The series axis coordinates are not finite.").toStdString());
                     output->points.emplace_back(position, m.mean);
                     appendRow({m.imageName, roiName, QString::number(sliceZ + 1), QString::number(channel + 1),
                         QString::number(frame + 1), number(position), QString::number(m.count), number(m.area),
@@ -738,7 +739,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                 layout->addWidget(exportButton, 0, Qt::AlignRight);
                 connect(exportButton, &QPushButton::clicked, window, [this, window, output] {
                     const auto path = QFileDialog::getSaveFileName(window, tr("Export ROI measurements"),
-                        "roi-measurements.csv", "CSV (*.csv)");
+                        "roi-measurements.csv", tr("CSV (*.csv)"));
                     if (path.isEmpty()) return;
                     QSaveFile file(path);
                     if (!file.open(QIODevice::WriteOnly) || file.write(output->csv) != output->csv.size() || !file.commit())
@@ -747,7 +748,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                 window->show(); window->raise(); window->activateWindow();
             });
     }});
-    commands_.add({"analyze.mask", tr("Create mask from ROI"), "Analyze", {}, true, {}, [this](const QVariantMap &) {
+    commands_.add({"analyze.mask", tr("Create mask from ROI"), QT_TRANSLATE_NOOP("CommandCategories", "Analyze"), {}, true, {}, [this](const QVariantMap &) {
         auto *doc = activeDocument(); const auto roi = selectedRoi();
         if (!doc || !roi || roi->type == RoiType::Line) { showError(tr("Select an area ROI first.")); return; }
         const auto slice = doc->image.slice(doc->viewer->slice(), doc->viewer->channel(), doc->viewer->time());
@@ -763,8 +764,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                 auto *mask = addDocument(output->pixels); mask->modified = true; updatePanels();
             });
     }});
-    commands_.add({"results.export", tr("Export measurements as CSV..."), "Analyze", {}, false, {}, [this](const QVariantMap &) {
-        const auto path = QFileDialog::getSaveFileName(this, tr("Export measurements"), "measurements.csv", "CSV (*.csv)");
+    commands_.add({"results.export", tr("Export measurements as CSV..."), QT_TRANSLATE_NOOP("CommandCategories", "Analyze"), {}, false, {}, [this](const QVariantMap &) {
+        const auto path = QFileDialog::getSaveFileName(this, tr("Export measurements"), "measurements.csv", tr("CSV (*.csv)"));
         if (path.isEmpty()) return;
         const int rowCount = results_->rowCount();
         QByteArray bytes;
@@ -781,7 +782,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         }
         exportedMeasurementRows_ = rowCount;
     }});
-    commands_.add({"process.batch", tr("Batch process files..."), "Process", {}, false, {}, [this](const QVariantMap &) {
+    commands_.add({"process.batch", tr("Batch process files..."), QT_TRANSLATE_NOOP("CommandCategories", "Process"), {}, false, {}, [this](const QVariantMap &) {
         QStringList labels, ids;
         CommandRegistry processing;
         registerProcessingCommands(processing, [](const QString &, const QVariantMap &) {});
@@ -802,7 +803,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     }});
 
     for (const bool cut : {false, true}) {
-        commands_.add({cut ? "edit.cut" : "edit.copy", cut ? tr("Cut") : tr("Copy"), "Edit",
+        commands_.add({cut ? "edit.cut" : "edit.copy", cut ? tr("Cut") : tr("Copy"), QT_TRANSLATE_NOOP("CommandCategories", "Edit"),
             QKeySequence(cut ? "X" : "C"), true, {}, [this, cut](const QVariantMap &) {
             const auto *doc = activeDocument(); if (!doc) return;
             auto image = doc->image.slice(doc->viewer->slice(), doc->viewer->channel(), doc->viewer->time());
@@ -831,7 +832,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                 const auto required = 4.L * image.width() * image.height() + 12.L * width * height + 8 * 1024 * 1024;
                 constexpr std::size_t exportBudget = 512 * 1024 * 1024;
                 if (width > std::numeric_limits<int>::max() || height > std::numeric_limits<int>::max() || required > exportBudget)
-                    throw std::length_error("PNG export exceeds the clipboard memory limit.");
+                    throw std::length_error(QCoreApplication::translate("MainWindow", "PNG export exceeds the clipboard memory limit.").toStdString());
                 detail::checkMemoryBudget(std::size_t(required), detail::availableMemoryBytes());
                 auto &[raster, bytes] = *output;
                 raster = displayRaster(image, minimum, maximum, token);
@@ -842,7 +843,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                 if (token.stop_requested()) return;
                 QBuffer png(&bytes);
                 if (!png.open(QIODevice::WriteOnly) || !raster.save(&png, "PNG"))
-                    throw std::runtime_error("Cannot encode clipboard PNG");
+                    throw std::runtime_error(QCoreApplication::translate("MainWindow", "Cannot encode clipboard PNG").toStdString());
                 progress(1);
             }, [this, pending, output, cancellation](auto error) {
                 if (!pending || cancellation.stop_requested() || QApplication::clipboard()->mimeData() != pending.data()) return;
@@ -863,12 +864,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             if (cut) executeCommand("edit.clear");
         }});
     }
-    commands_.add({"edit.paste", tr("Paste"), "Edit", QKeySequence("V"), false, {}, [this](const QVariantMap &) {
+    commands_.add({"edit.paste", tr("Paste"), QT_TRANSLATE_NOOP("CommandCategories", "Edit"), QKeySequence("V"), false, {}, [this](const QVariantMap &) {
         pasteImage(false, false);
     }});
-    commands_.add({"edit.pasteSpecial", tr("Paste special..."), "Edit", {}, false,
-        {{"source", tr("Source"), ParameterKind::Choice, "Automatic", 0, 0, {"Automatic", "System image"}},
-         {"destination", tr("Destination"), ParameterKind::Choice, "Current image", 0, 0, {"Current image", "New image"}}},
+    commands_.add({"edit.pasteSpecial", tr("Paste special..."), QT_TRANSLATE_NOOP("CommandCategories", "Edit"), {}, false,
+        {{"source", tr("Source"), ParameterKind::Choice, QT_TRANSLATE_NOOP("CommandChoices", "Automatic"), 0, 0, {QT_TRANSLATE_NOOP("CommandChoices", "Automatic"), QT_TRANSLATE_NOOP("CommandChoices", "System image")}},
+         {"destination", tr("Destination"), ParameterKind::Choice, QT_TRANSLATE_NOOP("CommandChoices", "Current image"), 0, 0, {QT_TRANSLATE_NOOP("CommandChoices", "Current image"), QT_TRANSLATE_NOOP("CommandChoices", "New image")}}},
         [this](const QVariantMap &parameters) {
             pasteImage(parameters["source"].toString() == "System image", parameters["destination"].toString() == "New image");
     }});
@@ -882,7 +883,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             addDocument(std::move(image))->modified = true; updatePanels();
         }});
     }
-    commands_.add({"file.print", tr("Print..."), "File", QKeySequence("P"), true, {}, [this](const QVariantMap &) {
+    commands_.add({"file.print", tr("Print..."), QT_TRANSLATE_NOOP("CommandCategories", "File"), QKeySequence("P"), true, {}, [this](const QVariantMap &) {
         const auto *doc = activeDocument(); if (!doc) return;
         const auto raster = displayRaster(doc->image.slice(doc->viewer->slice(), doc->viewer->channel(), doc->viewer->time()),
                                           doc->viewer->windowMinimum(), doc->viewer->windowMaximum());
@@ -892,12 +893,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         const auto size = raster.size().scaled(painter.viewport().size(), Qt::KeepAspectRatio);
         painter.drawImage(QRect(QPoint(0, 0), size), raster);
     }});
-    commands_.add({"file.text", tr("New text window"), "File", QKeySequence("Shift+N"), false, {}, [this](const QVariantMap &) {
+    commands_.add({"file.text", tr("New text window"), QT_TRANSLATE_NOOP("CommandCategories", "File"), QKeySequence("Shift+N"), false, {}, [this](const QVariantMap &) {
         auto *dialog = new QDialog(this, Qt::Window); dialog->setAttribute(Qt::WA_DeleteOnClose);
         dialog->setWindowTitle(tr("Text")); dialog->resize(600, 420);
         auto *layout = new QVBoxLayout(dialog); layout->addWidget(new QPlainTextEdit(dialog)); dialog->show();
     }});
-    commands_.add({"file.next", tr("Open next image"), "File", QKeySequence("Shift+O"), true, {}, [this](const QVariantMap &) {
+    commands_.add({"file.next", tr("Open next image"), QT_TRANSLATE_NOOP("CommandCategories", "File"), QKeySequence("Shift+O"), true, {}, [this](const QVariantMap &) {
         const auto *doc = activeDocument(); if (!doc || doc->image.metadata().sourcePath.isEmpty()) return;
         const QFileInfo source(doc->image.metadata().sourcePath);
         const auto paths = source.dir().entryInfoList({"*.tif", "*.tiff", "*.png", "*.jpg", "*.jpeg", "*.bmp", "*.gif",
@@ -909,7 +910,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             break;
         }
     }});
-    commands_.add({"file.revert", tr("Revert"), "File", QKeySequence("R"), true, {}, [this](const QVariantMap &) {
+    commands_.add({"file.revert", tr("Revert"), QT_TRANSLATE_NOOP("CommandCategories", "File"), QKeySequence("R"), true, {}, [this](const QVariantMap &) {
         auto *doc = activeDocument(); if (!doc || doc->image.metadata().sourcePath.isEmpty()) return;
         if (doc->modified && !QApplication::keyboardModifiers().testFlag(Qt::AltModifier) && QMessageBox::question(doc, tr("Revert"), tr("Discard pixel changes and reload the saved image?")) != QMessageBox::Yes) return;
         const auto path = doc->image.metadata().sourcePath; const auto revision = doc->revision;
@@ -929,10 +930,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         if (doc->image.frames() > 1) viewer->setSlice(viewer->slice(), viewer->channel(), (viewer->time() + 1) % doc->image.frames());
         else viewer->setSlice((viewer->slice() + 1) % doc->image.depth(), viewer->channel(), viewer->time());
     });
-    commands_.add({"image.animate", tr("Start/stop animation"), "View", QKeySequence(Qt::Key_Backslash), true, {}, [animation](const QVariantMap &) {
+    commands_.add({"image.animate", tr("Start/stop animation"), QT_TRANSLATE_NOOP("CommandCategories", "View"), QKeySequence(Qt::Key_Backslash), true, {}, [animation](const QVariantMap &) {
         if (animation->isActive()) animation->stop(); else animation->start();
     }});
-    commands_.add({"edit.color", tr("Drawing color..."), "Edit", {}, false, {}, [this](const QVariantMap &) {
+    commands_.add({"edit.color", tr("Drawing color..."), QT_TRANSLATE_NOOP("CommandCategories", "Edit"), {}, false, {}, [this](const QVariantMap &) {
         const auto color = QColorDialog::getColor(drawingColor_, this, tr("Drawing color"));
         if (!color.isValid()) return;
         drawingColor_ = color;
@@ -961,12 +962,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                 double minimum = type == PixelType::Int16 ? -32768 : 0;
                 if ((operation == "invert" || painting) && (type == PixelType::Float32 || type == PixelType::Float64)) {
                     const auto stats = measure(input.slice(z, c, t), {}, false, stop); minimum = stats.minimum; maximum = stats.maximum;
-                    if (painting && !stats.count) throw std::runtime_error("Cannot draw without a finite intensity range.");
+                    if (painting && !stats.count) throw std::runtime_error(QCoreApplication::translate("MainWindow", "Cannot draw without a finite intensity range.").toStdString());
                 }
                 const double gray = std::lerp(minimum, maximum, qGray(color.rgb()) / 255.0);
                 const std::array<double, 3> rgb{double(color.red()), double(color.green()), double(color.blue())};
                 for (std::size_t y = 0; y < input.height(); ++y) {
-                    if (stop.stop_requested()) throw std::runtime_error("Operation cancelled");
+                    if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("MainWindow", "Operation cancelled").toStdString());
                     for (std::size_t x = 0; x < input.width(); ++x) {
                         const QPointF point(x + .5, y + .5);
                         if (roi && !roi->contains(point)) continue;
@@ -1003,7 +1004,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             });
         }});
     }
-    commands_.add({"file.new", tr("New image..."), "File", QKeySequence("N"), false,
+    commands_.add({"file.new", tr("New image..."), QT_TRANSLATE_NOOP("CommandCategories", "File"), QKeySequence("N"), false,
         {{"width", tr("Width"), ParameterKind::Integer, 512, 1, 16384, {}},
          {"height", tr("Height"), ParameterKind::Integer, 512, 1, 16384, {}},
          {"depth", tr("Slices"), ParameterKind::Integer, 1, 1, 10000, {}}}, [this](const QVariantMap &p) {
@@ -1011,17 +1012,17 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         std::size_t bytes = 1;
         for (const auto length : shape) {
             if (length > std::numeric_limits<std::size_t>::max() / bytes)
-                throw std::length_error("New image exceeds the addressable size");
+                throw std::length_error(QCoreApplication::translate("MainWindow", "New image exceeds the addressable size").toStdString());
             bytes *= length;
         }
         detail::checkMemoryBudget(bytes, detail::availableMemoryBytes());
         auto output = std::make_shared<Image>();
         jobs_.submit(tr("Creating image"), [shape, bytes, output](auto stop, auto progress) {
-            if (stop.stop_requested()) throw std::runtime_error("Image creation cancelled");
+            if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("MainWindow", "Image creation cancelled").toStdString());
             detail::checkMemoryBudget(bytes, detail::availableMemoryBytes());
             ImageMetadata metadata; metadata.name = tr("Untitled");
             *output = Image::allocate(PixelType::UInt8, shape, std::move(metadata));
-            if (stop.stop_requested()) throw std::runtime_error("Image creation cancelled");
+            if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("MainWindow", "Image creation cancelled").toStdString());
             progress(1);
         }, [this, output](auto error) {
             if (showJobError(error)) return;
@@ -1029,7 +1030,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         });
     }});
     for (const bool crop : {false, true}) {
-        commands_.add({crop ? "image.crop" : "image.duplicate", crop ? tr("Crop") : tr("Duplicate"), "Edit",
+        commands_.add({crop ? "image.crop" : "image.duplicate", crop ? tr("Crop") : tr("Duplicate"), QT_TRANSLATE_NOOP("CommandCategories", "Edit"),
             QKeySequence(crop ? "Shift+X" : "Shift+D"), true, {}, [this, crop](const QVariantMap &) {
             auto *doc = activeDocument(); if (!doc) return;
             Image output = doc->image;
@@ -1044,21 +1045,21 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             updatePanels();
         }});
     }
-    commands_.add({"selection.all", tr("Select all"), "Edit", QKeySequence("A"), true, {}, [this](const QVariantMap &) {
+    commands_.add({"selection.all", tr("Select all"), QT_TRANSLATE_NOOP("CommandCategories", "Edit"), QKeySequence("A"), true, {}, [this](const QVariantMap &) {
         auto *doc = activeDocument(); if (!doc) return;
         doc->previousSelection = selectedRoi();
         Roi roi; roi.name = tr("All"); roi.points = {{0, 0}, {double(doc->image.width()), double(doc->image.height())}};
         roi.z = doc->viewer->slice(); roi.channel = doc->viewer->channel(); roi.time = doc->viewer->time();
         doc->setSelection(roi);
     }});
-    commands_.add({"selection.none", tr("Select none"), "Edit", QKeySequence("Shift+A"), true, {}, [this](const QVariantMap &) {
+    commands_.add({"selection.none", tr("Select none"), QT_TRANSLATE_NOOP("CommandCategories", "Edit"), QKeySequence("Shift+A"), true, {}, [this](const QVariantMap &) {
         auto *doc = activeDocument(); if (!doc) return;
         doc->previousSelection = selectedRoi(); doc->setSelection({});
     }});
-    commands_.add({"selection.restore", tr("Restore selection"), "Edit", QKeySequence("Shift+E"), true, {}, [this](const QVariantMap &) {
+    commands_.add({"selection.restore", tr("Restore selection"), QT_TRANSLATE_NOOP("CommandCategories", "Edit"), QKeySequence("Shift+E"), true, {}, [this](const QVariantMap &) {
         auto *doc = activeDocument(); if (doc && doc->previousSelection) doc->setSelection(doc->previousSelection);
     }});
-    commands_.add({"selection.properties", tr("Selection properties..."), "Edit", {}, true, {}, [this](const QVariantMap &) {
+    commands_.add({"selection.properties", tr("Selection properties..."), QT_TRANSLATE_NOOP("CommandCategories", "Edit"), {}, true, {}, [this](const QVariantMap &) {
         const QPointer<DocumentWidget> doc = activeDocument();
         const auto roi = selectedRoi();
         if (!doc) return;
@@ -1151,9 +1152,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                               {"view.properties", "properties"}, {"view.channels", "display"}}) {
         const QMap<QString, QString> labels{{"view.display", tr("Display")}, {"view.info", tr("Show info")},
             {"view.properties", tr("Image properties")}, {"view.channels", tr("Channels")}};
-        commands_.add({entry.first, labels.value(entry.first), "View", {}, QString(entry.first) != "view.display", {}, [this, panel = QString(entry.second)](const QVariantMap &) { showPanel(panel); }});
+        commands_.add({entry.first, labels.value(entry.first), QT_TRANSLATE_NOOP("CommandCategories", "View"), {}, QString(entry.first) != "view.display", {}, [this, panel = QString(entry.second)](const QVariantMap &) { showPanel(panel); }});
     }
-    commands_.add({"selection.add", tr("Add to ROI manager"), "Analyze", QKeySequence("T"), true, {}, [this](const QVariantMap &) {
+    commands_.add({"selection.add", tr("Add to ROI manager"), QT_TRANSLATE_NOOP("CommandCategories", "Analyze"), QKeySequence("T"), true, {}, [this](const QVariantMap &) {
         auto *doc = activeDocument(); const auto roi = selectedRoi(); if (!doc || !roi) return;
         if (std::none_of(doc->rois.begin(), doc->rois.end(), [&](const Roi &saved) { return saved.id == roi->id; })) {
             auto saved = *roi; saved.name = tr("ROI %1").arg(doc->rois.size() + 1);
@@ -1161,13 +1162,13 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         }
         showPanel("rois");
     }});
-    commands_.add({"view.fit", tr("Fit to window"), "View", QKeySequence("Ctrl+0"), true, {}, [this](const QVariantMap &) {
+    commands_.add({"view.fit", tr("Fit to window"), QT_TRANSLATE_NOOP("CommandCategories", "View"), QKeySequence("Ctrl+0"), true, {}, [this](const QVariantMap &) {
         if (auto *doc = activeDocument()) doc->viewer->fitToWindow();
     }});
     const QList<QPair<QString, QString>> viewModes{{"view.single", tr("Single view")},
         {"view.linked", tr("Linked view")}, {"view.orthogonal", tr("Orthogonal views")}};
     for (int index = 0; index < viewModes.size(); ++index) {
-        commands_.add({viewModes[index].first, viewModes[index].second, "View", {}, true, {}, [this, index](const QVariantMap &) {
+        commands_.add({viewModes[index].first, viewModes[index].second, QT_TRANSLATE_NOOP("CommandCategories", "View"), {}, true, {}, [this, index](const QVariantMap &) {
             QPointer<DocumentWidget> doc = activeDocument();
             if (!doc) return;
             if (index != int(DocumentWidget::ViewMode::Linked)) {
@@ -1203,7 +1204,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             updatePanels();
         }});
     }
-    commands_.add({"view.overlay", tr("Overlay view"), "View", {}, true, {}, [this](const QVariantMap &) {
+    commands_.add({"view.overlay", tr("Overlay view"), QT_TRANSLATE_NOOP("CommandCategories", "View"), {}, true, {}, [this](const QVariantMap &) {
         auto *document = activeDocument();
         if (!document) return;
         OverlayWindow *overlay = nullptr;
@@ -1219,29 +1220,32 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         overlay->refreshDocuments(documents());
         overlay->showEditor();
     }});
-    commands_.add({"process.repeat", tr("Repeat command"), "Process", QKeySequence("Shift+R"), true, {}, [this](const QVariantMap &) {
+    commands_.add({"process.repeat", tr("Repeat command"), QT_TRANSLATE_NOOP("CommandCategories", "Process"), QKeySequence("Shift+R"), true, {}, [this](const QVariantMap &) {
         if (!repeatCommand_.isEmpty()) commands_.execute(repeatCommand_, repeatParameters_);
     }});
-    commands_.add({"window.close", tr("Close window"), "View", QKeySequence::Close, false, {}, [this](const QVariantMap &) {
+    commands_.add({"window.close", tr("Close window"), QT_TRANSLATE_NOOP("CommandCategories", "View"), QKeySequence::Close, false, {}, [this](const QVariantMap &) {
         auto *window = QApplication::activeWindow();
         if (window && window != this) window->close(); else if (active_) active_->close();
     }});
-    commands_.add({"window.showAll", tr("Show all windows"), "View", QKeySequence("Shift+F"), false, {}, [this](const QVariantMap &) {
+    commands_.add({"window.showAll", tr("Show all windows"), QT_TRANSLATE_NOOP("CommandCategories", "View"), QKeySequence("Shift+F"), false, {}, [this](const QVariantMap &) {
         showNormal(); for (auto *doc : documents()) doc->showViews();
         for (auto *overlay : findChildren<OverlayWindow *>(QString{}, Qt::FindDirectChildrenOnly)) overlay->showNormal();
         for (auto *panel : panels_) if (panel->isVisible() || panel->isMinimized()) panel->showNormal();
     }});
-    commands_.add({"window.next", tr("Next image window"), "View", QKeySequence("Tab"), true, {}, [this](const QVariantMap &) {
+    commands_.add({"window.next", tr("Next image window"), QT_TRANSLATE_NOOP("CommandCategories", "View"), QKeySequence("Tab"), true, {}, [this](const QVariantMap &) {
         const auto list = documents(); if (list.isEmpty()) return;
         auto *next = list[(list.indexOf(activeDocument()) + 1) % list.size()];
         setActiveDocument(next); next->showNormal(); next->raise(); next->activateWindow(); next->viewer->setFocus();
     }});
-    commands_.add({"window.launcher", tr("ImageCXX toolbar"), "View", QKeySequence("Return"), false, {}, [this](const QVariantMap &) {
+    commands_.add({"window.launcher", tr("ImageCXX toolbar"), QT_TRANSLATE_NOOP("CommandCategories", "View"), QKeySequence("Return"), false, {}, [this](const QVariantMap &) {
         showNormal(); raise(); activateWindow();
     }});
 
     QMap<QString, QMenu *> menus;
-    for (const auto &category : {"File", "Edit", "Process", "Analyze", "View"}) menus.insert(category, menuBar()->addMenu(tr(category)));
+    for (const auto &category : {QT_TRANSLATE_NOOP("CommandCategories", "File"),
+            QT_TRANSLATE_NOOP("CommandCategories", "Edit"), QT_TRANSLATE_NOOP("CommandCategories", "Process"),
+            QT_TRANSLATE_NOOP("CommandCategories", "Analyze"), QT_TRANSLATE_NOOP("CommandCategories", "View")})
+        menus.insert(category, menuBar()->addMenu(QCoreApplication::translate("CommandCategories", category)));
     auto *stacksMenu = new QMenu(tr("Stacks"), this); stacksMenu->setObjectName("stacksMenu");
     menus.insert("Stacks", stacksMenu);
     menus.insert("Gels", menus["Analyze"]->addMenu(tr("Gels")));
@@ -1304,7 +1308,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     statusBar()->addPermanentWidget(query);
     auto *searchModel = new QStandardItemModel(query);
     for (const auto &command : commands_.commands()) {
-        auto *item = new QStandardItem(command.category + "  /  " + command.label);
+        auto *item = new QStandardItem(QCoreApplication::translate("CommandCategories", command.category.toUtf8().constData()) + "  /  " + command.label);
         item->setData(command.id, Qt::UserRole);
         item->setEditable(false);
         item->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
@@ -1386,8 +1390,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     });
     lutMenu_->addSeparator();
     auto *luts = new QActionGroup(lutMenu_);
-    for (const auto &name : QStringList{"grayscale", "hot", "viridis"}) {
-        auto *action = lutMenu_->addAction(name);
+    for (const auto &name : QStringList{QT_TRANSLATE_NOOP("ColorMaps", "grayscale"), QT_TRANSLATE_NOOP("ColorMaps", "hot"), QT_TRANSLATE_NOOP("ColorMaps", "viridis")}) {
+        auto *action = lutMenu_->addAction(QCoreApplication::translate("ColorMaps", name.toUtf8().constData()));
         action->setCheckable(true); action->setData(name); luts->addAction(action);
     }
     toolbar->addAction(stacksMenu->menuAction());
@@ -1813,7 +1817,7 @@ void MainWindow::pasteImage(bool systemImage, bool newImage)
         const auto right = std::min<qint64>(input.width(), qint64(origin.x()) + qint64(clipboard.width()));
         const auto bottom = std::min<qint64>(input.height(), qint64(origin.y()) + qint64(clipboard.height()));
         for (auto y = top; y < bottom && right > left; ++y) {
-            if (stop.stop_requested()) throw std::runtime_error("Paste cancelled");
+            if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("MainWindow", "Paste cancelled").toStdString());
             std::memcpy(destination + (y * input.width() + left) * pixelBytes,
                 clipboard.data() + ((y - origin.y()) * clipboard.width() + left - origin.x()) * pixelBytes,
                 (right - left) * pixelBytes);
@@ -1933,7 +1937,7 @@ void MainWindow::importRaw(const QString &path)
             bool ok;
             const auto header = offset->text().trimmed().toULongLong(&ok);
             if (!ok || header > static_cast<quint64>(std::numeric_limits<qint64>::max()))
-                throw std::invalid_argument("Offset must be a non-negative whole number of bytes.");
+                throw std::invalid_argument(QCoreApplication::translate("MainWindow", "Offset must be a non-negative whole number of bytes.").toStdString());
             QJsonArray shape{dimensions[0]->value(), dimensions[1]->value()};
             if (dimensions[2]->value() > 1 || channels->value() > 1 || frames->value() > 1)
                 shape.append(1);
@@ -1946,7 +1950,7 @@ void MainWindow::importRaw(const QString &path)
             for (const auto size : options.shape) bytes *= size;
             const auto fileBytes = static_cast<quint64>(QFileInfo(path).size());
             if (header > fileBytes || bytes > fileBytes - header)
-                throw std::invalid_argument("The file is too small for these dimensions, image type and offset.");
+                throw std::invalid_argument(QCoreApplication::translate("MainWindow", "The file is too small for these dimensions, image type and offset.").toStdString());
             const auto imageCount = std::min<quint64>(dimensions[2]->value(), (fileBytes - header) / bytes);
             if (options.shape.size() > 2) options.shape[2] = static_cast<std::size_t>(imageCount);
             const QStringList axisNames{"X", "Y", "Z", "C", "T"};
@@ -1955,7 +1959,7 @@ void MainWindow::importRaw(const QString &path)
                 ok = true;
                 const double value = i < 3 && i < std::size_t(spacings.size()) ? spacings[int(i)].toDouble(&ok) : 1;
                 if (!ok || !std::isfinite(value) || value <= 0)
-                    throw std::invalid_argument("Spacing must be positive.");
+                    throw std::invalid_argument(QCoreApplication::translate("MainWindow", "Spacing must be positive.").toStdString());
                 options.metadata.axes.push_back({axisNames[int(i)], value, 0, i < 3 ? unit->text() : "index"});
             }
             dialog.accept();
@@ -2192,10 +2196,12 @@ std::optional<QVariantMap> MainWindow::parameterForm(const Command &command, boo
         } else if (parameter.kind == ParameterKind::Boolean) {
             auto *check = new QCheckBox(&dialog); check->setChecked(parameter.defaultValue.toBool()); editor = check;
         } else {
-            auto *combo = new QComboBox(&dialog); combo->addItems(parameter.choices); combo->setCurrentText(parameter.defaultValue.toString()); editor = combo;
+            auto *combo = new QComboBox(&dialog); for (const auto &choice : parameter.choices)
+                combo->addItem(QCoreApplication::translate("CommandChoices", choice.toUtf8().constData()), choice);
+            combo->setCurrentIndex(combo->findData(parameter.defaultValue)); editor = combo;
         }
         if (command.id == "gel.options") if (const auto *doc = activeDocument()) {
-            if (auto *combo = qobject_cast<QComboBox *>(editor)) combo->setCurrentText(doc->gelHorizontal ? "Horizontal" : "Vertical");
+            if (auto *combo = qobject_cast<QComboBox *>(editor)) combo->setCurrentIndex(combo->findData(doc->gelHorizontal ? "Horizontal" : "Vertical"));
             if (auto *check = qobject_cast<QCheckBox *>(editor)) check->setChecked(doc->gelDarkBands);
         }
         editor->setObjectName(parameter.id); editors.insert(parameter.id, editor);
@@ -2212,7 +2218,7 @@ std::optional<QVariantMap> MainWindow::parameterForm(const Command &command, boo
         else if (auto *spin = qobject_cast<QDoubleSpinBox *>(editor)) result.insert(parameter.id, spin->value());
         else if (auto *spin = qobject_cast<QSpinBox *>(editor)) result.insert(parameter.id, spin->value());
         else if (auto *check = qobject_cast<QCheckBox *>(editor)) result.insert(parameter.id, check->isChecked());
-        else if (auto *combo = qobject_cast<QComboBox *>(editor)) result.insert(parameter.id, combo->currentText());
+        else if (auto *combo = qobject_cast<QComboBox *>(editor)) result.insert(parameter.id, combo->currentData());
     }
     return result;
 }
@@ -2248,11 +2254,11 @@ void MainWindow::showPlot(bool profile)
             for (auto *point : {&start, &end}) { point->setX(std::clamp(point->x(), 0.0, double(slice.width() - 1))); point->setY(std::clamp(point->y(), 0.0, double(slice.height() - 1))); }
             const auto data = lineProfile(slice, start, end, 0, true, stop);
             for (std::size_t i = 0; i < data.distance.size(); ++i) output->points.emplace_back(data.distance[i], data.intensity[i]);
-            output->xTitle = "Distance [" + data.distanceUnit + "]"; output->yTitle = data.intensityUnit.isEmpty() ? "Intensity" : data.intensityUnit;
+            output->xTitle = tr("Distance [%1]").arg(data.distanceUnit); output->yTitle = data.intensityUnit.isEmpty() ? tr("Intensity") : data.intensityUnit;
         } else {
             const auto data = histogram(slice, 256, roi && roi->type != RoiType::Line ? roi : std::optional<Roi>{}, true, stop);
             for (std::size_t i = 0; i < data.centers.size(); ++i) output->points.emplace_back(data.centers[i], data.counts[i]);
-            output->xTitle = "Intensity"; output->yTitle = "Pixel count";
+            output->xTitle = tr("Intensity"); output->yTitle = tr("Pixel count");
         }
     }, [this, output, profile](auto error) {
         if (showJobError(error)) return;
@@ -2375,7 +2381,7 @@ void MainWindow::updatePanels()
             if (!dicom && !nifti) {
                 QStringList shape; for (const auto size : doc->image.shape()) shape << QString::number(size);
                 const QList<QPair<QString, QString>> properties{{tr("Name"), metadata.name}, {tr("Pixel type"), pixelTypeName(doc->image.pixelType())},
-                    {tr("Shape X,Y,Z,C,T"), shape.join(" × ")}, {tr("Storage"), doc->image.storageKind()},
+                    {tr("Shape X,Y,Z,C,T"), shape.join(" × ")}, {tr("Storage"), doc->image.storageKind() == "Memory mapped" ? tr("Memory mapped") : doc->image.storageKind()},
                     {tr("Pixel data"), tr("%1 MiB").arg(double(doc->image.byteCount()) / (1024 * 1024), 0, 'f', 2)},
                     {tr("Source"), metadata.sourcePath}, {tr("Intensity scale"), QString::number(metadata.intensityScale, 'g', 12)},
                     {tr("Intensity offset"), QString::number(metadata.intensityOffset, 'g', 12)}, {tr("Intensity unit"), metadata.intensityUnit}};

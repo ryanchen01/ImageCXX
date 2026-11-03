@@ -15,7 +15,7 @@ option(IMAGECXX_BUILD_BENCHMARKS "Build image-model and analysis benchmarks" OFF
 option(IMAGECXX_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 option(IMAGECXX_ENABLE_UPDATES "Enable automatic and manual update checks" OFF)
 
-find_package(Qt6 6.12.0 EXACT REQUIRED COMPONENTS Core Gui GuiPrivate Widgets PrintSupport ShaderTools Svg QuickWidgets Graphs)
+find_package(Qt6 6.12.0 EXACT REQUIRED COMPONENTS Core Gui GuiPrivate Widgets PrintSupport ShaderTools Svg QuickWidgets Graphs LinguistTools)
 find_package(ITK 5.4 REQUIRED COMPONENTS ITKCommon ITKIOImageBase ITKIOMeta ITKIONIFTI ITKIONRRD
     ITKSmoothing ITKImageIntensity ITKMathematicalMorphology ITKImageGrid)
 list(FILTER ITK_INCLUDE_DIRS EXCLUDE REGEX "^/Library/Developer/CommandLineTools/SDKs/.*")
@@ -62,6 +62,21 @@ qt_add_resources(imagecxx_ui imagecxx_icons PREFIX "/" BASE "resources" FILES
     resources/icons/histogram.svg resources/icons/undo.svg resources/icons/search.svg resources/icons/imagecxx.svg)
 qt_add_executable(ImageCXX WIN32 MACOSX_BUNDLE main.cpp)
 target_link_libraries(ImageCXX PRIVATE imagecxx_ui)
+set(IMAGECXX_TRANSLATION_LANGUAGES "en_US" CACHE STRING "Semicolon-separated translation locales")
+set(imagecxx_ts_files)
+foreach(language IN LISTS IMAGECXX_TRANSLATION_LANGUAGES)
+    list(APPEND imagecxx_ts_files "${CMAKE_CURRENT_SOURCE_DIR}/ImageCXX_${language}.ts")
+endforeach()
+qt_add_translations(TARGETS ImageCXX
+    SOURCE_TARGETS imagecxx_core imagecxx_processing imagecxx_io imagecxx_app imagecxx_viewer imagecxx_plots imagecxx_ui ImageCXX
+    SOURCES app/update_checker.cpp app/update_checker_mac.mm
+    TS_FILES ${imagecxx_ts_files}
+    RESOURCE_PREFIX "/i18n"
+    LUPDATE_TARGET ImageCXX_lupdate
+    LRELEASE_TARGET ImageCXX_lrelease
+    LUPDATE_OPTIONS -source-language en_US
+    LRELEASE_OPTIONS -nounfinished)
+
 if(WIN32)
     enable_language(RC)
     configure_file(packaging/windows/ImageCXX.rc.in "${CMAKE_CURRENT_BINARY_DIR}/ImageCXX.rc" @ONLY)

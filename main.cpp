@@ -12,6 +12,9 @@
 #include <QCoreApplication>
 #include <QIcon>
 #include <QJsonDocument>
+#include <QLibraryInfo>
+#include <QLocale>
+#include <QTranslator>
 #include <cstdio>
 #include <memory>
 
@@ -25,21 +28,28 @@ int main(int argc, char *argv[])
     QCoreApplication::setApplicationName("ImageCXX");
     QCoreApplication::setOrganizationName("ImageCXX");
     QCoreApplication::setApplicationVersion(IMAGECXX_VERSION);
+    const QLocale locale;
+    QTranslator qtTranslator;
+    if (qtTranslator.load(locale, "qtbase", "_", QLibraryInfo::path(QLibraryInfo::TranslationsPath)))
+        application->installTranslator(&qtTranslator);
+    QTranslator translator;
+    if (translator.load(locale, "ImageCXX", "_", ":/i18n"))
+        application->installTranslator(&translator);
     QCommandLineParser parser;
-    parser.setApplicationDescription("ImageCXX scientific image analysis");
+    parser.setApplicationDescription(QCoreApplication::translate("Main", "ImageCXX scientific image analysis"));
     parser.addHelpOption(); parser.addVersionOption();
-    parser.addOption({"batch", "Process files without a desktop window"});
-    parser.addOption({"operation", "Batch operation: gaussian, median, threshold, dilate, erode, resample", "operation", "gaussian"});
-    parser.addOption({"output", "Batch output directory. Existing files are never overwritten.", "directory"});
-    parser.addOption({"parameters", "Command parameter object as JSON", "json", "{}"});
-    parser.addPositionalArgument("images", "Image files", "[images...]");
+    parser.addOption({"batch", QCoreApplication::translate("Main", "Process files without a desktop window")});
+    parser.addOption({"operation", QCoreApplication::translate("Main", "Batch operation: gaussian, median, threshold, dilate, erode, resample"), QCoreApplication::translate("Main", "operation"), "gaussian"});
+    parser.addOption({"output", QCoreApplication::translate("Main", "Batch output directory. Existing files are never overwritten."), QCoreApplication::translate("Main", "directory")});
+    parser.addOption({"parameters", QCoreApplication::translate("Main", "Command parameter object as JSON"), QCoreApplication::translate("Main", "json"), "{}"});
+    parser.addPositionalArgument(QCoreApplication::translate("Main", "images"), QCoreApplication::translate("Main", "Image files"), QCoreApplication::translate("Main", "[images...]"));
     parser.process(*application);
     if (batch) {
         if (parser.value("output").isEmpty() || parser.positionalArguments().isEmpty()) parser.showHelp(2);
         try {
             QJsonParseError error;
             const auto json = QJsonDocument::fromJson(parser.value("parameters").toUtf8(), &error);
-            if (error.error != QJsonParseError::NoError || !json.isObject()) throw std::invalid_argument("Parameters must be a JSON object");
+            if (error.error != QJsonParseError::NoError || !json.isObject()) throw std::invalid_argument(QCoreApplication::translate("Main", "Parameters must be a JSON object").toStdString());
             const auto result = imagecxx::runBatch(parser.positionalArguments(), parser.value("output"), "process." + parser.value("operation"), json.toVariant().toMap());
             for (const auto &path : result.outputs) std::fprintf(stdout, "%s\n", qPrintable(path));
             for (const auto &message : result.errors) std::fprintf(stderr, "%s\n", qPrintable(message));

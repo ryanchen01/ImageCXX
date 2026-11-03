@@ -1,4 +1,5 @@
 #include "batch.h"
+#include <QCoreApplication>
 #include "processing_commands.h"
 #include "io/image_io.h"
 #include <QDir>
@@ -16,9 +17,9 @@ BatchResult runBatch(const QStringList &inputs, const QString &directory, const 
     registerProcessingCommands(registry, [](const QString &, const QVariantMap &) {});
     const auto validated = registry.validate(id, parameters);
     if (validated.value("scope").toString() != "Full image")
-        throw std::invalid_argument("Batch processing requires the Full image scope");
+        throw std::invalid_argument(QCoreApplication::translate("Batch", "Batch processing requires the Full image scope").toStdString());
     const auto options = processingOptions(id, validated);
-    if (!QDir().mkpath(directory)) throw std::runtime_error("Cannot create batch output directory");
+    if (!QDir().mkpath(directory)) throw std::runtime_error(QCoreApplication::translate("Batch", "Cannot create batch output directory").toStdString());
     BatchResult result;
     QSet<QString> targets;
     const QString suffix = id.section('.', -1);
@@ -29,7 +30,7 @@ BatchResult runBatch(const QStringList &inputs, const QString &directory, const 
         QString temporary;
         try {
             if (targets.contains(target) || QFileInfo::exists(target))
-                throw std::runtime_error("Output already exists or input names collide");
+                throw std::runtime_error(QCoreApplication::translate("Batch", "Output already exists or input names collide").toStdString());
             targets.insert(target);
             const auto update = [&, i](double fraction) { if (progress) progress((i + fraction) / inputs.size()); };
             const auto image = readImage(input, {}, stop, [update](double p) { update(p * .2); });
@@ -40,7 +41,7 @@ BatchResult runBatch(const QStringList &inputs, const QString &directory, const 
             temporary = QDir(directory).filePath(".imagecxx-" + QUuid::createUuid().toString(QUuid::WithoutBraces) + ".tif");
             writeImage(filtered, temporary, stop, [update](double p) { update(.8 + p * .2); });
             if (stop.stop_requested()) { QFile::remove(temporary); break; }
-            if (!QFile::rename(temporary, target)) throw std::runtime_error("Cannot publish batch output");
+            if (!QFile::rename(temporary, target)) throw std::runtime_error(QCoreApplication::translate("Batch", "Cannot publish batch output").toStdString());
             result.outputs.append(target);
         } catch (const std::exception &error) {
             if (!temporary.isEmpty()) QFile::remove(temporary);

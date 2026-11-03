@@ -16,11 +16,13 @@ struct Parameter {
     QVariant defaultValue;
     double minimum = 0;
     double maximum = 100;
+    // Stable values; the generated form translates labels in the CommandChoices context.
     QStringList choices;
 };
 struct Command {
     QString id;
     QString label;
+    // Stable menu key; translated for display in the CommandCategories context.
     QString category;
     QKeySequence shortcut;
     bool needsImage = true;

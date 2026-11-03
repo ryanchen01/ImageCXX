@@ -1,5 +1,6 @@
 #include "core/image.h"
 
+#include <QCoreApplication>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -32,11 +33,11 @@ public:
         : file_(path), bytes_(bytes) {
         if (offset > static_cast<std::size_t>(std::numeric_limits<qint64>::max())
             || bytes > static_cast<std::size_t>(std::numeric_limits<qint64>::max()) - offset)
-            throw std::overflow_error("Mapped region exceeds file address range");
+            throw std::overflow_error(QCoreApplication::translate("Image", "Mapped region exceeds file address range").toStdString());
         if (!file_.open(QIODevice::ReadOnly))
             throw std::runtime_error(file_.errorString().toStdString());
         if (static_cast<quint64>(file_.size()) < offset + bytes)
-            throw std::invalid_argument("File is smaller than the requested image");
+            throw std::invalid_argument(QCoreApplication::translate("Image", "File is smaller than the requested image").toStdString());
         mapped_ = file_.map(static_cast<qint64>(offset), static_cast<qint64>(bytes));
         if (!mapped_)
             throw std::runtime_error(file_.errorString().toStdString());
@@ -55,9 +56,9 @@ private:
 
 std::size_t checkedProduct(std::span<const std::size_t> values, std::size_t initial = 1) {
     for (auto value : values) {
-        if (value == 0) throw std::invalid_argument("Image axes cannot have zero length");
+        if (value == 0) throw std::invalid_argument(QCoreApplication::translate("Image", "Image axes cannot have zero length").toStdString());
         if (initial > std::numeric_limits<std::size_t>::max() / value)
-            throw std::overflow_error("Image dimensions exceed the addressable size");
+            throw std::overflow_error(QCoreApplication::translate("Image", "Image dimensions exceed the addressable size").toStdString());
         initial *= value;
     }
     return initial;
@@ -90,7 +91,7 @@ std::size_t bytesPerPixel(PixelType type) {
     case PixelType::Float64: return 8;
     case PixelType::RGB8: return 3;
     }
-    throw std::invalid_argument("Unknown pixel type");
+    throw std::invalid_argument(QCoreApplication::translate("Image", "Unknown pixel type").toStdString());
 }
 
 QString pixelTypeName(PixelType type) {
@@ -103,14 +104,14 @@ QString pixelTypeName(PixelType type) {
     case PixelType::RGB8: return QStringLiteral("rgb8");
     case PixelType::RGBA8: return QStringLiteral("rgba8");
     }
-    throw std::invalid_argument("Unknown pixel type");
+    throw std::invalid_argument(QCoreApplication::translate("Image", "Unknown pixel type").toStdString());
 }
 
 PixelType pixelTypeFromName(const QString &name) {
     for (auto type : {PixelType::UInt8, PixelType::UInt16, PixelType::Int16,
                       PixelType::Float32, PixelType::Float64, PixelType::RGB8, PixelType::RGBA8})
         if (pixelTypeName(type).compare(name, Qt::CaseInsensitive) == 0) return type;
-    throw std::invalid_argument("Unsupported pixel type: " + name.toStdString());
+    throw std::invalid_argument(QCoreApplication::translate("Image", "Unsupported pixel type: %1").arg(name).toStdString());
 }
 
 std::size_t componentCount(PixelType type) {
@@ -119,8 +120,8 @@ std::size_t componentCount(PixelType type) {
 
 void Storage::read(std::size_t offset, std::span<std::byte> destination) const {
     if (offset > size() || destination.size() > size() - offset)
-        throw std::out_of_range("Storage region is outside the buffer");
-    if (!data()) throw std::runtime_error("Storage provider must implement region reads");
+        throw std::out_of_range(QCoreApplication::translate("Image", "Storage region is outside the buffer").toStdString());
+    if (!data()) throw std::runtime_error(QCoreApplication::translate("Image", "Storage provider must implement region reads").toStdString());
     std::memcpy(destination.data(), data() + offset, destination.size());
 }
 
@@ -138,10 +139,10 @@ Image Image::map(const QString &path, PixelType type, std::vector<std::size_t> s
 
 Image Image::fromStorage(PixelType type, std::vector<std::size_t> shape,
                         std::shared_ptr<Storage> storage, ImageMetadata metadata) {
-    if (shape.size() < 2) throw std::invalid_argument("Images need at least X and Y axes");
+    if (shape.size() < 2) throw std::invalid_argument(QCoreApplication::translate("Image", "Images need at least X and Y axes").toStdString());
     const auto bytes = checkedProduct(shape, bytesPerPixel(type));
-    if (!storage || storage->size() < bytes) throw std::invalid_argument("Image storage is too small");
-    if (metadata.axes.size() > shape.size()) throw std::invalid_argument("Metadata has too many axes");
+    if (!storage || storage->size() < bytes) throw std::invalid_argument(QCoreApplication::translate("Image", "Image storage is too small").toStdString());
+    if (metadata.axes.size() > shape.size()) throw std::invalid_argument(QCoreApplication::translate("Image", "Metadata has too many axes").toStdString());
     const QStringList names{QStringLiteral("X"), QStringLiteral("Y"), QStringLiteral("Z"),
                             QStringLiteral("C"), QStringLiteral("T")};
     while (metadata.axes.size() < shape.size()) {
@@ -151,16 +152,16 @@ Image Image::fromStorage(PixelType type, std::vector<std::size_t> shape,
     }
     for (const auto &axis : metadata.axes) {
         if (!std::isfinite(axis.spacing) || axis.spacing <= 0 || !std::isfinite(axis.origin))
-            throw std::invalid_argument("Axis spacing must be positive and origin must be finite");
+            throw std::invalid_argument(QCoreApplication::translate("Image", "Axis spacing must be positive and origin must be finite").toStdString());
     }
     if (!metadata.direction.empty()) {
         const auto dimension = static_cast<std::size_t>(std::sqrt(metadata.direction.size()));
         if (dimension < 2 || dimension * dimension != metadata.direction.size()
             || !std::all_of(metadata.direction.begin(), metadata.direction.end(), [](double value) { return std::isfinite(value); }))
-            throw std::invalid_argument("Image direction must be a finite square matrix");
+            throw std::invalid_argument(QCoreApplication::translate("Image", "Image direction must be a finite square matrix").toStdString());
     }
     if (!std::isfinite(metadata.intensityScale) || !std::isfinite(metadata.intensityOffset))
-        throw std::invalid_argument("Intensity calibration must be finite");
+        throw std::invalid_argument(QCoreApplication::translate("Image", "Intensity calibration must be finite").toStdString());
     Image image;
     image.type_ = type;
     image.shape_ = std::move(shape);
@@ -197,7 +198,7 @@ const std::byte *Image::data() const {
 }
 
 std::byte *Image::mutableData() {
-    if (empty()) throw std::logic_error("Cannot edit an empty image");
+    if (empty()) throw std::logic_error(QCoreApplication::translate("Image", "Cannot edit an empty image").toStdString());
     if (storage_.use_count() > 1 || storage_->readOnly() || offset_ != 0 || !contiguous())
         *this = clone();
     auto *buffer = storage_->mutableData();
@@ -208,17 +209,17 @@ std::byte *Image::mutableData() {
 QString Image::storageKind() const { return empty() ? QString() : storage_->kind(); }
 
 std::size_t Image::byteOffset(std::span<const std::size_t> index) const {
-    if (empty() || index.size() != shape_.size()) throw std::invalid_argument("Index dimensionality mismatch");
+    if (empty() || index.size() != shape_.size()) throw std::invalid_argument(QCoreApplication::translate("Image", "Index dimensionality mismatch").toStdString());
     auto offset = offset_;
     for (std::size_t axis = 0; axis < index.size(); ++axis) {
-        if (index[axis] >= shape_[axis]) throw std::out_of_range("Pixel is outside the image");
+        if (index[axis] >= shape_[axis]) throw std::out_of_range(QCoreApplication::translate("Image", "Pixel is outside the image").toStdString());
         offset += index[axis] * strides_[axis];
     }
     return offset;
 }
 
 double Image::value(std::span<const std::size_t> index, std::size_t component) const {
-    if (component >= componentCount(type_)) throw std::out_of_range("Invalid pixel component");
+    if (component >= componentCount(type_)) throw std::out_of_range(QCoreApplication::translate("Image", "Invalid pixel component").toStdString());
     const auto offset = byteOffset(index) + (componentCount(type_) > 1 ? component : 0);
     std::byte bytes[8];
     storage_->read(offset, std::span(bytes, bytesPerPixel(type_) / componentCount(type_)));
@@ -229,11 +230,11 @@ double Image::value(std::span<const std::size_t> index, std::size_t component) c
     case PixelType::Float32: return readNumber<float>(bytes);
     case PixelType::Float64: return readNumber<double>(bytes);
     }
-    throw std::invalid_argument("Unknown pixel type");
+    throw std::invalid_argument(QCoreApplication::translate("Image", "Unknown pixel type").toStdString());
 }
 
 void Image::setValue(std::span<const std::size_t> index, double number, std::size_t component) {
-    if (component >= componentCount(type_)) throw std::out_of_range("Invalid pixel component");
+    if (component >= componentCount(type_)) throw std::out_of_range(QCoreApplication::translate("Image", "Invalid pixel component").toStdString());
     // Validate before detaching, then recompute the offset after strides change.
     (void)byteOffset(index);
     auto *buffer = mutableData();
@@ -252,25 +253,25 @@ double Image::sample(std::size_t x, std::size_t y, std::size_t z, std::size_t ch
     const std::array<std::size_t, 5> coordinates{x, y, z, channel, time};
     if (shape_.size() <= coordinates.size()) {
         for (std::size_t axis = shape_.size(); axis < coordinates.size(); ++axis)
-            if (coordinates[axis] != 0) throw std::out_of_range("Axis is outside the image");
+            if (coordinates[axis] != 0) throw std::out_of_range(QCoreApplication::translate("Image", "Axis is outside the image").toStdString());
         return value(std::span(coordinates.data(), shape_.size()), component);
     }
     std::vector<std::size_t> index(shape_.size(), 0);
     for (std::size_t axis = 0; axis < 5; ++axis) {
         if (axis < index.size()) index[axis] = coordinates[axis];
-        else if (coordinates[axis] != 0) throw std::out_of_range("Axis is outside the image");
+        else if (coordinates[axis] != 0) throw std::out_of_range(QCoreApplication::translate("Image", "Axis is outside the image").toStdString());
     }
     return value(index, component);
 }
 
 Image Image::slice(std::size_t z, std::size_t channel, std::size_t time) const {
-    if (empty()) throw std::invalid_argument("Cannot slice an empty image");
+    if (empty()) throw std::invalid_argument(QCoreApplication::translate("Image", "Cannot slice an empty image").toStdString());
     std::vector<std::size_t> start(shape_.size(), 0), extent(shape_.size(), 1);
     extent[0] = width(); extent[1] = height();
     const std::size_t coordinates[]{z, channel, time};
     for (std::size_t axis = 2; axis < 5; ++axis) {
         if (axis < shape_.size()) start[axis] = coordinates[axis - 2];
-        else if (coordinates[axis - 2] != 0) throw std::out_of_range("Slice is outside the image");
+        else if (coordinates[axis - 2] != 0) throw std::out_of_range(QCoreApplication::translate("Image", "Slice is outside the image").toStdString());
     }
     Image result = region(start, extent);
     if (result.metadata_.axes.size() >= 3 && result.metadata_.direction.empty())
@@ -294,7 +295,7 @@ Image Image::permutedSpatialAxes(std::array<std::size_t, 3> axes) const {
     auto sorted = axes;
     std::sort(sorted.begin(), sorted.end());
     if (shape_.size() < 3 || sorted != std::array<std::size_t, 3>{0, 1, 2})
-        throw std::invalid_argument("A spatial view requires three distinct spatial axes");
+        throw std::invalid_argument(QCoreApplication::translate("Image", "A spatial view requires three distinct spatial axes").toStdString());
     Image result = *this;
     for (std::size_t axis = 0; axis < 3; ++axis) {
         result.shape_[axis] = shape_[axes[axis]];
@@ -318,12 +319,12 @@ Image Image::permutedSpatialAxes(std::array<std::size_t, 3> axes) const {
 
 Image Image::region(std::span<const std::size_t> start, std::span<const std::size_t> extent) const {
     if (start.size() != shape_.size() || extent.size() != shape_.size())
-        throw std::invalid_argument("Region dimensionality mismatch");
+        throw std::invalid_argument(QCoreApplication::translate("Image", "Region dimensionality mismatch").toStdString());
     Image result = *this;
     result.offset_ = byteOffset(start);
     for (std::size_t axis = 0; axis < shape_.size(); ++axis) {
         if (extent[axis] == 0 || extent[axis] > shape_[axis] - start[axis])
-            throw std::out_of_range("Region is outside the image");
+            throw std::out_of_range(QCoreApplication::translate("Image", "Region is outside the image").toStdString());
         result.shape_[axis] = extent[axis];
         result.metadata_.axes[axis].origin += static_cast<double>(start[axis]) * metadata_.axes[axis].spacing;
     }
@@ -341,7 +342,7 @@ Image Image::region(std::span<const std::size_t> start, std::span<const std::siz
             const auto embedded = QJsonDocument::fromJson(metadata_.attributes.value(
                 QStringLiteral("ImageCXX.EmbeddedPlaneOrigin")).toUtf8()).array();
             if (embedded.size() != 3 || !embedded[2].isDouble() || !std::isfinite(embedded[2].toDouble()))
-                throw std::invalid_argument("Embedded image plane origin is invalid");
+                throw std::invalid_argument(QCoreApplication::translate("Image", "Embedded image plane origin is invalid").toStdString());
             double thirdOrigin = embedded[2].toDouble();
             for (std::size_t col = 0; col < 2; ++col)
                 thirdOrigin += metadata_.direction[6 + col] * static_cast<double>(start[col])

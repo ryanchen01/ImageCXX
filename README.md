@@ -8,12 +8,50 @@ Use **Analyze > Gels** to measure gel or blot bands. Draw a rectangle around a l
 
 **Gel analyzer options...** supports vertical or horizontal lanes and dark or bright bands. Set the direction before selecting lanes; changing it clears that document's lane registrations. Profiles average calibrated intensity across the rectangle's width. Dark-band profiles negate intensity so bands point upward. Areas use trapezoids over positive baseline-subtracted sample values, in intensity units times distance units. Percentages include only the bands you measure. This workflow requires scalar images with finite lane pixels; it does not apply optical-density conversion or automatic band detection.
 
+## Translations
+
+User-facing source text is English. Keep UI text in `tr()` (or
+`QCoreApplication::translate()` outside QObject classes), and use `qsTr()` in QML.
+Command IDs, parameter values, file-format keys and scientific unit symbols stay stable.
+Choice and category values use `QT_TRANSLATE_NOOP` so they are extracted without
+changing their stored values; translate them when displaying them.
+
+Update every configured catalog after changing source text:
+
+```sh
+cmake --build --preset dev --target update_translations
+```
+
+`ImageCXX_en_US.ts` is the English reference catalog. To add languages, configure
+with a semicolon-separated locale list, then update the catalogs:
+
+```sh
+cmake --preset dev -DIMAGECXX_TRANSLATION_LANGUAGES="en_US;fr_FR;zh_CN"
+cmake --build --preset dev --target update_translations
+```
+
+Edit the generated `ImageCXX_<locale>.ts` files with Qt Linguist and commit them.
+`lupdate` preserves translations, adds new strings as unfinished, and marks removed
+strings obsolete. Keep the locale list in your build configuration when building
+or packaging those languages.
+
+```sh
+cmake --build --preset dev --target release_translations
+cmake --build --preset dev
+```
+
+The normal build also compiles and embeds the catalogs. At startup, the app selects
+an embedded translation using the system UI locale; unfinished or missing entries
+fall back to the English source text. Restart the app after changing the locale.
+Qt's standard dialog translations are loaded from Qt's installed translation directory
+when available. Diagnostics supplied by external libraries retain their own wording.
+
 ## Build
 
 Install these first:
 
 - CMake 3.24+, Ninja and a C++20 compiler.
-- The official Qt 6.12.0 desktop SDK with Shader Tools, Graphs, Image Formats, Quick 3D and Quick Timeline.
+- The official Qt 6.12.0 desktop SDK with Qt Linguist tools, Shader Tools, Graphs, Image Formats, Quick 3D and Quick Timeline.
 
 Run the commands below from the ImageCXX repository. Adjust the Qt path to match your installation.
 

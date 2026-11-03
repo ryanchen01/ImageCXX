@@ -1,5 +1,6 @@
 #include "memory.h"
 
+#include <QCoreApplication>
 #include <QByteArray>
 #include <QDir>
 #include <QFile>
@@ -52,7 +53,7 @@ void boundByCgroup(std::size_t &available, QDir directory, const QString &root, 
         const auto usage = readBytes(directory.filePath(usageName));
         if (limit) {
             if (!usage)
-                throw std::runtime_error("Cannot read the process's memory limit usage");
+                throw std::runtime_error(QCoreApplication::translate("Memory", "Cannot read the process's memory limit usage").toStdString());
             available = std::min(available, *usage < *limit ? *limit - *usage : 0);
         }
         if (directory.absolutePath() == root || !directory.cdUp())
@@ -153,9 +154,9 @@ std::optional<std::size_t> availableMemoryBytes() {
 
 void checkMemoryBudget(std::size_t required, std::optional<std::size_t> available) {
     if (!available)
-        throw std::runtime_error("Cannot determine available memory safely.");
+        throw std::runtime_error(QCoreApplication::translate("Memory", "Cannot determine available memory safely.").toStdString());
     const auto usable = *available - (*available / 10 + (*available % 10 != 0));
     if (required > usable)
-        throw std::length_error("Not enough available memory for the image and working buffers.");
+        throw std::length_error(QCoreApplication::translate("Memory", "Not enough available memory for the image and working buffers.").toStdString());
 }
 } // namespace imagecxx::detail

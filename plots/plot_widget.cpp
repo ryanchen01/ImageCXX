@@ -1,4 +1,5 @@
 #include "plot_widget.h"
+#include <QCoreApplication>
 #include <QGraphsTheme>
 #include <QLineSeries>
 #include <QQuickWidget>
@@ -82,7 +83,7 @@ void PlotWidget::setData(const std::vector<QPointF> &points, const QString &xTit
     double yUpper = std::min(limit, yMax + padding);
     if (!std::isfinite(yUpper - yLower)) { yLower = yMin; yUpper = yMax; }
     if (!std::isfinite(xMax - xMin) || !std::isfinite(yUpper - yLower))
-        throw std::length_error("The values span a range too wide to plot.");
+        throw std::length_error(QCoreApplication::translate("PlotWidget", "The values span a range too wide to plot.").toStdString());
     const auto setRange = [](QValueAxis *axis, double minimum, double maximum) {
         // Qt reconstructs the limits through their center. At a double limit,
         // rounding that reconstruction can overflow even though both ends fit.
@@ -127,7 +128,7 @@ void PlotWidget::setData(const std::vector<QPointF> &points, const QString &xTit
     axisX_->setLabelFormat("%.6g");
     axisY_->setLabelFormat("%.6g");
     axisX_->setLabelDecimals(-1);
-    axisY_->setLabelDecimals(yTitle == "Pixel count" ? 0 : -1);
+    axisY_->setLabelDecimals(yTitle == QCoreApplication::translate("MainWindow", "Pixel count") ? 0 : -1);
 }
 
 bool PlotWidget::ready() const { return quick_->status() == QQuickWidget::Ready; }

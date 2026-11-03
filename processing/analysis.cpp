@@ -1,4 +1,5 @@
 #include "processing/processing.h"
+#include <QCoreApplication>
 #include "processing_detail.h"
 
 #include <algorithm>
@@ -10,14 +11,14 @@ namespace imagecxx {
 namespace {
 
 void checkCancelled(std::stop_token stop) {
-    if (stop.stop_requested()) throw std::runtime_error("Analysis cancelled");
+    if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("Analysis", "Analysis cancelled").toStdString());
 }
 
 void validateSlice(const Image &slice, bool scalar = true) {
     if (slice.empty() || slice.pixelCount() != slice.width() * slice.height())
-        throw std::invalid_argument("Analysis requires a single 2D slice");
+        throw std::invalid_argument(QCoreApplication::translate("Analysis", "Analysis requires a single 2D slice").toStdString());
     if (scalar && componentCount(slice.pixelType()) != 1)
-        throw std::invalid_argument("Select a scalar channel before measuring a color image");
+        throw std::invalid_argument(QCoreApplication::translate("Analysis", "Select a scalar channel before measuring a color image").toStdString());
 }
 
 double intensity(const Image &slice, std::size_t x, std::size_t y, bool calibrated) {
@@ -30,10 +31,10 @@ double intensity(const Image &slice, std::size_t x, std::size_t y, bool calibrat
 Measurement measure(const Image &slice, const std::optional<Roi> &roi, bool calibrated, std::stop_token stop) {
     checkCancelled(stop);
     validateSlice(slice);
-    if (roi && roi->type == RoiType::Line) throw std::invalid_argument("Use a line profile for line ROIs");
+    if (roi && roi->type == RoiType::Line) throw std::invalid_argument(QCoreApplication::translate("Analysis", "Use a line profile for line ROIs").toStdString());
     Measurement result;
     result.imageName = slice.metadata().name;
-    result.roiName = roi ? roi->name : QStringLiteral("Entire slice");
+    result.roiName = roi ? roi->name : QCoreApplication::translate("Analysis", "Entire slice");
     result.minimum = std::numeric_limits<double>::infinity();
     result.maximum = -std::numeric_limits<double>::infinity();
     long double mean = 0, m2 = 0, sum = 0, scale = 0;
@@ -78,8 +79,8 @@ Measurement measure(const Image &slice, const std::optional<Roi> &roi, bool cali
 Histogram histogram(const Image &slice, std::size_t bins, const std::optional<Roi> &roi, bool calibrated, std::stop_token stop) {
     checkCancelled(stop);
     validateSlice(slice);
-    if (bins == 0 || bins > 1048576) throw std::invalid_argument("Histogram bin count must be between 1 and 1048576");
-    if (roi && roi->type == RoiType::Line) throw std::invalid_argument("Use a line profile for line ROIs");
+    if (bins == 0 || bins > 1048576) throw std::invalid_argument(QCoreApplication::translate("Analysis", "Histogram bin count must be between 1 and 1048576").toStdString());
+    if (roi && roi->type == RoiType::Line) throw std::invalid_argument(QCoreApplication::translate("Analysis", "Use a line profile for line ROIs").toStdString());
     Histogram result;
     result.centers.resize(bins);
     result.counts.assign(bins, 0);
@@ -132,14 +133,14 @@ LineProfile lineProfile(const Image &slice, QPointF start, QPointF end, std::siz
             && point.x() <= static_cast<double>(slice.width() - 1)
             && point.y() <= static_cast<double>(slice.height() - 1);
     };
-    if (!inside(start) || !inside(end)) throw std::out_of_range("Line endpoints must be inside the image");
+    if (!inside(start) || !inside(end)) throw std::out_of_range(QCoreApplication::translate("Analysis", "Line endpoints must be inside the image").toStdString());
     const auto dx = end.x() - start.x(), dy = end.y() - start.y();
     if (samples == 0) samples = static_cast<std::size_t>(std::ceil(std::hypot(dx, dy))) + 1;
-    if (samples > 10000000) throw std::invalid_argument("Line profile has too many samples");
+    if (samples > 10000000) throw std::invalid_argument(QCoreApplication::translate("Analysis", "Line profile has too many samples").toStdString());
     LineProfile result;
     const auto &axes = slice.metadata().axes;
     const auto length = std::hypot(dx * axes[0].spacing, dy * axes[1].spacing);
-    if (axes[0].unit != axes[1].unit) throw std::invalid_argument("Line profile axes must have matching units");
+    if (axes[0].unit != axes[1].unit) throw std::invalid_argument(QCoreApplication::translate("Analysis", "Line profile axes must have matching units").toStdString());
     result.distanceUnit = axes[0].unit;
     result.intensityUnit = calibrated ? slice.metadata().intensityUnit : QString();
     result.distance.reserve(samples); result.intensity.reserve(samples);
@@ -173,14 +174,14 @@ LineProfile gelLaneProfile(const Image &slice, const Roi &lane, bool horizontal,
         || !std::isfinite(bounds.right()) || !std::isfinite(bounds.bottom())
         || bounds.left() < 0 || bounds.top() < 0 || bounds.right() > double(slice.width())
         || bounds.bottom() > double(slice.height()) || bounds.isEmpty())
-        throw std::invalid_argument("Select a rectangular lane entirely inside the image.");
+        throw std::invalid_argument(QCoreApplication::translate("Analysis", "Select a rectangular lane entirely inside the image.").toStdString());
     const auto x0 = std::size_t(std::max(0.0, std::ceil(bounds.left() - .5)));
     const auto y0 = std::size_t(std::max(0.0, std::ceil(bounds.top() - .5)));
     const auto x1 = std::size_t(std::max(0.0, std::ceil(bounds.right() - .5)));
     const auto y1 = std::size_t(std::max(0.0, std::ceil(bounds.bottom() - .5)));
     const auto count = horizontal ? x1 - x0 : y1 - y0;
     const auto width = horizontal ? y1 - y0 : x1 - x0;
-    if (count < 2 || width == 0) throw std::invalid_argument("A lane needs at least two samples along its length and one across its width.");
+    if (count < 2 || width == 0) throw std::invalid_argument(QCoreApplication::translate("Analysis", "A lane needs at least two samples along its length and one across its width.").toStdString());
     const auto &axis = slice.metadata().axes[horizontal ? 0 : 1];
     LineProfile result;
     result.distanceUnit = axis.unit;
@@ -192,32 +193,32 @@ LineProfile gelLaneProfile(const Image &slice, const Roi &lane, bool horizontal,
         for (std::size_t j = 0; j < width; ++j) {
             if ((j & 1023) == 0) checkCancelled(stop);
             const double value = intensity(slice, x0 + (horizontal ? i : j), y0 + (horizontal ? j : i), true);
-            if (!std::isfinite(value)) throw std::invalid_argument("Gel lanes must contain finite intensity values.");
+            if (!std::isfinite(value)) throw std::invalid_argument(QCoreApplication::translate("Analysis", "Gel lanes must contain finite intensity values.").toStdString());
             sum += static_cast<long double>(value) / width;
         }
         const double value = static_cast<double>(darkBands ? -sum : sum);
         const double distance = double(i) * axis.spacing;
         if (!std::isfinite(value) || !std::isfinite(distance) || (i && distance <= result.distance.back()))
-            throw std::invalid_argument("Gel profile values or spacing cannot be represented.");
+            throw std::invalid_argument(QCoreApplication::translate("Analysis", "Gel profile values or spacing cannot be represented.").toStdString());
         result.distance.push_back(distance); result.intensity.push_back(value);
     }
     const auto [minimum, maximum] = std::minmax_element(result.intensity.begin(), result.intensity.end());
-    if (!std::isfinite(*maximum - *minimum)) throw std::invalid_argument("Gel intensity range is too wide to plot.");
+    if (!std::isfinite(*maximum - *minimum)) throw std::invalid_argument(QCoreApplication::translate("Analysis", "Gel intensity range is too wide to plot.").toStdString());
     return result;
 }
 
 double gelPeakArea(const LineProfile &profile, std::size_t first, std::size_t last) {
     if (profile.distance.size() != profile.intensity.size() || first >= last || last >= profile.distance.size())
-        throw std::invalid_argument("Choose a band start before its end.");
+        throw std::invalid_argument(QCoreApplication::translate("Analysis", "Choose a band start before its end.").toStdString());
     const auto &x = profile.distance;
     const auto &y = profile.intensity;
     const long double span = static_cast<long double>(x[last]) - x[first];
     if (!(span > 0) || !std::isfinite(span) || !std::isfinite(y[first]) || !std::isfinite(y[last]))
-        throw std::invalid_argument("Band samples must be finite and ordered.");
+        throw std::invalid_argument(QCoreApplication::translate("Analysis", "Band samples must be finite and ordered.").toStdString());
     long double area = 0, previous = 0;
     for (auto i = first + 1; i <= last; ++i) {
         if (!std::isfinite(x[i - 1]) || !std::isfinite(x[i]) || !std::isfinite(y[i]) || x[i] <= x[i - 1])
-            throw std::invalid_argument("Band samples must be finite and ordered.");
+            throw std::invalid_argument(QCoreApplication::translate("Analysis", "Band samples must be finite and ordered.").toStdString());
         const long double fraction = (static_cast<long double>(x[i]) - x[first]) / span;
         const long double baseline = (1 - fraction) * y[first] + fraction * y[last];
         const long double residual = std::max(0.0L, static_cast<long double>(y[i]) - baseline);
@@ -225,16 +226,16 @@ double gelPeakArea(const LineProfile &profile, std::size_t first, std::size_t la
         previous = residual;
     }
     const auto result = static_cast<double>(area);
-    if (!std::isfinite(result)) throw std::invalid_argument("Band area cannot be represented.");
+    if (!std::isfinite(result)) throw std::invalid_argument(QCoreApplication::translate("Analysis", "Band area cannot be represented.").toStdString());
     return result;
 }
 
 Mask createMask(const Image &slice, const Roi &roi, std::stop_token stop) {
     checkCancelled(stop);
     validateSlice(slice, false);
-    if (roi.type == RoiType::Line) throw std::invalid_argument("A line ROI cannot define an area mask");
+    if (roi.type == RoiType::Line) throw std::invalid_argument(QCoreApplication::translate("Analysis", "A line ROI cannot define an area mask").toStdString());
     Mask result;
-    result.name = roi.name + QStringLiteral(" mask");
+    result.name = roi.name + QCoreApplication::translate("Analysis", " mask");
     result.sourceRoiId = roi.id;
     auto metadata = slice.metadata();
     metadata.name = result.name;

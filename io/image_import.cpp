@@ -1,4 +1,5 @@
 #include "io/image_io.h"
+#include <QCoreApplication>
 #include "io/io_detail.h"
 #include "core/memory.h"
 
@@ -25,7 +26,7 @@ ImageImportPlan discoverImageImports(const QStringList &paths, std::stop_token s
         if (path.isEmpty()) continue;
         const QFileInfo info(path);
         if (!info.exists() || !info.isReadable()) {
-            plan.errors.append(QStringLiteral("Cannot read %1").arg(path));
+            plan.errors.append(QCoreApplication::translate("ImageImport", "Cannot read %1").arg(path));
         } else if (info.isDir()) {
             const auto previousCount = candidates.size();
             QDirIterator files(path, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
@@ -34,7 +35,7 @@ ImageImportPlan discoverImageImports(const QStringList &paths, std::stop_token s
                 candidates.append({files.next(), false});
             }
             if (candidates.size() == previousCount)
-                plan.errors.append(QStringLiteral("No image files found in %1").arg(path));
+                plan.errors.append(QCoreApplication::translate("ImageImport", "No image files found in %1").arg(path));
         } else {
             candidates.append({path, true});
         }
@@ -53,7 +54,7 @@ ImageImportPlan discoverImageImports(const QStringList &paths, std::stop_token s
         const QFileInfo info(candidate.path);
         QFile readable(candidate.path);
         if (!readable.open(QIODevice::ReadOnly)) {
-            plan.errors.append(QStringLiteral("Cannot read %1").arg(candidate.path));
+            plan.errors.append(QCoreApplication::translate("ImageImport", "Cannot read %1").arg(candidate.path));
             continue;
         }
         readable.close();
@@ -101,13 +102,13 @@ ImageImportPlan discoverImageImports(const QStringList &paths, std::stop_token s
             plan.images.append({{path}, bytes});
         } else {
             if (bytes > std::numeric_limits<std::size_t>::max() - plan.images[*group].dicomBytes)
-                throw std::length_error("DICOM series exceeds the addressable size");
+                throw std::length_error(QCoreApplication::translate("ImageImport", "DICOM series exceeds the addressable size").toStdString());
             plan.images[*group].paths.append(path);
             plan.images[*group].dicomBytes += bytes;
         }
     }
     if (plan.images.isEmpty() && plan.errors.isEmpty() && !paths.isEmpty())
-        plan.errors.append(QStringLiteral("No supported image files found in the selected paths"));
+        plan.errors.append(QCoreApplication::translate("ImageImport", "No supported image files found in the selected paths"));
     detail::checkIo(stop, progress, 1);
     return plan;
 }
@@ -117,12 +118,12 @@ void checkDicomImportMemory(const QList<ImageImport> &images, std::optional<std:
     std::size_t bytes = 0, working = 0;
     for (const auto &image : images) {
         if (image.dicomBytes > std::numeric_limits<std::size_t>::max() - bytes)
-            throw std::length_error("DICOM import exceeds the addressable size");
+            throw std::length_error(QCoreApplication::translate("ImageImport", "DICOM import exceeds the addressable size").toStdString());
         bytes += image.dicomBytes;
         working = std::max(working, image.dicomBytes);
     }
     if (working > std::numeric_limits<std::size_t>::max() - bytes)
-        throw std::length_error("DICOM import exceeds the addressable size");
+        throw std::length_error(QCoreApplication::translate("ImageImport", "DICOM import exceeds the addressable size").toStdString());
     if (bytes) detail::checkMemoryBudget(bytes + working, available);
 }
 

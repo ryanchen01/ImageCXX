@@ -53,8 +53,8 @@ UpdateChecker::UpdateChecker(MainWindow &window) : QObject(&window)
             const auto resetChecking = qScopeGuard([this] { checking_ = false; });
             reply->deleteLater();
             if (reply->error() != QNetworkReply::NoError) {
-                if (manual) QMessageBox::warning(&window, tr("Check for Updates"),
-                    tr("Cannot check for updates. Please try again later."));
+                if (manual) QMessageBox::warning(&window, QCoreApplication::translate("UpdateChecker", "Check for Updates"),
+                    QCoreApplication::translate("UpdateChecker", "Cannot check for updates. Please try again later."));
                 return;
             }
 #if defined(Q_OS_WIN)
@@ -65,21 +65,21 @@ UpdateChecker::UpdateChecker(MainWindow &window) : QObject(&window)
             const auto release = releaseUpdate(reply->readAll(), QCoreApplication::applicationVersion(), suffix);
             if (!window.isVisible()) return;
             if (!release) {
-                if (manual) QMessageBox::information(&window, tr("Check for Updates"), tr("No updates are available."));
+                if (manual) QMessageBox::information(&window, QCoreApplication::translate("UpdateChecker", "Check for Updates"), QCoreApplication::translate("UpdateChecker", "No updates are available."));
                 return;
             }
 #ifdef Q_OS_LINUX
             const auto appImage = qEnvironmentVariable("APPIMAGE");
             if (appImage.isEmpty()) {
-                if (manual) QMessageBox::information(&window, tr("Check for Updates"),
-                    tr("ImageCXX %1 is available. Install the latest AppImage from the GitHub releases page to update.").arg(release->version));
+                if (manual) QMessageBox::information(&window, QCoreApplication::translate("UpdateChecker", "Check for Updates"),
+                    QCoreApplication::translate("UpdateChecker", "ImageCXX %1 is available. Install the latest AppImage from the GitHub releases page to update.").arg(release->version));
                 return;
             }
 #endif
-            if (QMessageBox::question(&window, tr("Update ImageCXX"),
-                tr("ImageCXX %1 is available. Download and install it?").arg(release->version),
+            if (QMessageBox::question(&window, QCoreApplication::translate("UpdateChecker", "Update ImageCXX"),
+                QCoreApplication::translate("UpdateChecker", "ImageCXX %1 is available. Download and install it?").arg(release->version),
                 QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
-            auto *progress = new QProgressDialog(tr("Downloading update..."), tr("Cancel"), 0, 0, &window);
+            auto *progress = new QProgressDialog(QCoreApplication::translate("UpdateChecker", "Downloading update..."), QCoreApplication::translate("UpdateChecker", "Cancel"), 0, 0, &window);
             progress_ = progress;
             progress->setWindowModality(Qt::WindowModal);
             progress->setAutoClose(false);
@@ -89,8 +89,8 @@ UpdateChecker::UpdateChecker(MainWindow &window) : QObject(&window)
                 progress->close(); progress->deleteLater();
                 if (canceled) { directory_.reset(); return; }
                 if (!error.isEmpty() || !verifyUpdate(path, *release)) {
-                    QMessageBox::warning(&window, tr("Update failed"), error.isEmpty()
-                        ? tr("The downloaded update failed verification. Your installation has not changed.") : error);
+                    QMessageBox::warning(&window, QCoreApplication::translate("UpdateChecker", "Update failed"), error.isEmpty()
+                        ? QCoreApplication::translate("UpdateChecker", "The downloaded update failed verification. Your installation has not changed.") : error);
                     directory_.reset(); return;
                 }
 #ifdef Q_OS_WIN
@@ -103,7 +103,7 @@ UpdateChecker::UpdateChecker(MainWindow &window) : QObject(&window)
                 const auto original = qEnvironmentVariable("APPIMAGE");
                 const auto backup = original + ".zs-old";
                 if (!QFile::setPermissions(path, QFile::permissions(original))) {
-                    QMessageBox::warning(&window, tr("Update failed"), tr("Cannot set the updated AppImage's permissions."));
+                    QMessageBox::warning(&window, QCoreApplication::translate("UpdateChecker", "Update failed"), QCoreApplication::translate("UpdateChecker", "Cannot set the updated AppImage's permissions."));
                     directory_.reset(); return;
                 }
                 const bool quitOnClose = QApplication::quitOnLastWindowClosed();
@@ -113,14 +113,14 @@ UpdateChecker::UpdateChecker(MainWindow &window) : QObject(&window)
                 if (!closed) { directory_.reset(); return; }
                 if ((QFile::exists(backup) && !QFile::remove(backup)) || !QFile::rename(original, backup)) {
                     window.show();
-                    QMessageBox::warning(&window, tr("Update failed"), tr("Cannot back up the AppImage. Check the directory permissions."));
+                    QMessageBox::warning(&window, QCoreApplication::translate("UpdateChecker", "Update failed"), QCoreApplication::translate("UpdateChecker", "Cannot back up the AppImage. Check the directory permissions."));
                     directory_.reset(); return;
                 }
                 if (!QFile::rename(path, original)) {
                     const bool restored = QFile::rename(backup, original);
                     window.show();
-                    QMessageBox::warning(&window, tr("Update failed"), restored ? tr("Cannot replace the AppImage. The original was restored.")
-                        : tr("Cannot restore the AppImage. Your previous version is at %1.").arg(backup));
+                    QMessageBox::warning(&window, QCoreApplication::translate("UpdateChecker", "Update failed"), restored ? QCoreApplication::translate("UpdateChecker", "Cannot replace the AppImage. The original was restored.")
+                        : QCoreApplication::translate("UpdateChecker", "Cannot restore the AppImage. Your previous version is at %1.").arg(backup));
                     directory_.reset(); return;
                 }
                 pendingProgram = original;
@@ -132,7 +132,7 @@ UpdateChecker::UpdateChecker(MainWindow &window) : QObject(&window)
             const auto path = directory_->filePath("ImageCXX-Setup.exe");
             auto file = std::make_shared<QFile>(path);
             if (!directory_->isValid() || !file->open(QIODevice::WriteOnly)) {
-                complete(path, tr("Cannot create the update download file.")); return;
+                complete(path, QCoreApplication::translate("UpdateChecker", "Cannot create the update download file.")); return;
             }
             QNetworkRequest download(release->url);
             download.setTransferTimeout(60000);
@@ -147,14 +147,14 @@ UpdateChecker::UpdateChecker(MainWindow &window) : QObject(&window)
             });
             connect(transfer, &QNetworkReply::finished, this, [transfer, file, path, complete] {
                 const bool flushed = file->flush(); file->close();
-                complete(path, transfer->error() == QNetworkReply::NoError && flushed ? QString{} : tr("The update download failed. Please try again later."));
+                complete(path, transfer->error() == QNetworkReply::NoError && flushed ? QString{} : QCoreApplication::translate("UpdateChecker", "The update download failed. Please try again later."));
                 transfer->deleteLater();
             });
 #else
             directory_ = std::make_unique<QTemporaryDir>(QFileInfo(appImage).absolutePath() + "/.imagecxx-update-XXXXXX");
             const auto path = directory_->filePath("ImageCXX.AppImage");
             if (!directory_->isValid() || !QFile::copy(appImage, path)) {
-                complete(path, tr("Cannot stage the update next to the AppImage. Check free space and directory permissions.")); return;
+                complete(path, QCoreApplication::translate("UpdateChecker", "Cannot stage the update next to the AppImage. Check free space and directory permissions.")); return;
             }
             auto environment = QProcessEnvironment::systemEnvironment();
             environment.insert("APPIMAGE_EXTRACT_AND_RUN", "1");
@@ -167,11 +167,11 @@ UpdateChecker::UpdateChecker(MainWindow &window) : QObject(&window)
             connect(&process_, &QProcess::readyReadStandardOutput, this, [this] { process_.readAllStandardOutput(); });
             connect(&process_, &QProcess::readyReadStandardError, this, [this] { process_.readAllStandardError(); });
             connect(&process_, &QProcess::errorOccurred, this, [complete, path](QProcess::ProcessError error) {
-                if (error == QProcess::FailedToStart) complete(path, tr("Cannot start the bundled AppImageUpdate tool."));
+                if (error == QProcess::FailedToStart) complete(path, QCoreApplication::translate("UpdateChecker", "Cannot start the bundled AppImageUpdate tool."));
             });
             connect(&process_, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
                 [complete, path](int code, QProcess::ExitStatus status) {
-                    complete(path, code == 0 && status == QProcess::NormalExit ? QString{} : tr("AppImageUpdate could not download the update."));
+                    complete(path, code == 0 && status == QProcess::NormalExit ? QString{} : QCoreApplication::translate("UpdateChecker", "AppImageUpdate could not download the update."));
                 });
             process_.start();
 #endif

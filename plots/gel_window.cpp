@@ -1,4 +1,5 @@
 #include "gel_window.h"
+#include <QCoreApplication>
 #include "plots/plot_widget.h"
 #include "processing/processing.h"
 #include <QComboBox>
@@ -72,12 +73,12 @@ GelWindow::GelWindow(std::vector<LineProfile> profiles, QString title, bool dark
         const auto first = std::size_t(first_->value() - 1), last = std::size_t(last_->value() - 1);
         try {
             const auto area = gelPeakArea(profile, first, last);
-            if (!(area > 0)) throw std::invalid_argument("The selected band has no signal above its baseline.");
+            if (!(area > 0)) throw std::invalid_argument(QCoreApplication::translate("GelWindow", "The selected band has no signal above its baseline.").toStdString());
             for (int row = 0; row < results_->rowCount(); ++row) {
                 if (results_->index(row, 0).data().toInt() == lane + 1
                     && first_->value() < results_->index(row, 3).data().toInt()
                     && last_->value() > results_->index(row, 2).data().toInt())
-                    throw std::invalid_argument("This band overlaps a measured band in the same lane.");
+                    throw std::invalid_argument(QCoreApplication::translate("GelWindow", "This band overlaps a measured band in the same lane.").toStdString());
             }
             QList<QStandardItem *> row;
             for (const auto &value : QVariantList{lane + 1, 0, first_->value(), last_->value(),
@@ -96,12 +97,12 @@ GelWindow::GelWindow(std::vector<LineProfile> profiles, QString title, bool dark
         labelPeaks();
     });
     connect(exportButton, &QPushButton::clicked, this, [this, darkBands] {
-        const auto path = QFileDialog::getSaveFileName(this, tr("Export gel measurements"), "gel-measurements.csv", "CSV (*.csv)");
+        const auto path = QFileDialog::getSaveFileName(this, tr("Export gel measurements"), "gel-measurements.csv", tr("CSV (*.csv)"));
         if (path.isEmpty()) return;
         QByteArray csv;
         for (int row = -1; row < results_->rowCount(); ++row) {
-            QStringList fields{row < 0 ? QStringLiteral("Source") : windowTitle(),
-                row < 0 ? QStringLiteral("Polarity") : (darkBands ? QStringLiteral("Dark bands") : QStringLiteral("Bright bands"))};
+            QStringList fields{row < 0 ? tr("Source") : windowTitle(),
+                row < 0 ? tr("Polarity") : (darkBands ? tr("Dark bands") : tr("Bright bands"))};
             for (auto &field : fields) { field.replace('"', "\"\""); field = '"' + field + '"'; }
             for (int col = 0; col < results_->columnCount(); ++col) {
                 const auto value = row < 0 ? results_->headerData(col, Qt::Horizontal) : results_->index(row, col).data();

@@ -44,6 +44,8 @@
 #include <QTemporaryDir>
 #include <QThread>
 #include <QTimer>
+#include <QTranslator>
+#include <QMenuBar>
 #include <QDialog>
 #include <QCloseEvent>
 #include <QMessageBox>
@@ -3313,4 +3315,37 @@ int main(int argc, char **argv)
     QCoreApplication::setApplicationName("ImageCXXTests");
     testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
+}
+
+TEST(Localization, TranslatedChoicesPreserveCommandValues)
+{
+    class Translator final : public QTranslator {
+    public:
+        bool isEmpty() const override { return false; }
+        QString translate(const char *context, const char *source, const char *, int) const override
+        {
+            if (QByteArray(context) == "CommandChoices" || QByteArray(context) == "CommandCategories")
+                return "Translated " + QString::fromUtf8(source);
+            return {};
+        }
+    } translator;
+    ASSERT_TRUE(QCoreApplication::installTranslator(&translator));
+    MainWindow window;
+    auto *doc = window.addDocument(Image::allocate(PixelType::UInt8, {8, 8}));
+    EXPECT_EQ(window.menuBar()->actions().front()->text(), "Translated File");
+    QTimer::singleShot(0, &window, [] {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        ASSERT_NE(dialog, nullptr);
+        auto *orientation = dialog->findChild<QComboBox *>("orientation");
+        ASSERT_NE(orientation, nullptr);
+        EXPECT_EQ(orientation->currentText(), "Translated Vertical");
+        EXPECT_EQ(orientation->currentData().toString(), "Vertical");
+        orientation->setCurrentIndex(orientation->findData("Horizontal"));
+        dialog->accept();
+    });
+    window.executeCommand("gel.options");
+    EXPECT_TRUE(doc->gelHorizontal);
+    const auto values = window.commands().validate("process.gaussian", {});
+    EXPECT_EQ(values.value("scope").toString(), "Full image");
+    QCoreApplication::removeTranslator(&translator);
 }

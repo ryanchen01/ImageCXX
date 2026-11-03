@@ -1,4 +1,5 @@
 #include "core/memory.h"
+#include <QCoreApplication>
 #include "processing/processing.h"
 #include "processing_detail.h"
 
@@ -46,7 +47,7 @@ Image sampleReslice(const Image &source, const ResliceGeometry &geometry, const 
         if (progress) progress(reported);
     };
     report(0);
-    if (stop.stop_requested()) throw std::runtime_error("Reslice cancelled");
+    if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("Reslice", "Reslice cancelled").toStdString());
     auto result = Image::allocate(source.pixelType(), geometry.shape, geometry.metadata);
     auto *destination = result.mutableData();
     const auto *buffer = source.data();
@@ -69,7 +70,7 @@ Image sampleReslice(const Image &source, const ResliceGeometry &geometry, const 
             remainder /= source.dimension(axis);
         }
         for (std::size_t component = 0; component < components; ++component) {
-            if (stop.stop_requested()) throw std::runtime_error("Reslice cancelled");
+            if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("Reslice", "Reslice cancelled").toStdString());
             const double unit = double(volume * components + component);
             const T *inputBuffer = buffer && source.contiguous() && components == 1
                 && reinterpret_cast<std::uintptr_t>(buffer) % alignof(T) == 0
@@ -79,7 +80,7 @@ Image sampleReslice(const Image &source, const ResliceGeometry &geometry, const 
                 packed.resize(inputPixels);
                 for (std::size_t pixel = 0; pixel < inputPixels; ++pixel) {
                     if ((pixel & 4095) == 0) {
-                        if (stop.stop_requested()) throw std::runtime_error("Reslice cancelled");
+                        if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("Reslice", "Reslice cancelled").toStdString());
                         report((unit + .1 * double(pixel) / double(inputPixels)) / units);
                     }
                     index[0] = pixel % source.width(); index[1] = pixel / source.width() % source.height();
@@ -110,11 +111,11 @@ Image sampleReslice(const Image &source, const ResliceGeometry &geometry, const 
                 report((unit + .1 + .8 * fraction) / units);
             };
             filter->UpdateLargestPossibleRegion();
-            if (stop.stop_requested()) throw std::runtime_error("Reslice cancelled");
+            if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("Reslice", "Reslice cancelled").toStdString());
             const auto *resampled = filter->GetOutput()->GetBufferPointer();
             for (std::size_t pixel = 0; pixel < outputPixels; ++pixel) {
                 if ((pixel & 4095) == 0) {
-                    if (stop.stop_requested()) throw std::runtime_error("Reslice cancelled");
+                    if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("Reslice", "Reslice cancelled").toStdString());
                     report((unit + .9 + .1 * double(pixel) / double(outputPixels)) / units);
                 }
                 double value = resampled[pixel];
@@ -128,7 +129,7 @@ Image sampleReslice(const Image &source, const ResliceGeometry &geometry, const 
             report((unit + 1) / units);
         }
     }
-    if (stop.stop_requested()) throw std::runtime_error("Reslice cancelled");
+    if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("Reslice", "Reslice cancelled").toStdString());
     report(1);
     return result;
 }
@@ -136,32 +137,32 @@ Image sampleReslice(const Image &source, const ResliceGeometry &geometry, const 
 
 ResliceGeometry resliceGeometry(const Image &image, const ResliceOptions &options) {
     if (image.empty() || image.shape().size() < 3 || image.depth() < 2)
-        throw std::invalid_argument("Reslice requires a Z stack with at least two slices");
+        throw std::invalid_argument(QCoreApplication::translate("Reslice", "Reslice requires a Z stack with at least two slices").toStdString());
     if (!std::isfinite(options.outputSpacing) || options.outputSpacing <= 0)
-        throw std::invalid_argument("Output spacing must be positive and finite");
+        throw std::invalid_argument(QCoreApplication::translate("Reslice", "Output spacing must be positive and finite").toStdString());
     if (options.start != ResliceStart::Top && options.start != ResliceStart::Left &&
         options.start != ResliceStart::Bottom && options.start != ResliceStart::Right)
-        throw std::invalid_argument("Invalid reslice start direction");
+        throw std::invalid_argument(QCoreApplication::translate("Reslice", "Invalid reslice start direction").toStdString());
     const auto &axes = image.metadata().axes;
     for (std::size_t axis = 0; axis < 3; ++axis) {
         if (!std::isfinite(axes[axis].spacing) || axes[axis].spacing <= 0 ||
             !std::isfinite(axes[axis].origin))
-            throw std::invalid_argument("Spatial calibration must be finite with positive spacing");
+            throw std::invalid_argument(QCoreApplication::translate("Reslice", "Spatial calibration must be finite with positive spacing").toStdString());
         if (axes[axis].unit != axes[0].unit)
             throw std::invalid_argument(
-                "Reslice requires matching spatial axis units. Convert the image's spatial units first.");
+                QCoreApplication::translate("Reslice", "Reslice requires matching spatial axis units. Convert the image's spatial units first.").toStdString());
     }
     auto direction = image.metadata().direction;
     if (direction.empty())
         direction = {1, 0, 0, 0, 1, 0, 0, 0, 1};
     if (direction.size() != 9 ||
         !std::all_of(direction.begin(), direction.end(), [](double v) { return std::isfinite(v); }))
-        throw std::invalid_argument("Reslice requires a finite 3D spatial direction matrix");
+        throw std::invalid_argument(QCoreApplication::translate("Reslice", "Reslice requires a finite 3D spatial direction matrix").toStdString());
     const double determinant = direction[0] * (direction[4] * direction[8] - direction[5] * direction[7]) -
                                direction[1] * (direction[3] * direction[8] - direction[5] * direction[6]) +
                                direction[2] * (direction[3] * direction[7] - direction[4] * direction[6]);
     if (!std::isfinite(determinant) || std::abs(determinant) < 1e-12)
-        throw std::invalid_argument("Spatial image direction is singular");
+        throw std::invalid_argument(QCoreApplication::translate("Reslice", "Spatial image direction is singular").toStdString());
 
     const bool horizontal = options.start == ResliceStart::Top || options.start == ResliceStart::Bottom;
     const std::size_t profile = horizontal ? 0 : 1, sweep = horizontal ? 1 : 0;
@@ -190,12 +191,12 @@ ResliceGeometry resliceGeometry(const Image &image, const ResliceOptions &option
         const double intervals = std::floor(double(image.dimension(sourceAxis) - 1) / step + 1e-9);
         if (!std::isfinite(step) || step <= 0 || !std::isfinite(intervals) ||
             intervals >= double(std::numeric_limits<std::size_t>::max() - 1))
-            throw std::overflow_error("Resliced axis exceeds the addressable size");
+            throw std::overflow_error(QCoreApplication::translate("Reslice", "Resliced axis exceeds the addressable size").toStdString());
         geometry.shape[axis] = std::size_t(intervals) + 1;
         geometry.metadata.axes[axis] = axes[sourceAxis];
         geometry.metadata.axes[axis].spacing *= step;
         if (!std::isfinite(geometry.metadata.axes[axis].spacing) || geometry.metadata.axes[axis].spacing <= 0)
-            throw std::overflow_error("Resliced spacing is not finite and positive");
+            throw std::overflow_error(QCoreApplication::translate("Reslice", "Resliced spacing is not finite and positive").toStdString());
         for (std::size_t row = 0; row < 3; ++row)
             geometry.metadata.direction[row * 3 + axis] =
                 direction[row * 3 + sourceAxis] * (geometry.step[axis] < 0 ? -1 : 1);
@@ -215,13 +216,13 @@ ResliceGeometry resliceGeometry(const Image &image, const ResliceOptions &option
     const auto origin = world->TransformPoint(indexTransform(geometry)->TransformPoint(zero));
     for (std::size_t row = 0; row < 3; ++row) {
         if (!std::isfinite(origin[row]))
-            throw std::overflow_error("Resliced spatial origin is not finite");
+            throw std::overflow_error(QCoreApplication::translate("Reslice", "Resliced spatial origin is not finite").toStdString());
         geometry.metadata.axes[row].origin = origin[row];
     }
     geometry.byteCount = bytesPerPixel(image.pixelType());
     for (const auto size : geometry.shape) {
         if (size > std::numeric_limits<std::size_t>::max() / geometry.byteCount)
-            throw std::overflow_error("Resliced image exceeds the addressable buffer size");
+            throw std::overflow_error(QCoreApplication::translate("Reslice", "Resliced image exceeds the addressable buffer size").toStdString());
         geometry.byteCount *= size;
     }
     // ITK imports contiguous scalar volumes without copying. Other storage and
@@ -242,7 +243,7 @@ ResliceGeometry resliceGeometry(const Image &image, const ResliceOptions &option
             ? 4
             : (image.pixelType() == PixelType::Float64 ? 8 : 4) * std::min<std::size_t>(4, image.channels());
     if (planePixels > std::numeric_limits<std::size_t>::max() / decodedBytes / 4)
-        throw std::overflow_error("Reslice working buffers exceed the addressable size");
+        throw std::overflow_error(QCoreApplication::translate("Reslice", "Reslice working buffers exceed the addressable size").toStdString());
     const auto planeBytes = planePixels * decodedBytes;
     const auto cachePixels = geometry.byteCount / bytesPerPixel(image.pixelType());
     const auto cacheBytes =
@@ -250,16 +251,16 @@ ResliceGeometry resliceGeometry(const Image &image, const ResliceOptions &option
     geometry.requiredMemoryBytes = geometry.byteCount;
     const auto outputVolumePixels = planePixels * geometry.shape[2];
     if (outputVolumePixels > std::numeric_limits<std::size_t>::max() / sizeof(double))
-        throw std::overflow_error("ITK output volume exceeds the addressable size");
+        throw std::overflow_error(QCoreApplication::translate("Reslice", "ITK output volume exceeds the addressable size").toStdString());
     for (const auto extra :
          {planeBytes * 4, cacheBytes, packedBytes, outputVolumePixels * sizeof(double),
           image.storageKind() == "RAM" ? std::size_t{0} : image.byteCount()}) {
         if (extra > std::numeric_limits<std::size_t>::max() - geometry.requiredMemoryBytes)
-            throw std::overflow_error("Reslice memory requirement exceeds the addressable size");
+            throw std::overflow_error(QCoreApplication::translate("Reslice", "Reslice memory requirement exceeds the addressable size").toStdString());
         geometry.requiredMemoryBytes += extra;
     }
     geometry.metadata.sourcePath.clear();
-    geometry.metadata.name += QStringLiteral(" · Reslice");
+    geometry.metadata.name += QCoreApplication::translate("Reslice", " · Reslice");
     geometry.metadata.attributes.insert(QStringLiteral("ImageCXX.LastOperation"), QStringLiteral("Reslice"));
     return geometry;
 }
@@ -270,7 +271,7 @@ Image reslice(const Image &image, const ResliceOptions &options, std::stop_token
     static std::mutex allocationMutex;
     const std::unique_lock lock(allocationMutex);
     if (stop.stop_requested())
-        throw std::runtime_error("Reslice cancelled");
+        throw std::runtime_error(QCoreApplication::translate("Reslice", "Reslice cancelled").toStdString());
     const auto geometry = resliceGeometry(image, options);
     detail::checkMemoryBudget(geometry.requiredMemoryBytes, detail::availableMemoryBytes());
     try {
@@ -288,13 +289,13 @@ Image reslice(const Image &image, const ResliceOptions &options, std::stop_token
         case PixelType::Float64:
             return sampleReslice<double>(image, geometry, options, stop, progress);
         }
-        throw std::invalid_argument("Unsupported reslice pixel type");
+        throw std::invalid_argument(QCoreApplication::translate("Reslice", "Unsupported reslice pixel type").toStdString());
     } catch (const std::bad_alloc &) {
-        throw std::runtime_error("Memory allocation failed while reslicing. The source image is unchanged.");
+        throw std::runtime_error(QCoreApplication::translate("Reslice", "Memory allocation failed while reslicing. The source image is unchanged.").toStdString());
     } catch (const itk::MemoryAllocationError &) {
-        throw std::runtime_error("ITK could not allocate reslice buffers. The source image is unchanged.");
+        throw std::runtime_error(QCoreApplication::translate("Reslice", "ITK could not allocate reslice buffers. The source image is unchanged.").toStdString());
     } catch (const itk::ExceptionObject &) {
-        if (stop.stop_requested()) throw std::runtime_error("Reslice cancelled");
+        if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("Reslice", "Reslice cancelled").toStdString());
         throw;
     }
 }
