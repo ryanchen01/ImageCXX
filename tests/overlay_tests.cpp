@@ -113,6 +113,50 @@ TEST(Overlay, EditorKeepsTheCurrentImageCheckedAndEditsTheSelectedLayerFromTheRi
     EXPECT_TRUE(retired.isNull()); EXPECT_TRUE(retiredEditor.isNull());
 }
 
+TEST(Overlay, ClosingRestoresSingleViewAndStopsSynchronizingSourceImages)
+{
+    MainWindow window;
+    auto *other = window.addDocument(Image::allocate(PixelType::UInt8, {8, 8, 6}));
+    auto *current = window.addDocument(Image::allocate(PixelType::UInt8, {8, 8, 6}));
+    auto *singleAction = window.findChild<QAction *>("view.single");
+    auto *overlayAction = window.findChild<QAction *>("view.overlay");
+    ASSERT_NE(singleAction, nullptr); ASSERT_NE(overlayAction, nullptr);
+    EXPECT_TRUE(singleAction->isChecked());
+    window.commands().execute("view.overlay");
+    auto *overlay = window.findChild<OverlayWindow *>();
+    auto *editor = window.findChild<QDialog *>("overlayEditor");
+    ASSERT_NE(overlay, nullptr); ASSERT_NE(editor, nullptr);
+    editor->findChild<QTreeWidget *>("overlayImages")->topLevelItem(0)->setCheckState(0, Qt::Checked);
+    EXPECT_FALSE(singleAction->isChecked());
+    EXPECT_TRUE(overlayAction->isChecked());
+    overlay->viewer->setSlice(2);
+    EXPECT_EQ(current->viewer->slice(), 2u);
+    EXPECT_EQ(other->viewer->slice(), 2u);
+
+    // Closing just the editor leaves the overlay and its navigation active.
+    editor->close();
+    EXPECT_TRUE(overlayAction->isChecked());
+    overlay->close();
+    EXPECT_TRUE(singleAction->isChecked());
+    EXPECT_FALSE(overlayAction->isChecked());
+    EXPECT_EQ(current->viewMode(), DocumentWidget::ViewMode::Single);
+    EXPECT_EQ(other->viewMode(), DocumentWidget::ViewMode::Single);
+    other->viewer->setSlice(4);
+    EXPECT_EQ(current->viewer->slice(), 2u);
+    current->viewer->setSlice(1);
+    EXPECT_EQ(other->viewer->slice(), 4u);
+    current->refresh();
+    window.addDocument(Image::allocate(PixelType::UInt8, {8, 8, 6}));
+    EXPECT_EQ(other->viewer->slice(), 4u);
+    EXPECT_EQ(current->viewer->slice(), 1u);
+
+    overlay->showEditor();
+    EXPECT_EQ(overlay->viewer->slice(), 1u);
+    EXPECT_EQ(other->viewer->slice(), 1u);
+    other->viewer->setSlice(3);
+    EXPECT_EQ(current->viewer->slice(), 3u);
+}
+
 TEST(Overlay, BrowsesCalibratedStacksAndFollowsSourceEdits)
 {
     MainWindow window;
