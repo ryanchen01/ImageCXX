@@ -145,6 +145,10 @@ jobs:
       - name: Test installer routing
         run: node tests/installer_tests.js
 
+      - name: Test Linux desktop integration
+        if: runner.os == 'Linux'
+        run: python3 tests/linux_desktop_tests.py
+
       - name: Install Linux graphics test runtime
         if: runner.os == 'Linux'
         run: |

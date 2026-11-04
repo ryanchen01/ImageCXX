@@ -4,6 +4,9 @@ version="$1"
 root="$PWD"
 appdir="$root/build/AppDir"
 mkdir -p "$appdir/usr/bin" "$appdir/usr/libexec" "$appdir/usr/share/doc/ImageCXX" "$root/dist"
+mkdir -p "$appdir/usr/share/mime/packages" "$appdir/usr/share/applications"
+cp packaging/linux/com.ryanchen01.ImageCXX.desktop "$appdir/usr/share/applications/"
+cp packaging/linux/com.ryanchen01.ImageCXX.xml "$appdir/usr/share/mime/packages/"
 # linuxdeploy handles deployment on Linux, including vcpkg shared libraries and QML plugins.
 cp build/release-vcpkg/ImageCXX "$appdir/usr/bin/"
 cp build/tools/appimageupdatetool.AppImage "$appdir/usr/libexec/"
@@ -22,6 +25,7 @@ build/tools/linuxdeploy.AppImage --appdir "$appdir" \
     --desktop-file packaging/linux/com.ryanchen01.ImageCXX.desktop \
     --icon-file resources/icons/imagecxx.svg --icon-filename com.ryanchen01.ImageCXX \
     --plugin qt --output appimage
+install -m 755 packaging/linux/install-desktop.sh "$root/dist/ImageCXX-$version-linux-install-desktop.sh"
 # appimagetool writes zsync metadata to the current directory.
 mv "$root/${LDAI_OUTPUT##*/}.zsync" "$LDAI_OUTPUT.zsync"
 test -s "$LDAI_OUTPUT.zsync"

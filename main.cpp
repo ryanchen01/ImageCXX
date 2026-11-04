@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "app/file_open_service.h"
 #include "app/batch.h"
 #include "app/processing_commands.h"
 #include "ui/theme.h"
@@ -56,11 +57,25 @@ int main(int argc, char *argv[])
             return result.errors.empty() ? 0 : 1;
         } catch (const std::exception &error) { std::fprintf(stderr, "%s\n", error.what()); return 2; }
     }
+    imagecxx::FileOpenService fileOpens;
+    try {
+        if (!fileOpens.start(parser.positionalArguments())) return 0;
+    } catch (const std::exception &error) {
+        std::fprintf(stderr, "%s\n", error.what());
+        return 1;
+    }
     imagecxx::applyTheme();
     QApplication::setWindowIcon(QIcon(":/icons/imagecxx.svg"));
     MainWindow window;
     window.show();
-    window.openPaths(parser.positionalArguments());
+    QObject::connect(&fileOpens, &imagecxx::FileOpenService::openRequested, &window,
+        [&window](const QStringList &paths) {
+            if (window.isMinimized()) window.showNormal();
+            window.show();
+            window.raise();
+            window.activateWindow();
+            window.openPaths(paths);
+        });
 #ifdef IMAGECXX_ENABLE_UPDATES
     imagecxx::UpdateChecker updates(window);
     const int result = application->exec();
