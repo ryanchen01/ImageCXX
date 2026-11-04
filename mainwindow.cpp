@@ -929,9 +929,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         commands_.add({"edit." + operation, labels.value(operation), "Edit", {}, true, {}, [this, operation](const QVariantMap &) {
             auto *doc = activeDocument(); if (!doc) return;
             const auto roi = selectedRoi();
-            if (operation == "draw" && !roi) { showError(tr("Select an area ROI first.")); return; }
+            if (operation == "draw" && !roi) { showError(tr("Select an ROI first.")); return; }
             if (doc->image.shape().size() > 5) { showError(tr("Pixel editing supports up to five dimensions.")); return; }
-            if (roi && roi->type == RoiType::Line) { showError(tr("Select an area ROI first.")); return; }
+            if (roi && roi->type == RoiType::Line && operation != "draw") { showError(tr("Select an area ROI first.")); return; }
             const auto input = doc->image;
             const auto z = doc->viewer->slice(), c = doc->viewer->channel(), t = doc->viewer->time();
             const auto revision = doc->revision; const QPointer<DocumentWidget> target = doc;
@@ -949,12 +949,28 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                 }
                 const double gray = std::lerp(minimum, maximum, qGray(color.rgb()) / 255.0);
                 const std::array<double, 3> rgb{double(color.red()), double(color.green()), double(color.blue())};
+                const bool line = roi && roi->type == RoiType::Line;
+                // Endpoints select their containing pixels; sample one pixel per major-axis step.
+                QPointF first = line ? QPointF(std::floor(roi->points[0].x()), std::floor(roi->points[0].y())) : QPointF{};
+                QPointF last = line ? QPointF(std::floor(roi->points[1].x()), std::floor(roi->points[1].y())) : QPointF{};
+                const bool horizontal = std::abs(last.x() - first.x()) >= std::abs(last.y() - first.y());
+                // Use the same interpolation direction so reversing endpoints cannot change rounding.
+                if ((horizontal ? first.x() : first.y()) > (horizontal ? last.x() : last.y())) std::swap(first, last);
+                const double start = horizontal ? first.x() : first.y();
+                const double end = horizontal ? last.x() : last.y();
                 for (std::size_t y = 0; y < input.height(); ++y) {
                     if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("MainWindow", "Operation cancelled").toStdString());
                     for (std::size_t x = 0; x < input.width(); ++x) {
                         const QPointF point(x + .5, y + .5);
-                        if (roi && !roi->contains(point)) continue;
-                        if (operation == "draw" && roi && roi->contains(point + QPointF(1, 0))
+                        if (line) {
+                            const double major = horizontal ? x : y;
+                            if (major < start || major > end) continue;
+                            const double fraction = start == end ? 0 : (major - start) / (end - start);
+                            const double minor = std::floor(std::lerp(horizontal ? first.y() : first.x(),
+                                horizontal ? last.y() : last.x(), fraction) + .5);
+                            if ((horizontal ? y : x) != minor) continue;
+                        } else if (roi && !roi->contains(point)) continue;
+                        if (!line && operation == "draw" && roi && roi->contains(point + QPointF(1, 0))
                             && roi->contains(point - QPointF(1, 0)) && roi->contains(point + QPointF(0, 1))
                             && roi->contains(point - QPointF(0, 1))) continue;
                         const std::array<std::size_t, 5> index{x, y, z, c, t};

@@ -15,7 +15,7 @@ Register new commands through the existing `CommandRegistry`, with Qt actions, m
 - [ ] Add the ImageJ control panel command.
 - [ ] Add the remaining ImageJ tool modifiers. Keep text fields and modal dialogs' keyboard handling intact.
 - [x] Add configurable drawing colors. Fill and Draw use the selected color with type-aware scalar intensity mapping. Clear uses zero.
-- [ ] Extend Draw beyond area selections.
+- [x] Extend Draw beyond area selections. Draw rasterizes line ROI endpoints as a one-pixel-wide line clipped to the current plane, using the selected drawing color and existing typed editing and undo workflow.
 - [x] Add paste modes beyond the existing typed internal copy/paste. Paste special supports typed or system images and current or new image destinations. Copy prepares a PNG in the background at native dimensions, scaled proportionally when needed to reach at least 320 pixels on one axis. Internal copying remains available when PNG export exceeds its memory budget.
 - [ ] Add modifier-specific histogram and profile dialogs. Reuse Qt Graphs 2D in separate `QQuickWidget` plot windows, created on demand.
 - [ ] Extend printing to include display LUTs and overlays. Printing currently uses the current plane's intensity range only. Keep scientific pixels separate from rendered display values.
