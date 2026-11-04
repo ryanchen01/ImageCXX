@@ -9,6 +9,29 @@
     <key>CFBundleVersion</key><string>${MACOSX_BUNDLE_BUNDLE_VERSION}</string>
     <key>CFBundleShortVersionString</key><string>${MACOSX_BUNDLE_SHORT_VERSION_STRING}</string>
     <key>LSMinimumSystemVersion</key><string>${CMAKE_OSX_DEPLOYMENT_TARGET}</string>
+    <key>CFBundleDocumentTypes</key>
+    <array><dict>
+        <key>CFBundleTypeName</key><string>Supported images</string>
+        <key>CFBundleTypeRole</key><string>Viewer</string>
+        <key>LSHandlerRank</key><string>Alternate</string>
+        <key>CFBundleTypeExtensions</key><array>
+            <string>png</string>
+            <string>jpg</string>
+            <string>jpeg</string>
+            <string>tif</string>
+            <string>tiff</string>
+            <string>mha</string>
+            <string>mhd</string>
+            <string>nii</string>
+            <string>nii.gz</string>
+            <string>nrrd</string>
+            <string>nhdr</string>
+            <string>dcm</string>
+            <string>dicom</string>
+            <string>raw</string>
+            <string>bin</string>
+        </array>
+    </dict></array>
     <key>NSHighResolutionCapable</key><true/>
     <key>SUFeedURL</key><string>https://github.com/ryanchen01/ImageCXX/releases/latest/download/appcast.xml</string>
     <key>SUPublicEDKey</key><string>QL500Oh7DE5WZIJj5W00iXeAnGHRV65XFwyDwyBtBA8=</string>

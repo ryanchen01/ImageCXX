@@ -1,8 +1,9 @@
 [Desktop Entry]
 Type=Application
 Name=ImageCXX
-Exec=ImageCXX %F
+Exec=ImageCXX -- %F
 Icon=com.ryanchen01.ImageCXX
 Terminal=false
 Categories=Science;Graphics;
-MimeType=image/tiff;image/png;image/jpeg;
+MimeType=image/tiff;image/png;image/jpeg;application/dicom;application/x-nifti;application/x-nrrd;application/x-metaimage;application/x-imagecxx-raw;image/x-panasonic-rw;
+StartupWMClass=ImageCXX

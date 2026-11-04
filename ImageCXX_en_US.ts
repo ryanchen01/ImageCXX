@@ -1188,62 +1188,62 @@
 <context>
     <name>Main</name>
     <message>
-        <location filename="main.cpp" line="39"/>
+        <location filename="main.cpp" line="40"/>
         <source>ImageCXX scientific image analysis</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="main.cpp" line="41"/>
+        <location filename="main.cpp" line="42"/>
         <source>Process files without a desktop window</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="main.cpp" line="42"/>
+        <location filename="main.cpp" line="43"/>
         <source>Batch operation: gaussian, median, threshold, dilate, erode, resample</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="main.cpp" line="42"/>
+        <location filename="main.cpp" line="43"/>
         <source>operation</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="main.cpp" line="43"/>
+        <location filename="main.cpp" line="44"/>
         <source>Batch output directory. Existing files are never overwritten.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="main.cpp" line="43"/>
+        <location filename="main.cpp" line="44"/>
         <source>directory</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="main.cpp" line="44"/>
+        <location filename="main.cpp" line="45"/>
         <source>Command parameter object as JSON</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="main.cpp" line="44"/>
+        <location filename="main.cpp" line="45"/>
         <source>json</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="main.cpp" line="45"/>
+        <location filename="main.cpp" line="46"/>
         <source>Image files</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="main.cpp" line="45"/>
+        <location filename="main.cpp" line="46"/>
         <source>images</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="main.cpp" line="45"/>
+        <location filename="main.cpp" line="46"/>
         <source>[images...]</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="main.cpp" line="52"/>
+        <location filename="main.cpp" line="53"/>
         <source>Parameters must be a JSON object</source>
         <translation type="unfinished"></translation>
     </message>
@@ -3489,12 +3489,12 @@ Close without saving them?</source>
 <context>
     <name>QObject</name>
     <message>
-        <location filename="main.cpp" line="68"/>
+        <location filename="main.cpp" line="83"/>
         <source>Update failed</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="main.cpp" line="69"/>
+        <location filename="main.cpp" line="84"/>
         <source>Cannot launch %1. Please run it manually.</source>
         <translation type="unfinished"></translation>
     </message>
@@ -3755,6 +3755,24 @@ Close without saving them?</source>
         <source>%1 has unsaved pixel changes.
 
 Close without saving this image?</source>
+        <translation type="unfinished"></translation>
+    </message>
+</context>
+<context>
+    <name>imagecxx::FileOpenService</name>
+    <message>
+        <location filename="app/file_open_service.cpp" line="47"/>
+        <source>Cannot initialize file opening while another ImageCXX instance is starting.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="app/file_open_service.cpp" line="56"/>
+        <source>The running ImageCXX instance did not accept the files.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="app/file_open_service.cpp" line="61"/>
+        <source>Cannot listen for file-open requests: %1</source>
         <translation type="unfinished"></translation>
     </message>
 </context>

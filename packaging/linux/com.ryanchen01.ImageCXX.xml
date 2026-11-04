@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-nifti">
+    <comment>NIfTI image</comment>
+    <glob pattern="*.nii"/><glob pattern="*.nii.gz"/>
+  </mime-type>
+  <mime-type type="application/x-nrrd">
+    <comment>NRRD image</comment>
+    <glob pattern="*.nrrd"/><glob pattern="*.nhdr"/>
+  </mime-type>
+  <mime-type type="application/x-metaimage">
+    <comment>MetaImage image</comment>
+    <glob pattern="*.mha"/><glob pattern="*.mhd"/>
+  </mime-type>
+  <mime-type type="application/dicom">
+    <glob pattern="*.dicom"/>
+  </mime-type>
+  <mime-type type="application/x-imagecxx-raw">
+    <comment>Raw image data</comment>
+    <glob pattern="*.raw" weight="40"/><glob pattern="*.bin" weight="40"/>
+  </mime-type>
+</mime-info>
