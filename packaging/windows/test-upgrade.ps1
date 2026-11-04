@@ -17,11 +17,15 @@ foreach ($extension in @('png', 'jpg', 'jpeg', 'tif', 'tiff', 'mha', 'mhd', 'nii
     if ((Get-Item 'HKCU:/Software/ImageCXX/Capabilities/FileAssociations').GetValue(".$extension") -ne 'ImageCXX.Image') { throw "Missing default-app association for .$extension" }
     if ((Get-Item "HKCU:/Software/Classes/.$extension/OpenWithProgids").GetValueNames() -notcontains 'ImageCXX.Image') { throw "Missing Open with registration for .$extension" }
 }
+$capabilitiesPath = (Get-Item 'HKCU:/Software/RegisteredApplications').GetValue('ImageCXX')
+if ($capabilitiesPath -ne 'Software\ImageCXX\Capabilities') { throw 'The installer did not register its application capabilities' }
 # Query the same Shell handlers used by Open with, using actual filenames.
 Add-Type -Path "$root/tests/windows_shell_handlers.cs"
 foreach ($filename in @('scan.nii.gz', 'scan.nii', 'image.png')) {
     $handlers = @([ImageCXXShellHandlers]::GetNames($filename) | ForEach-Object { $_.Replace('\', '/') })
-    if ($handlers -notcontains ($freshTarget.Replace('\', '/') + '/bin/ImageCXX.exe')) { throw "ImageCXX is missing from Shell handlers for ${filename}. Found: $($handlers -join ', ')" }
+    # The Shell can identify a Capabilities handler by its RegisteredApplications name.
+    # The executable command and each extension's ProgID are checked above.
+    if ($handlers -notcontains 'ImageCXX' -and $handlers -notcontains ($freshTarget.Replace('\', '/') + '/bin/ImageCXX.exe')) { throw "ImageCXX is missing from Shell handlers for ${filename}. Found: $($handlers -join ', ')" }
 }
 & "$freshTarget/ImageCXXMaintenanceTool.exe" --accept-licenses --default-answer --confirm-command purge | Out-Host
 $config = (Get-Content packaging/windows/config.xml.in -Raw).Replace('@VERSION@', '0.0.0').Replace('<ControlScript>controller.qs</ControlScript>', '')
