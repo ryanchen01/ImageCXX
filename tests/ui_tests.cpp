@@ -597,16 +597,18 @@ TEST(Desktop, DrawingColorUsesScientificTypesAndPreservesAlphaAndOtherPlanes)
         const double expected = floating ? std::lerp(low, high, gray)
             : std::round(std::lerp(type == PixelType::Int16 ? -32768.0 : 0.0,
                 type == PixelType::UInt16 ? 65535.0 : type == PixelType::Int16 ? 32767.0 : 255.0, gray));
-        for (const auto *command : {"edit.draw", "edit.fill"}) {
+        for (const auto &[command, roiType] : {std::pair{"edit.draw", RoiType::Rectangle},
+                 std::pair{"edit.fill", RoiType::Rectangle}, std::pair{"edit.draw", RoiType::Line}}) {
+            roi.type = roiType; doc->setSelection(roi);
             window.commands().execute(command); ASSERT_TRUE(finishJobs(window));
             for (std::size_t component = 0; component < componentCount(type); ++component) {
                 const double value = component == 3 ? 23 : componentCount(type) > 1 ? (component == 0 ? 255 : 0) : expected;
                 EXPECT_NEAR(doc->image.sample(1, 1, 1, 1, 1, component), value, type == PixelType::Float32 ? 1e-5 : 0);
             }
             const double stored = componentCount(type) > 1 ? 255 : type == PixelType::Float32 ? double(float(expected)) : expected;
-            EXPECT_DOUBLE_EQ(doc->image.sample(3, 3, 1, 1, 1), QString(command) == "edit.draw" ? low : stored);
+            EXPECT_DOUBLE_EQ(doc->image.sample(3, 3, 1, 1, 1), QString(command) == "edit.draw" && roiType != RoiType::Line ? low : stored);
             EXPECT_DOUBLE_EQ(doc->image.sample(0, 0, 1, 1, 1), low);
-            EXPECT_DOUBLE_EQ(doc->image.sample(5, 5, 1, 1, 1), high);
+            EXPECT_DOUBLE_EQ(doc->image.sample(5, 5, 1, 1, 1), roiType == RoiType::Line ? stored : high);
             EXPECT_DOUBLE_EQ(doc->image.sample(1, 1, 0, 1, 1), 0);
             EXPECT_DOUBLE_EQ(doc->image.sample(1, 1, 1, 0, 1), 0);
             EXPECT_DOUBLE_EQ(doc->image.sample(1, 1, 1, 1, 0), 0);
@@ -619,8 +621,50 @@ TEST(Desktop, DrawingColorUsesScientificTypesAndPreservesAlphaAndOtherPlanes)
             EXPECT_DOUBLE_EQ(doc->image.sample(1, 1, 1, 1, 1), stored);
             window.commands().execute("edit.undo");
         }
+        roi.type = RoiType::Rectangle; doc->setSelection(roi);
         window.commands().execute("edit.clear"); ASSERT_TRUE(finishJobs(window));
         EXPECT_DOUBLE_EQ(doc->image.sample(1, 1, 1, 1, 1), 0);
+    }
+}
+
+TEST(Desktop, DrawLineRasterizesEndpointsAllDirectionsAndClipsToImage)
+{
+    MainWindow window;
+    chooseDrawingColor(window, Qt::white);
+    auto *doc = window.addDocument(Image::allocate(PixelType::UInt8, {6, 6}));
+    struct Case {
+        QPointF first, last;
+        std::vector<QPoint> pixels;
+    };
+    const std::vector<Case> cases{
+        {{1, 2}, {4, 2}, {{1, 2}, {2, 2}, {3, 2}, {4, 2}}},
+        {{2, 1}, {2, 4}, {{2, 1}, {2, 2}, {2, 3}, {2, 4}}},
+        {{1, 1}, {4, 4}, {{1, 1}, {2, 2}, {3, 3}, {4, 4}}},
+        {{1, 4}, {4, 1}, {{1, 4}, {2, 3}, {3, 2}, {4, 1}}},
+        {{0, 1}, {4, 3}, {{0, 1}, {1, 2}, {2, 2}, {3, 3}, {4, 3}}},
+        {{1, 0}, {3, 4}, {{1, 0}, {2, 1}, {2, 2}, {3, 3}, {3, 4}}},
+        {{0, 0}, {6, 3}, {{0, 0}, {1, 1}, {2, 1}, {3, 2}, {4, 2}, {5, 3}}},
+        {{0, 0}, {3, 6}, {{0, 0}, {1, 1}, {1, 2}, {2, 3}, {2, 4}, {3, 5}}},
+        {{-2, -2}, {7, 7}, {{0, 0}, {1, 1}, {2, 2}, {3, 3}, {4, 4}, {5, 5}}},
+        {{-2, 2}, {8, 2}, {{0, 2}, {1, 2}, {2, 2}, {3, 2}, {4, 2}, {5, 2}}},
+        {{-2, 0}, {-2, 5}, {}},
+        {{2.2, 3.8}, {2.7, 3.1}, {{2, 3}}},
+        {{1.8, 1.2}, {4.2, 4.9}, {{1, 1}, {2, 2}, {3, 3}, {4, 4}}}
+    };
+    for (const auto &test : cases) for (const bool reverse : {false, true}) {
+        SCOPED_TRACE(QString("(%1,%2) to (%3,%4), reverse=%5").arg(test.first.x()).arg(test.first.y())
+            .arg(test.last.x()).arg(test.last.y()).arg(reverse).toStdString());
+        Roi roi; roi.type = RoiType::Line;
+        roi.points = reverse ? std::vector{test.last, test.first} : std::vector{test.first, test.last};
+        doc->setSelection(roi);
+        window.commands().execute("edit.draw"); ASSERT_TRUE(finishJobs(window));
+        for (int y = 0; y < 6; ++y) for (int x = 0; x < 6; ++x) {
+            const bool painted = std::find(test.pixels.begin(), test.pixels.end(), QPoint(x, y)) != test.pixels.end();
+            EXPECT_DOUBLE_EQ(doc->image.sample(x, y), painted ? 255 : 0) << x << "," << y;
+        }
+        window.commands().execute("edit.undo");
+        for (int y = 0; y < 6; ++y) for (int x = 0; x < 6; ++x)
+            EXPECT_DOUBLE_EQ(doc->image.sample(x, y), 0);
     }
 }
 
