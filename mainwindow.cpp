@@ -259,23 +259,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                 statusBar()->showMessage(tr("Saved %1").arg(path), 5000);
             });
     }});
-    commands_.add({"file.sample", tr("Open sample stack"), QT_TRANSLATE_NOOP("CommandCategories", "File"), {}, false, {}, [this](const QVariantMap &) {
-        ImageMetadata metadata; metadata.name = tr("Cells · sample stack");
-        metadata.axes = {{"X", .25, 0, "µm"}, {"Y", .25, 0, "µm"}, {"Z", 1, 0, "µm"}};
-        metadata.intensityUnit = "a.u.";
-        auto image = Image::allocate(PixelType::UInt16, {384, 320, 12}, metadata);
-        auto *pixels = reinterpret_cast<std::uint16_t *>(image.mutableData());
-        for (std::size_t z = 0; z < image.depth(); ++z) for (std::size_t y = 0; y < image.height(); ++y) for (std::size_t x = 0; x < image.width(); ++x) {
-            double value = 120 + 50 * std::sin(x * .035) * std::cos(y * .028);
-            for (int i = 0; i < 16; ++i) {
-                const double dx = double(x) - (35 + (i * 83) % 320), dy = double(y) - (30 + (i * 71) % 260);
-                const double radius = 9 + (i % 4) * 3;
-                value += (1400 + i * 70) * std::exp(-(dx * dx + dy * dy) / (radius * radius)) * (.6 + .4 * std::cos((double(z) - i % 6) * .18));
-            }
-            pixels[(z * image.height() + y) * image.width() + x] = static_cast<std::uint16_t>(value);
-        }
-        addDocument(std::move(image));
-    }});
     commands_.add({"edit.undo", tr("Undo processing"), QT_TRANSLATE_NOOP("CommandCategories", "Edit"), QKeySequence::Undo, true, {}, [this](const QVariantMap &) {
         if (auto *doc = activeDocument()) if (auto image = doc->history.undo(doc->image)) {
             doc->image = std::move(*image); doc->modified = true; ++doc->revision; doc->refresh(); updatePanels();
@@ -1254,7 +1237,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             {"file.open", {"O"}}, {"file.new", {"N"}}, {"file.save", {"S"}},
             {"file.next", {"Shift+O", "Alt+Shift+O"}}, {"file.revert", {"R", "Alt+R"}},
             {"edit.copy", {"C", "Alt+C", "Ctrl+Alt+C"}}, {"image.duplicate", {"Shift+D", "Alt+Shift+D"}},
-            {"file.sample", {"Shift+B"}}, {"edit.undo", {"Z"}}, {"edit.redo", {"Ctrl+Y"}},
+            {"edit.undo", {"Z"}}, {"edit.redo", {"Ctrl+Y"}},
             {"analyze.measure", {"M"}}, {"analyze.histogram", {"H"}}, {"analyze.profile", {"K"}},
             {"edit.clear", {"Backspace", "Delete"}}, {"edit.fill", {"F"}}, {"edit.draw", {"D"}},
             {"edit.invert", {"Shift+I"}}, {"edit.smooth", {"Shift+S"}}, {"process.threshold", {"Shift+T"}}, {"process.resample", {"E"}},

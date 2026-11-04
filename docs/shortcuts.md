@@ -7,7 +7,6 @@ Ctrl means Command on macOS. Alt means Option. Shift keeps its usual meaning. Te
 | Ctrl+J, Ctrl+Shift+C | Display |
 | Ctrl+N, Ctrl+Shift+N, Ctrl+Shift+V | New image, text, clipboard image |
 | Ctrl+O, Ctrl+Shift+O, Alt+Shift+O | Open, next file, previous file |
-| Ctrl+Shift+B | Sample stack |
 | Ctrl+S, Ctrl+R, Ctrl+P, Ctrl+W | Save image, revert, print, close |
 | Ctrl+Z, Ctrl+Y | Undo, redo |
 | Ctrl+X, Ctrl+C, Ctrl+V | Cut, copy, paste |
