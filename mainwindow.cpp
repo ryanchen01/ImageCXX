@@ -1215,6 +1215,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             overlay->setScreen(document->screen());
             overlay->move(document->pos() + QPoint(28, 28));
             connect(overlay, &OverlayWindow::activated, this, [this, document] { setActiveDocument(document); });
+            connect(overlay, &OverlayWindow::visibilityChanged, this, &MainWindow::updatePanels);
             connect(overlay, &OverlayWindow::viewError, this, [this](const QString &error) { statusBar()->showMessage(error, 15000); });
         }
         overlay->refreshDocuments(documents());
@@ -2341,11 +2342,17 @@ void MainWindow::updatePanels()
     for (auto *action : imageActions_) action->setEnabled(doc != nullptr);
     findChild<QAction *>("stacks.reslice")->setEnabled(doc && doc->image.depth() > 1);
     findChild<QAction *>("stacks.project3d")->setEnabled(doc && doc->image.depth() > 1);
+    bool overlayVisible = false;
+    for (auto *overlay : findChildren<OverlayWindow *>(QString{}, Qt::FindDirectChildrenOnly))
+        overlayVisible |= overlay->document() == doc && overlay->isVisible();
+    auto *overlayAction = findChild<QAction *>("view.overlay");
+    overlayAction->setCheckable(true);
+    overlayAction->setChecked(overlayVisible);
     const QStringList viewCommands{"view.single", "view.linked", "view.orthogonal"};
     for (int index = 0; index < viewCommands.size(); ++index) {
         auto *action = findChild<QAction *>(viewCommands[index]);
         action->setCheckable(true);
-        action->setChecked(doc && int(doc->viewMode()) == index);
+        action->setChecked(doc && !overlayVisible && int(doc->viewMode()) == index);
     }
     findChild<QAction *>("view.orthogonal")->setEnabled(doc && doc->image.depth() > 1);
     findChild<QAction *>("view.linked")->setEnabled(doc && documents().size() > 1);

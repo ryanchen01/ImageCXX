@@ -101,7 +101,7 @@ OverlayWindow::OverlayWindow(DocumentWidget *document, QWidget *parent)
         viewer->setSlice(std::size_t(slice), viewer->channel(), viewer->time());
     });
     connect(viewer, &ImageViewer::sliceChanged, this, [this] {
-        if (synchronizing_ || !document_) return;
+        if (synchronizing_ || !document_ || !isVisible()) return;
         {
             QScopedValueRollback guard(synchronizing_, true);
             const auto position = document_->spatialPosition();
@@ -153,7 +153,7 @@ void OverlayWindow::refreshDocuments(const QList<DocumentWidget *> &documents)
             connect(document, &QObject::destroyed, this, [this, document] { removeDocument(document); });
             connect(document, &DocumentWidget::changed, this, [this] { refreshEditor(); updateLayers(); });
             connect(document->viewer, &ImageViewer::sliceChanged, this, [this, document] {
-                if (synchronizing_ || !document_) return;
+                if (synchronizing_ || !document_ || !isVisible()) return;
                 bool selected = false;
                 for (int row = 0; row < images_->topLevelItemCount(); ++row) {
                     const auto *item = images_->topLevelItem(row);
@@ -212,7 +212,7 @@ void OverlayWindow::removeDocument(DocumentWidget *document)
 
 void OverlayWindow::updateLayers()
 {
-    if (synchronizing_ || !document_) return;
+    if (synchronizing_ || !document_ || !isVisible()) return;
     QScopedValueRollback guard(synchronizing_, true);
     const auto &reference = document_->image;
     if (revision_ != document_->revision) {
@@ -287,6 +287,23 @@ bool OverlayWindow::eventFilter(QObject *watched, QEvent *event)
 {
     if (event->type() == QEvent::WindowActivate) emit activated();
     return ImageWindow::eventFilter(watched, event);
+}
+
+void OverlayWindow::showEvent(QShowEvent *event)
+{
+    ImageWindow::showEvent(event);
+    if (document_) {
+        QScopedValueRollback guard(synchronizing_, true);
+        viewer->setSlice(document_->viewer->slice(), document_->viewer->channel(), document_->viewer->time());
+    }
+    updateLayers();
+    emit visibilityChanged();
+}
+
+void OverlayWindow::hideEvent(QHideEvent *event)
+{
+    ImageWindow::hideEvent(event);
+    emit visibilityChanged();
 }
 
 void OverlayWindow::closeEvent(QCloseEvent *event)
