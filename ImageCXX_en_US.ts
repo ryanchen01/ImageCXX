@@ -1431,16 +1431,6 @@
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="mainwindow.cpp" line="262"/>
-        <source>Open sample stack</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="mainwindow.cpp" line="263"/>
-        <source>Cells · sample stack</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
         <location filename="mainwindow.cpp" line="279"/>
         <source>Undo processing</source>
         <translation type="unfinished"></translation>
