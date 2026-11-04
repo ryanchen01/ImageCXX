@@ -57,7 +57,7 @@ add_library(imagecxx_ui STATIC mainwindow.cpp ui/image_window.cpp ui/document_wi
 target_link_libraries(imagecxx_ui PUBLIC imagecxx_app imagecxx_viewer imagecxx_plots Qt6::Widgets Qt6::Svg Qt6::PrintSupport)
 target_link_libraries(imagecxx_ui PRIVATE DCMTK::dcmdata)
 qt_add_resources(imagecxx_ui imagecxx_icons PREFIX "/" BASE "resources" FILES
-    resources/icons/open.svg resources/icons/pointer.svg resources/icons/pan.svg resources/icons/rectangle.svg resources/icons/ellipse.svg
+    resources/icons/open.svg resources/icons/pointer.svg resources/icons/rectangle.svg resources/icons/ellipse.svg
     resources/icons/polygon.svg resources/icons/line.svg resources/icons/measure.svg
     resources/icons/histogram.svg resources/icons/undo.svg resources/icons/search.svg resources/icons/imagecxx.svg)
 qt_add_executable(ImageCXX WIN32 MACOSX_BUNDLE main.cpp app/file_open_service.cpp)

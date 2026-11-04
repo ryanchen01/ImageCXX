@@ -22,10 +22,9 @@ OverlayWindow::OverlayWindow(DocumentWidget *document, QWidget *parent)
 {
     setObjectName("overlayViewWindow");
     viewer->setObjectName("overlayView");
-    viewer->setTool(ImageViewer::Tool::Pan);
     viewer->setImage(document->image);
     viewer->setSlice(document->viewer->slice(), document->viewer->channel(), document->viewer->time());
-    viewer->setToolTip(tr("Wheel to browse. Ctrl+wheel to zoom. Drag to pan."));
+    viewer->setToolTip(tr("Wheel to browse. Pinch or Ctrl+wheel to zoom. Middle-button or Space + drag to pan."));
     auto *bar = new QHBoxLayout;
     bar->setContentsMargins(14, 10, 14, 10);
     auto *label = new QLabel(tr("Z"), this);

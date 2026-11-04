@@ -2519,11 +2519,6 @@ Bounds start at the image&apos;s minimum and maximum finite raw values and are r
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="mainwindow.cpp" line="1364"/>
-        <source>Pan</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
         <location filename="mainwindow.cpp" line="1365"/>
         <source>Rectangle</source>
         <translation type="unfinished"></translation>
@@ -2545,17 +2540,12 @@ Bounds start at the image&apos;s minimum and maximum finite raw values and are r
     </message>
     <message>
         <location filename="mainwindow.cpp" line="1371"/>
-        <source>Click or drag to move the crosshair in orthogonal views.</source>
+        <source>Click or drag to move the crosshair in orthogonal views. Middle-button or Space + drag to pan. Pinch to zoom.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
         <location filename="mainwindow.cpp" line="1372"/>
         <source>Draw a polygon. Double-click to finish.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="mainwindow.cpp" line="1373"/>
-        <source>Drag to pan. Wheel to browse slices. Ctrl or Command + wheel to zoom. F to fit.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
@@ -3706,12 +3696,12 @@ Close without saving them?</source>
     </message>
     <message>
         <location filename="ui/document_widget.cpp" line="337"/>
-        <source>Pointer tool: click or drag to move the intersection. Pan tool: drag to pan. Wheel to browse. Ctrl+wheel to zoom. Edit selections in XY.</source>
+        <source>Pointer tool: click or drag to move the intersection. Middle-button or Space + drag to pan. Wheel to browse. Pinch or Ctrl+wheel to zoom. Edit selections in XY.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
         <location filename="ui/document_widget.cpp" line="338"/>
-        <source>Wheel to browse. Ctrl+wheel to zoom. Drag with the Pan tool to pan.</source>
+        <source>Wheel to browse. Pinch or Ctrl+wheel to zoom. Middle-button or Space + drag to pan.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
@@ -3919,7 +3909,7 @@ Close without saving this image?</source>
     <name>imagecxx::OverlayWindow</name>
     <message>
         <location filename="ui/overlay_window.cpp" line="28"/>
-        <source>Wheel to browse. Ctrl+wheel to zoom. Drag to pan.</source>
+        <source>Wheel to browse. Pinch or Ctrl+wheel to zoom. Middle-button or Space + drag to pan.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>

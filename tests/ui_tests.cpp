@@ -1168,7 +1168,7 @@ TEST(Desktop, StartsCompactAndOpensIndependentImageAndToolWindows)
     EXPECT_TRUE(window.isVisible());
 }
 
-TEST(Desktop, PointerStartsSelectedBeforePanAndNavigationToolsApplyToEveryPlane)
+TEST(Desktop, PointerStartsSelectedBeforeSelectionToolsAndAppliesToEveryPlane)
 {
     MainWindow window;
     auto *toolbar = window.findChild<QToolBar *>("imageTools");
@@ -1176,19 +1176,21 @@ TEST(Desktop, PointerStartsSelectedBeforePanAndNavigationToolsApplyToEveryPlane)
     const auto actions = toolbar->actions();
     auto pointer = std::find_if(actions.begin(), actions.end(), [](auto *action) { return action->text() == "Pointer"; });
     ASSERT_NE(pointer, actions.end());
-    auto pan = std::next(pointer);
-    ASSERT_NE(pan, actions.end());
-    EXPECT_EQ((*pan)->text(), "Pan");
-    EXPECT_TRUE((*pointer)->isChecked()); EXPECT_FALSE((*pan)->isChecked());
+    auto rectangle = std::next(pointer);
+    ASSERT_NE(rectangle, actions.end());
+    EXPECT_EQ((*rectangle)->text(), "Rectangle");
+    EXPECT_TRUE((*pointer)->isChecked()); EXPECT_FALSE((*rectangle)->isChecked());
     EXPECT_FALSE((*pointer)->icon().pixmap(24, 24).isNull());
     auto *document = window.addDocument(Image::allocate(PixelType::UInt8, {20, 16, 8}));
     EXPECT_EQ(document->viewer->tool(), ImageViewer::Tool::Pointer);
     document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
-    (*pan)->trigger();
-    for (auto *view : document->views()) EXPECT_EQ(view->tool(), ImageViewer::Tool::Pan);
+    (*rectangle)->trigger();
+    EXPECT_EQ(document->viewer->tool(), ImageViewer::Tool::Rectangle);
+    for (auto *view : document->views()) if (view != document->viewer)
+        EXPECT_EQ(view->tool(), ImageViewer::Tool::Pointer);
     (*pointer)->trigger();
     for (auto *view : document->views()) EXPECT_EQ(view->tool(), ImageViewer::Tool::Pointer);
-    EXPECT_TRUE((*pointer)->isChecked()); EXPECT_FALSE((*pan)->isChecked());
+    EXPECT_TRUE((*pointer)->isChecked()); EXPECT_FALSE((*rectangle)->isChecked());
 }
 
 TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
