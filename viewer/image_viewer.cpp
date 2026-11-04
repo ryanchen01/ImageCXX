@@ -5,6 +5,7 @@
 #include <QKeyEvent>
 #include <QMatrix4x4>
 #include <QMouseEvent>
+#include <QNativeGestureEvent>
 #include <QLineF>
 #include <QPainter>
 #include <QPainterPath>
@@ -970,7 +971,7 @@ void ImageViewer::setTool(Tool tool)
 }
 Qt::CursorShape ImageViewer::toolCursor() const
 {
-    return d->tool == Tool::Pan || d->spacePan ? Qt::OpenHandCursor : Qt::CrossCursor;
+    return d->spacePan ? Qt::OpenHandCursor : Qt::CrossCursor;
 }
 ImageViewer::Tool ImageViewer::tool() const { return d->tool; }
 void ImageViewer::setRois(const std::vector<Roi> &rois)
@@ -1111,26 +1112,53 @@ void ImageViewer::resizeEvent(QResizeEvent *event)
     if (d->fitted) fitToWindow();
     else updateCanvas();
 }
+void ImageViewer::zoomAt(double scale, QPointF position)
+{
+    const QPointF anchor = widgetToImage(position);
+    setZoom(scale);
+    d->pan += position - imageToWidget(anchor);
+    updateCanvas();
+    Q_EMIT viewTransformChanged();
+}
+
+bool ImageViewer::event(QEvent *event)
+{
+    if (event->type() == QEvent::NativeGesture && !d->image.empty()) {
+        auto *gesture = static_cast<QNativeGestureEvent *>(event);
+        switch (gesture->gestureType()) {
+        case Qt::ZoomNativeGesture:
+            zoomAt(d->zoom * (1 + gesture->value()), gesture->position());
+            event->accept();
+            return true;
+        case Qt::BeginNativeGesture:
+        case Qt::EndNativeGesture:
+            event->accept();
+            return true;
+        default:
+            break;
+        }
+    }
+    return QWidget::event(event);
+}
+
 void ImageViewer::wheelEvent(QWheelEvent *event)
 {
     if (d->image.empty()) return;
+    // Scroll begin/end events can have no delta; they must not change slices.
+    if (event->pixelDelta().isNull() && event->angleDelta().isNull()) {
+        event->accept();
+        return;
+    }
     if (event->modifiers().testFlag(Qt::ControlModifier) || event->modifiers().testFlag(Qt::MetaModifier)) {
-        const QPointF anchor = widgetToImage(event->position());
         const double factor = std::pow(1.2, double(event->angleDelta().y()) / 120.0);
-        setZoom(d->zoom * factor);
-        d->pan += event->position() - imageToWidget(anchor);
-        updateCanvas();
-        Q_EMIT viewTransformChanged();
+        zoomAt(d->zoom * factor, event->position());
     } else if (d->image.depth() > 1) {
+        if (!event->angleDelta().y()) { event->accept(); return; }
         const auto step = event->angleDelta().y() > 0 ? -1 : 1;
         const auto z = std::clamp<qint64>(qint64(d->z) + step, 0, qint64(d->image.depth()) - 1);
         setSlice(std::size_t(z), d->channel, d->time);
     } else {
-        const QPointF anchor = widgetToImage(event->position());
-        setZoom(d->zoom * std::pow(1.2, double(event->angleDelta().y()) / 120.0));
-        d->pan += event->position() - imageToWidget(anchor);
-        updateCanvas();
-        Q_EMIT viewTransformChanged();
+        zoomAt(d->zoom * std::pow(1.2, double(event->angleDelta().y()) / 120.0), event->position());
     }
     event->accept();
 }
@@ -1155,10 +1183,6 @@ void ImageViewer::mousePressEvent(QMouseEvent *event)
             d->pickingPosition = true;
             Q_EMIT positionPicked(point);
         }
-        return;
-    }
-    if (d->tool == Tool::Pan) {
-        d->panning = true; d->fitted = false; setCursor(Qt::ClosedHandCursor);
         return;
     }
     if (!d->draft) {
@@ -1316,7 +1340,6 @@ void ImageViewer::mouseReleaseEvent(QMouseEvent *event)
 void ImageViewer::mouseDoubleClickEvent(QMouseEvent *event)
 {
     if (d->tool == Tool::Polygon && event->button() == Qt::LeftButton) completeRoi();
-    else if (d->tool == Tool::Pan) fitToWindow();
 }
 void ImageViewer::completeRoi()
 {

@@ -1345,16 +1345,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     toolbar->addAction(findChild<QAction *>("file.open")); toolbar->addSeparator();
     tools_ = new QActionGroup(this);
     const std::vector<std::pair<QString, ImageViewer::Tool>> tools{{tr("Pointer"), ImageViewer::Tool::Pointer},
-        {tr("Pan"), ImageViewer::Tool::Pan},
         {tr("Rectangle"), ImageViewer::Tool::Rectangle}, {tr("Ellipse"), ImageViewer::Tool::Ellipse},
         {tr("Polygon"), ImageViewer::Tool::Polygon}, {tr("Line"), ImageViewer::Tool::Line}};
     for (const auto &[name, tool] : tools) {
         auto *action = toolbar->addAction(name);
-        const QStringList iconNames{"pointer", "pan", "rectangle", "ellipse", "polygon", "line"};
+        const QStringList iconNames{"pointer", "rectangle", "ellipse", "polygon", "line"};
         action->setIcon(QIcon(":/icons/" + iconNames[int(tool)] + ".svg")); action->setCheckable(true); tools_->addAction(action);
-        if (tool == ImageViewer::Tool::Pointer) action->setToolTip(tr("Click or drag to move the crosshair in orthogonal views."));
+        if (tool == ImageViewer::Tool::Pointer) action->setToolTip(tr("Click or drag to move the crosshair in orthogonal views. Middle-button or Space + drag to pan. Pinch to zoom."));
         else if (tool == ImageViewer::Tool::Polygon) action->setToolTip(tr("Draw a polygon. Double-click to finish."));
-        else if (tool == ImageViewer::Tool::Pan) action->setToolTip(tr("Drag to pan. Wheel to browse slices. Ctrl or Command + wheel to zoom. F to fit."));
         action->setData(static_cast<int>(tool)); if (tool == ImageViewer::Tool::Pointer) action->setChecked(true);
         connect(action, &QAction::triggered, this, [this, tool] { if (auto *doc = activeDocument()) doc->viewer->setTool(tool); });
     }

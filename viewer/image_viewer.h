@@ -15,7 +15,7 @@ namespace imagecxx {
 class ImageViewer final : public QWidget {
     Q_OBJECT
 public:
-    enum class Tool { Pointer, Pan, Rectangle, Ellipse, Polygon, Line };
+    enum class Tool { Pointer, Rectangle, Ellipse, Polygon, Line };
     Q_ENUM(Tool)
 
     explicit ImageViewer(QWidget *parent = nullptr);
@@ -101,6 +101,7 @@ Q_SIGNALS:
     void loadFailed(const QString &message);
 
 protected:
+    bool event(QEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
@@ -116,6 +117,7 @@ private:
     std::unique_ptr<Private> d;
     void requestSlice();
     void updateCanvas();
+    void zoomAt(double scale, QPointF position);
     void completeRoi();
     Qt::CursorShape toolCursor() const;
     void updateRoiDrag(QPointF point, Qt::KeyboardModifiers modifiers);

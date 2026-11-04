@@ -5,6 +5,8 @@
 #include <QElapsedTimer>
 #include <QKeyEvent>
 #include <QMouseEvent>
+#include <QNativeGestureEvent>
+#include <QPointingDevice>
 #include <QThread>
 #include <QFile>
 #include <QTemporaryDir>
@@ -46,11 +48,12 @@ QColor displayColor(ImageViewer &viewer, QPointF imagePoint)
     return pixmap.toImage().pixelColor(qRound(position.x()), qRound(position.y()));
 }
 
-void roiMouse(ImageViewer &viewer, QEvent::Type type, QPointF point, Qt::KeyboardModifiers modifiers = {})
+void roiMouse(ImageViewer &viewer, QEvent::Type type, QPointF point, Qt::KeyboardModifiers modifiers = {},
+              Qt::MouseButton button = Qt::LeftButton)
 {
     const auto position = viewer.imageToWidget(point);
-    QMouseEvent event(type, position, position, type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton,
-        type == QEvent::MouseButtonRelease ? Qt::NoButton : Qt::LeftButton, modifiers);
+    QMouseEvent event(type, position, position, type == QEvent::MouseMove ? Qt::NoButton : button,
+        type == QEvent::MouseButtonRelease ? Qt::NoButton : button, modifiers);
     QApplication::sendEvent(&viewer, &event);
 }
 
@@ -60,11 +63,12 @@ void roiClick(ImageViewer &viewer, QPointF point)
     roiMouse(viewer, QEvent::MouseButtonRelease, point);
 }
 
-void roiDrag(ImageViewer &viewer, QPointF begin, QPointF end, Qt::KeyboardModifiers modifiers = {})
+void roiDrag(ImageViewer &viewer, QPointF begin, QPointF end, Qt::KeyboardModifiers modifiers = {},
+             Qt::MouseButton button = Qt::LeftButton)
 {
-    roiMouse(viewer, QEvent::MouseButtonPress, begin, modifiers);
-    roiMouse(viewer, QEvent::MouseMove, end, modifiers);
-    roiMouse(viewer, QEvent::MouseButtonRelease, end, modifiers);
+    roiMouse(viewer, QEvent::MouseButtonPress, begin, modifiers, button);
+    roiMouse(viewer, QEvent::MouseMove, end, modifiers, button);
+    roiMouse(viewer, QEvent::MouseButtonRelease, end, modifiers, button);
 }
 
 void roiKey(ImageViewer &viewer, Qt::Key key, QEvent::Type type = QEvent::KeyPress)
@@ -120,9 +124,8 @@ TEST(Viewer, LinkedImagesSynchronizeNavigationAndTransformsButKeepTheirOwnPixels
     primary->setViewTransform(4, {11, 12});
     EXPECT_DOUBLE_EQ(linked->zoom(), 4);
     EXPECT_NEAR(linked->viewCenter().x(), 11, 1e-12); EXPECT_NEAR(linked->viewCenter().y(), 12, 1e-12);
-    linked->setTool(ImageViewer::Tool::Pan);
     other.setSelection({});
-    roiDrag(*linked, {8, 8}, {10, 11});
+    roiDrag(*linked, {8, 8}, {10, 11}, {}, Qt::MiddleButton);
     EXPECT_EQ(primary->viewCenter(), linked->viewCenter());
     other.replaceImage(Image::allocate(PixelType::UInt8, {40, 30, 5, 2, 3}), "Replace");
     EXPECT_EQ(document.image.pixelType(), PixelType::UInt16);
@@ -331,13 +334,11 @@ TEST(Viewer, PointerMovesOnlyTheOrthogonalIntersectionWhilePanPreservesIt)
         roiDrag(*view, {2.5, 3.5}, {6.5, 7.5});
         EXPECT_EQ(document.spatialPosition(), expected);
         EXPECT_EQ(view->cursor().shape(), Qt::CrossCursor);
-        primary->setTool(ImageViewer::Tool::Pan);
-        EXPECT_EQ(view->tool(), ImageViewer::Tool::Pan);
         const auto beforePan = view->viewCenter();
-        roiDrag(*view, {10, 8}, {12, 9});
+        roiDrag(*view, {10, 8}, {12, 9}, {}, Qt::MiddleButton);
         EXPECT_NE(view->viewCenter(), beforePan);
         EXPECT_EQ(document.spatialPosition(), expected);
-        EXPECT_EQ(view->cursor().shape(), Qt::OpenHandCursor);
+        EXPECT_EQ(view->cursor().shape(), Qt::CrossCursor);
         ASSERT_TRUE(document.selection);
         EXPECT_EQ(document.selection->points, roi.points);
         primary->setTool(ImageViewer::Tool::Pointer);
@@ -524,6 +525,101 @@ TEST(Viewer, MapsCoordinatesAndRejectsInvalidDisplayValues)
     EXPECT_EQ(viewer.lut(), "viridis");
     viewer.setLinearInterpolation(true);
     EXPECT_TRUE(viewer.linearInterpolation());
+}
+
+TEST(Viewer, TrackpadScrollRetainsWheelBehavior)
+{
+    for (const std::size_t depth : {1u, 3u}) {
+        ImageViewer viewer;
+        viewer.setImage(Image::allocate(PixelType::UInt8, {64, 48, depth}));
+        viewer.setZoom(2);
+        const QPointF position(100, 100);
+        const auto anchor = viewer.widgetToImage(position);
+        QWheelEvent scroll(position, position, {12, -18}, {0, -120},
+            Qt::NoButton, Qt::NoModifier, Qt::ScrollUpdate, true);
+        QApplication::sendEvent(&viewer, &scroll);
+        EXPECT_EQ(viewer.slice(), depth > 1 ? 1u : 0u);
+        EXPECT_DOUBLE_EQ(viewer.zoom(), depth > 1 ? 2 : 2 / 1.2);
+        EXPECT_NEAR(viewer.imageToWidget(anchor).x(), position.x(), 1e-10);
+        EXPECT_NEAR(viewer.imageToWidget(anchor).y(), position.y(), 1e-10);
+    }
+}
+
+TEST(Viewer, NativePinchZoomKeepsTheImagePointUnderThePointer)
+{
+    ImageViewer viewer;
+    viewer.resize(640, 480);
+    viewer.setImage(Image::allocate(PixelType::UInt8, {64, 48, 3}));
+    viewer.setPixelAspectRatio(2);
+    viewer.setViewTransform(3, {20, 25});
+    const QPointF position(123, 234);
+    const auto anchor = viewer.widgetToImage(position);
+    int changes = 0;
+    QObject::connect(&viewer, &ImageViewer::viewTransformChanged, [&] { ++changes; });
+    for (const auto value : {0.25, -0.2}) {
+        QNativeGestureEvent pinch(Qt::ZoomNativeGesture, QPointingDevice::primaryPointingDevice(),
+            2, position, position, position, value, {});
+        QApplication::sendEvent(&viewer, &pinch);
+        EXPECT_TRUE(pinch.isAccepted());
+        EXPECT_NEAR(viewer.imageToWidget(anchor).x(), position.x(), 1e-10);
+        EXPECT_NEAR(viewer.imageToWidget(anchor).y(), position.y(), 1e-10);
+        EXPECT_NEAR(viewer.zoom(), value > 0 ? 3.75 : 3, 1e-12);
+    }
+    EXPECT_EQ(viewer.slice(), 0u);
+    EXPECT_FALSE(viewer.fitsWindow());
+    EXPECT_GE(changes, 2);
+
+    viewer.setZoom(ImageViewer::maximumZoom);
+    QNativeGestureEvent pinch(Qt::ZoomNativeGesture, QPointingDevice::primaryPointingDevice(),
+        2, position, position, position, 0.5, {});
+    const auto clampedAnchor = viewer.widgetToImage(position);
+    QApplication::sendEvent(&viewer, &pinch);
+    EXPECT_DOUBLE_EQ(viewer.zoom(), ImageViewer::maximumZoom);
+    EXPECT_NEAR(viewer.imageToWidget(clampedAnchor).x(), position.x(), 1e-10);
+    EXPECT_NEAR(viewer.imageToWidget(clampedAnchor).y(), position.y(), 1e-10);
+}
+
+TEST(Viewer, EmptyScrollAndNativeGestureBoundariesDoNotChangeTheView)
+{
+    ImageViewer viewer;
+    viewer.setImage(Image::allocate(PixelType::UInt8, {64, 48, 3}));
+    const auto center = viewer.viewCenter();
+    const auto zoom = viewer.zoom();
+    int changes = 0;
+    QObject::connect(&viewer, &ImageViewer::viewTransformChanged, [&] { ++changes; });
+    for (const auto phase : {Qt::ScrollBegin, Qt::ScrollEnd}) {
+        QWheelEvent scroll({100, 100}, {100, 100}, {}, {},
+            Qt::NoButton, Qt::NoModifier, phase, false);
+        QApplication::sendEvent(&viewer, &scroll);
+    }
+    for (const auto type : {Qt::BeginNativeGesture, Qt::EndNativeGesture}) {
+        QNativeGestureEvent gesture(type, QPointingDevice::primaryPointingDevice(),
+            0, {}, {}, {}, 0, {});
+        QApplication::sendEvent(&viewer, &gesture);
+    }
+    EXPECT_EQ(viewer.slice(), 0u);
+    EXPECT_EQ(viewer.viewCenter(), center);
+    EXPECT_DOUBLE_EQ(viewer.zoom(), zoom);
+    EXPECT_TRUE(viewer.fitsWindow());
+    EXPECT_EQ(changes, 0);
+}
+
+TEST(Viewer, MouseWheelZoomRemainsAnchoredWithAndWithoutModifiers)
+{
+    for (const auto modifiers : {Qt::NoModifier, Qt::ControlModifier, Qt::MetaModifier}) {
+        ImageViewer viewer;
+        viewer.resize(640, 480);
+        viewer.setImage(Image::allocate(PixelType::UInt8, {64, 48}));
+        viewer.setZoom(2);
+        const QPointF position(123, 234);
+        const auto anchor = viewer.widgetToImage(position);
+        QWheelEvent scroll(position, position, {}, {0, 120},
+            Qt::NoButton, modifiers, Qt::NoScrollPhase, false);
+        QApplication::sendEvent(&viewer, &scroll);
+        EXPECT_DOUBLE_EQ(viewer.zoom(), 2.4);
+        EXPECT_NEAR(viewer.imageToWidget(anchor).x(), position.x(), 1e-10);
+        EXPECT_NEAR(viewer.imageToWidget(anchor).y(), position.y(), 1e-10);
+    }
 }
 
 TEST(Viewer, UnchangedManualWindowDisablesAutoRangeWithoutNotifying)

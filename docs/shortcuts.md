@@ -31,6 +31,8 @@ Ctrl means Command on macOS. Alt means Option. Shift keeps its usual meaning. Te
 
 Navigation keys operate in the image canvas. Unmodified hyperstack navigation changes channels. Alt skips ten positions in ordinary stacks. With an active selection, arrows move it one pixel; Alt+arrows resize rectangles and ellipses. Shift+arrows bypass selection movement. Enter completes a polygon while the polygon tool is active.
 
+On a Mac trackpad, pinch to zoom around the pointer. Two-finger scrolling retains the same behavior as the mouse wheel: browse stack slices or zoom a single image. Ctrl or Command + wheel zooms in either case. Use a middle-button drag or hold Space while dragging to pan.
+
 Type in the bottom-right search field to find commands by name or category. Use the arrow keys and Enter, or click a result, to run it. Escape dismisses the suggestions. Commands that are unavailable are disabled.
 
 Draw a selection, then press Ctrl+T to retain it in the ROI manager. Select None clears the active selection without deleting saved ROIs. Pixel edits affect the current Z/C/T plane and support undo.

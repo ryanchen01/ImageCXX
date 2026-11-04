@@ -169,7 +169,6 @@ void DocumentWidget::connectViewer(ImageViewer *view, int index)
         for (auto *other : views_) if (other != view) {
             const auto tool = view->tool();
             other->setTool(viewMode_ == ViewMode::Orthogonal && other != viewer
-                && tool != ImageViewer::Tool::Pointer && tool != ImageViewer::Tool::Pan
                 ? ImageViewer::Tool::Pointer : tool);
         }
     });
@@ -314,7 +313,7 @@ void DocumentWidget::setViewMode(ViewMode mode)
             view->setObjectName(i == 1 ? "xzView" : "yzView");
             const auto axes = viewAxes(i);
             view->setImage(mode == ViewMode::Orthogonal ? image.permutedSpatialAxes(axes) : image);
-            view->setTool(mode == ViewMode::Orthogonal && viewer->tool() != ImageViewer::Tool::Pan
+            view->setTool(mode == ViewMode::Orthogonal
                 ? ImageViewer::Tool::Pointer : viewer->tool());
             view->setCrosshairVisible(viewer->crosshairVisible());
             view->setScaleBarVisible(viewer->scaleBarVisible());
@@ -334,8 +333,8 @@ void DocumentWidget::setViewMode(ViewMode mode)
                 ? metadata[axes[1]].spacing / metadata[axes[0]].spacing : 1.0;
             views_[i]->setPixelAspectRatio(aspect);
             views_[i]->setToolTip(mode == ViewMode::Orthogonal
-                ? tr("Pointer tool: click or drag to move the intersection. Pan tool: drag to pan. Wheel to browse. Ctrl+wheel to zoom. Edit selections in XY.")
-                : tr("Wheel to browse. Ctrl+wheel to zoom. Drag with the Pan tool to pan."));
+                ? tr("Pointer tool: click or drag to move the intersection. Middle-button or Space + drag to pan. Wheel to browse. Pinch or Ctrl+wheel to zoom. Edit selections in XY.")
+                : tr("Wheel to browse. Pinch or Ctrl+wheel to zoom. Middle-button or Space + drag to pan."));
             if (i > 0) {
                 auto *window = static_cast<ImageWindow *>(views_[i]->window());
                 window->setScreen(screen());
