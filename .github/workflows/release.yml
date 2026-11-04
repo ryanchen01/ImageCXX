@@ -230,7 +230,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
-          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 5
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 6
           (cd dist && sha256sum * > SHA256SUMS)
           gh release create "$GITHUB_REF_NAME" dist/* --draft --verify-tag --title "ImageCXX ${GITHUB_REF_NAME#v}" --generate-notes
           gh release edit "$GITHUB_REF_NAME" --draft=false --latest
