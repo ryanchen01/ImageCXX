@@ -11,8 +11,12 @@ $freshTarget = "$fixture/fresh-installed"
 & "$root/dist/ImageCXX-$Version-windows-x86_64.exe" --root $freshTarget --accept-licenses --default-answer --confirm-command install | Out-Host
 [xml]$registration = Get-Content "$freshTarget/components.xml" -Raw
 if (@($registration.Packages.Package.Name) -notcontains 'com.ryanchen01.ImageCXX') { throw 'The bootstrap did not register the expected component' }
-$openCommand = (Get-Item 'HKCU:/Software/Classes/ImageCXX.Image/shell/open/command').GetValue('')
-if ($openCommand.Replace('\', '/') -ne ('"' + $freshTarget.Replace('\', '/') + '/bin/ImageCXX.exe" -- "%1"')) { throw 'The installer did not register the quoted file-open command' }
+$expectedExecutable = [IO.Path]::GetFullPath("$freshTarget/bin/ImageCXX.exe").Replace('/', '\')
+foreach ($handler in @('ImageCXX.Image', 'Applications/ImageCXX.exe')) {
+    $openCommand = (Get-Item "HKCU:/Software/Classes/$handler/shell/open/command").GetValue('')
+    if ($openCommand -ne ('"' + $expectedExecutable + '" -- "%1"')) { throw "The installer did not register a quoted native file-open command for $handler" }
+}
+if ((Get-Item 'HKCU:/Software/Classes/ImageCXX.Image/DefaultIcon').GetValue('') -ne ('"' + $expectedExecutable + '",0')) { throw 'The installer did not register a native icon path' }
 foreach ($extension in @('png', 'jpg', 'jpeg', 'tif', 'tiff', 'mha', 'mhd', 'nii', 'gz', 'nrrd', 'nhdr', 'dcm', 'dicom', 'raw', 'bin')) {
     if ((Get-Item 'HKCU:/Software/ImageCXX/Capabilities/FileAssociations').GetValue(".$extension") -ne 'ImageCXX.Image') { throw "Missing default-app association for .$extension" }
     if ((Get-Item "HKCU:/Software/Classes/.$extension/OpenWithProgids").GetValueNames() -notcontains 'ImageCXX.Image') { throw "Missing Open with registration for .$extension" }

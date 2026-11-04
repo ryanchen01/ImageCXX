@@ -17,12 +17,15 @@ Component.prototype.createOperations = function() {
     // Offer ImageCXX in Open with and Default apps without replacing the user's choice.
     var classes = "HKEY_CURRENT_USER\\Software\\Classes\\";
     var progId = "ImageCXX.Image";
+    // Explorer consumes these paths directly; resolve IFW variables before conversion.
+    var executable = installer.toNativeSeparators(installer.value("TargetDir") + "/bin/ImageCXX.exe");
+    var openCommand = '"' + executable + '" -- "%1"';
     component.addOperation("GlobalConfig", classes + progId, "Default", "ImageCXX image");
-    component.addOperation("GlobalConfig", classes + progId + "\\DefaultIcon", "Default", '"@TargetDir@/bin/ImageCXX.exe",0');
-    component.addOperation("GlobalConfig", classes + progId + "\\shell\\open\\command", "Default", '"@TargetDir@/bin/ImageCXX.exe" -- "%1"');
+    component.addOperation("GlobalConfig", classes + progId + "\\DefaultIcon", "Default", '"' + executable + '",0');
+    component.addOperation("GlobalConfig", classes + progId + "\\shell\\open\\command", "Default", openCommand);
     var application = classes + "Applications\\ImageCXX.exe";
     component.addOperation("GlobalConfig", application, "FriendlyAppName", "ImageCXX");
-    component.addOperation("GlobalConfig", application + "\\shell\\open\\command", "Default", '"@TargetDir@/bin/ImageCXX.exe" -- "%1"');
+    component.addOperation("GlobalConfig", application + "\\shell\\open\\command", "Default", openCommand);
     var capabilities = "HKEY_CURRENT_USER\\Software\\ImageCXX\\Capabilities";
     component.addOperation("GlobalConfig", capabilities, "ApplicationName", "ImageCXX");
     component.addOperation("GlobalConfig", capabilities, "ApplicationDescription", "Image viewer and analysis");

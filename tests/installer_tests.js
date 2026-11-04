@@ -70,6 +70,11 @@ const operations = [];
 const installContext = vm.createContext({
     installer: {
         setValue: () => {},
+        value: key => {
+            assert.equal(key, 'TargetDir');
+            return 'C:/Users/Test User/图像/ImageCXX';
+        },
+        toNativeSeparators: path => path.replaceAll('/', '\\'),
         installationFinished: { connect: callback => { installContext.notifyShell = callback; } },
         environmentVariable: () => 'C:/Windows',
         execute: (...args) => operations.push(['execute', ...args]),
@@ -82,6 +87,17 @@ const installContext = vm.createContext({
 });
 vm.runInContext(fs.readFileSync('packaging/windows/installscript.qs', 'utf8'), installContext);
 vm.runInContext('new Component().createOperations()', installContext);
+for (const handler of ['ImageCXX.Image', 'Applications\\ImageCXX.exe']) {
+    assert(operations.some(call => call[0] === 'GlobalConfig'
+        && call[1] === 'HKEY_CURRENT_USER\\Software\\Classes\\' + handler + '\\shell\\open\\command'
+        && call[2] === 'Default'
+        && call[3] === '"C:\\Users\\Test User\\图像\\ImageCXX\\bin\\ImageCXX.exe" -- "%1"'),
+        'Missing quoted native file-open command for ' + handler);
+}
+assert(operations.some(call => call[0] === 'GlobalConfig'
+    && call[1] === 'HKEY_CURRENT_USER\\Software\\Classes\\ImageCXX.Image\\DefaultIcon'
+    && call[3] === '"C:\\Users\\Test User\\图像\\ImageCXX\\bin\\ImageCXX.exe",0'));
+console.log('Native Windows file association path checks passed.');
 for (const filename of ['scan.nii.gz', 'scan.nii', 'image.png']) {
     const extension = require('node:path').win32.extname(filename);
     assert(operations.some(call => call[0] === 'GlobalConfig'
