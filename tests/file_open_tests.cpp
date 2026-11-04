@@ -1,5 +1,6 @@
 #include "app/file_open_service.h"
 #include <QApplication>
+#include <QDir>
 #include <QEventLoop>
 #include <QFileInfo>
 #include <QFileOpenEvent>
@@ -39,8 +40,10 @@ TEST(FileOpening, SecondProcessForwardsAndExits)
         &service, [&](const QStringList &paths) { received = paths; });
     QTemporaryDir workingDirectory;
     ASSERT_TRUE(workingDirectory.isValid());
+    // A child process reports its physical cwd, including macOS's /var -> /private/var alias.
+    const QDir resolvedWorkingDirectory(QFileInfo(workingDirectory.path()).canonicalFilePath());
     QProcess client;
-    client.setWorkingDirectory(workingDirectory.path());
+    client.setWorkingDirectory(resolvedWorkingDirectory.path());
     QEventLoop loop;
     QObject::connect(&client, &QProcess::finished, &loop, &QEventLoop::quit);
     QTimer timeout;
@@ -52,7 +55,7 @@ TEST(FileOpening, SecondProcessForwardsAndExits)
     loop.exec();
     ASSERT_EQ(client.state(), QProcess::NotRunning);
     EXPECT_EQ(client.exitCode(), 0) << client.readAllStandardError().constData();
-    EXPECT_EQ(received, (QStringList{workingDirectory.filePath(paths[0]), workingDirectory.filePath(paths[1])}));
+    EXPECT_EQ(received, (QStringList{resolvedWorkingDirectory.filePath(paths[0]), resolvedWorkingDirectory.filePath(paths[1])}));
 }
 
 int main(int argc, char **argv)
