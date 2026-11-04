@@ -15,7 +15,8 @@ Component.prototype.createOperations = function() {
     var capabilities = "HKEY_CURRENT_USER\\Software\\ImageCXX\\Capabilities";
     component.addOperation("GlobalConfig", capabilities, "ApplicationName", "ImageCXX");
     component.addOperation("GlobalConfig", capabilities, "ApplicationDescription", "Image viewer and analysis");
-    var extensions = ["png", "jpg", "jpeg", "tif", "tiff", "mha", "mhd", "nii", "nii.gz", "nrrd", "nhdr", "dcm", "dicom", "raw", "bin"];
+    // Windows matches the final suffix: compressed NIfTI needs .gz, not .nii.gz.
+    var extensions = ["png", "jpg", "jpeg", "tif", "tiff", "mha", "mhd", "nii", "gz", "nrrd", "nhdr", "dcm", "dicom", "raw", "bin"];
     for (var i = 0; i < extensions.length; ++i) {
         component.addOperation("GlobalConfig", classes + "." + extensions[i] + "\\OpenWithProgids", progId, "");
         component.addOperation("GlobalConfig", capabilities + "\\FileAssociations", "." + extensions[i], progId);

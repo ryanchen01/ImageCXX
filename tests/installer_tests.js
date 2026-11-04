@@ -64,3 +64,25 @@ const maintenance = controller({ maintenance: true });
 maintenance.instance.IntroductionPageCallback();
 assert.equal(maintenance.calls.length, 0);
 console.log('Installer routing, upgrade failure, and fresh-install checks passed.');
+
+// Resolve filenames by their final extension, as Windows does for .nii.gz files.
+const operations = [];
+const installContext = vm.createContext({
+    installer: { setValue: () => {} },
+    component: {
+        value: () => '0.3.0',
+        createOperations: () => {},
+        addOperation: (...args) => operations.push(args),
+    },
+});
+vm.runInContext(fs.readFileSync('packaging/windows/installscript.qs', 'utf8'), installContext);
+vm.runInContext('new Component().createOperations()', installContext);
+for (const filename of ['scan.nii.gz', 'scan.nii', 'image.png']) {
+    const extension = require('node:path').win32.extname(filename);
+    assert(operations.some(call => call[0] === 'GlobalConfig'
+        && call[1] === 'HKEY_CURRENT_USER\\Software\\Classes\\' + extension + '\\OpenWithProgids'
+        && call[2] === 'ImageCXX.Image'), 'Missing Open with handler for ' + filename);
+}
+assert(!operations.some(call => call[0] === 'GlobalConfig'
+    && call[1] === 'HKEY_CURRENT_USER\\Software\\Classes\\.gz' && call[2] === 'Default'));
+console.log('Compressed NIfTI Open with registration checks passed.');
