@@ -1380,6 +1380,9 @@ TEST(Desktop, LinkedViewChecklistReopensWithTheGroupAndCanAddOrRemoveImages)
     EXPECT_FALSE(action->isEnabled());
     auto *second = window.addDocument(Image::allocate(PixelType::UInt8, {10, 8, 6}));
     auto *third = window.addDocument(Image::allocate(PixelType::UInt8, {10, 8, 6}));
+    // Let initial decoding show the windows before opening a modal picker. Otherwise
+    // offscreen QRhi failure can close a window still waiting for its first slice.
+    ASSERT_TRUE(waitFor([&] { return first->isVisible() && second->isVisible() && third->isVisible(); }));
     EXPECT_TRUE(action->isEnabled());
     QTimer::singleShot(0, &window, [] {
         auto *picker = qobject_cast<QDialog *>(QApplication::activeModalWidget());
@@ -1410,7 +1413,7 @@ TEST(Desktop, LinkedViewChecklistReopensWithTheGroupAndCanAddOrRemoveImages)
         images->item(0)->setCheckState(Qt::Checked); picker->accept();
     });
     window.commands().execute("view.linked");
-    EXPECT_EQ(window.documents().size(), 3);
+    ASSERT_EQ(window.documents().size(), 3);
     third->viewer->setSlice(4);
     EXPECT_EQ(second->viewer->slice(), 4u); EXPECT_EQ(first->viewer->slice(), 4u);
     QCoreApplication::sendEvent(first, &activated);

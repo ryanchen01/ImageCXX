@@ -68,7 +68,12 @@ console.log('Installer routing, upgrade failure, and fresh-install checks passed
 // Resolve filenames by their final extension, as Windows does for .nii.gz files.
 const operations = [];
 const installContext = vm.createContext({
-    installer: { setValue: () => {} },
+    installer: {
+        setValue: () => {},
+        installationFinished: { connect: callback => { installContext.notifyShell = callback; } },
+        environmentVariable: () => 'C:/Windows',
+        execute: (...args) => operations.push(['execute', ...args]),
+    },
     component: {
         value: () => '0.3.0',
         createOperations: () => {},
@@ -86,3 +91,13 @@ for (const filename of ['scan.nii.gz', 'scan.nii', 'image.png']) {
 assert(!operations.some(call => call[0] === 'GlobalConfig'
     && call[1] === 'HKEY_CURRENT_USER\\Software\\Classes\\.gz' && call[2] === 'Default'));
 console.log('Compressed NIfTI Open with registration checks passed.');
+
+installContext.notifyShell();
+assert(operations.some(call => call[0] === 'execute'
+    && call[1].endsWith('/powershell.exe') && call[2].includes('-NonInteractive')
+    && call[2].at(-1).includes('SHChangeNotify(0x08000000')));
+for (const extension of ['.gz', '.nii', '.png']) {
+    assert(operations.some(call => call[0] === 'GlobalConfig'
+        && call[1] === 'HKEY_CURRENT_USER\\Software\\Classes\\Applications\\ImageCXX.exe\\SupportedTypes'
+        && call[2] === extension));
+}

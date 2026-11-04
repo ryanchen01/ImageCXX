@@ -21,7 +21,7 @@ foreach ($extension in @('png', 'jpg', 'jpeg', 'tif', 'tiff', 'mha', 'mhd', 'nii
 Add-Type -Path "$root/tests/windows_shell_handlers.cs"
 foreach ($filename in @('scan.nii.gz', 'scan.nii', 'image.png')) {
     $handlers = @([ImageCXXShellHandlers]::GetNames($filename) | ForEach-Object { $_.Replace('\', '/') })
-    if ($handlers -notcontains ($freshTarget.Replace('\', '/') + '/bin/ImageCXX.exe')) { throw "ImageCXX is missing from Shell handlers for $filename" }
+    if ($handlers -notcontains ($freshTarget.Replace('\', '/') + '/bin/ImageCXX.exe')) { throw "ImageCXX is missing from Shell handlers for ${filename}. Found: $($handlers -join ', ')" }
 }
 & "$freshTarget/ImageCXXMaintenanceTool.exe" --accept-licenses --default-answer --confirm-command purge | Out-Host
 $config = (Get-Content packaging/windows/config.xml.in -Raw).Replace('@VERSION@', '0.0.0').Replace('<ControlScript>controller.qs</ControlScript>', '')
