@@ -35,7 +35,8 @@ FileOpenService::FileOpenService(QObject *parent)
                 for (const auto &value : document.array()) paths.append(value.toString());
                 requestOpen(paths);
                 socket->write("OK\n");
-                socket->disconnectFromServer();
+                // Let the client close after reading the reply. Disconnecting a Windows
+                // named pipe here can discard the acknowledgement before it is read.
             });
         }
     });
