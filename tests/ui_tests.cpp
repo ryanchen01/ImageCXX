@@ -62,6 +62,9 @@
 #include <QUrl>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
+#include <QPrintPreviewDialog>
+#include <QPrintPreviewWidget>
+#include <QPrinter>
 #include <QLineEdit>
 #include <QInputDialog>
 #include <QListWidget>
@@ -3462,4 +3465,91 @@ TEST(Localization, TranslatedChoicesPreserveCommandValues)
     const auto values = window.commands().validate("process.gaussian", {});
     EXPECT_EQ(values.value("scope").toString(), "Full image");
     QCoreApplication::removeTranslator(&translator);
+}
+
+TEST(Shortcuts, OverlaySnapshotsStaySeparateFromRoisAndPixels)
+{
+    MainWindow window;
+    auto *doc = window.addDocument(Image::allocate(PixelType::UInt16, {16, 12, 2}));
+    Roi roi; roi.points = {{2, 2}, {8, 6}}; roi.name = "Label";
+    doc->setSelection(roi);
+    window.commands().execute("overlay.add");
+    ASSERT_EQ(doc->annotations.size(), 1u);
+    EXPECT_TRUE(doc->rois.empty()); EXPECT_EQ(doc->revision, 0u); EXPECT_FALSE(doc->modified);
+    EXPECT_NE(doc->annotations[0].geometry.id, roi.id);
+    roi.points[1] = {10, 10}; doc->editRoi(roi);
+    EXPECT_EQ(doc->annotations[0].geometry.bounds(), QRectF(2, 2, 6, 4));
+    EXPECT_EQ(doc->annotations[0].text, "Label");
+    window.commands().execute("overlay.toggle"); EXPECT_FALSE(doc->annotationsVisible);
+    window.commands().execute("overlay.removeLast"); EXPECT_TRUE(doc->annotations.empty());
+}
+
+TEST(Shortcuts, ControlPanelUsesRegistryAndPreservesTextInput)
+{
+    MainWindow window;
+    sendKey(&window, Qt::Key_U, Qt::ShiftModifier);
+    auto *panel = window.panel("controlPanel"); ASSERT_NE(panel, nullptr); EXPECT_TRUE(panel->isVisible());
+    auto *tree = panel->findChild<QTreeWidget *>("controlPanelCommands"); ASSERT_NE(tree, nullptr);
+    auto *filter = panel->findChild<QLineEdit *>(); filter->setText("Select all");
+    QTreeWidgetItem *select = nullptr;
+    QTreeWidgetItemIterator it(tree);
+    while (*it) { if ((*it)->data(0, Qt::UserRole).toString() == "selection.all") select = *it; ++it; }
+    ASSERT_NE(select, nullptr); EXPECT_TRUE(select->isDisabled()); EXPECT_FALSE(select->isHidden());
+    auto *doc = window.addDocument(Image::allocate(PixelType::UInt8, {8, 8}));
+    EXPECT_FALSE(select->isDisabled());
+    tree->itemActivated(select, 0); ASSERT_TRUE(doc->selection);
+    sendKey(filter, Qt::Key_A, Qt::ShiftModifier); EXPECT_TRUE(doc->selection);
+    panel->hide(); window.commands().execute("view.controlPanel"); EXPECT_EQ(window.panel("controlPanel"), panel);
+}
+
+TEST(Shortcuts, HistogramAndRectangularProfileOptionsUseScientificValues)
+{
+    MainWindow window;
+    auto image = Image::allocate(PixelType::UInt16, {4, 3});
+    image.metadata().intensityScale = 2; image.metadata().intensityOffset = 10;
+    for (std::size_t y = 0; y < 3; ++y) for (std::size_t x = 0; x < 4; ++x)
+        image.setValue(std::array<std::size_t, 2>{x, y}, x + 10 * y);
+    auto *doc = window.addDocument(image);
+    Roi roi; roi.points = {{0, 0}, {4, 3}}; doc->setSelection(roi);
+    window.commands().execute("analyze.profile"); ASSERT_TRUE(finishJobs(window));
+    auto *series = window.panel("profile")->findChild<QLineSeries *>(); ASSERT_NE(series, nullptr);
+    ASSERT_EQ(series->count(), 4); EXPECT_DOUBLE_EQ(series->at(0).y(), 30);
+    window.commands().execute("analyze.profile.options", {{"rows", true}, {"calibrated", false}});
+    ASSERT_TRUE(finishJobs(window)); ASSERT_EQ(series->count(), 3); EXPECT_DOUBLE_EQ(series->at(1).y(), 11.5);
+    window.commands().execute("analyze.histogram.options", {{"bins", 2}, {"log", true}, {"calibrated", false}});
+    ASSERT_TRUE(finishJobs(window)); series = window.panel("histogram")->findChild<QLineSeries *>(); ASSERT_NE(series, nullptr);
+    ASSERT_EQ(series->count(), 2); EXPECT_NEAR(series->at(0).y(), std::log10(7), 1e-12);
+    EXPECT_LT(series->at(0).x(), 10);
+    EXPECT_DOUBLE_EQ(doc->image.sample(3, 2), 23);
+}
+
+TEST(Shortcuts, ModifierPlotShortcutsOpenGeneratedDialogsAndCanCancel)
+{
+    MainWindow window;
+    auto *doc = window.addDocument(Image::allocate(PixelType::UInt8, {8, 8}));
+    for (const auto key : {Qt::Key_H, Qt::Key_K}) {
+        bool seen = false;
+        QTimer::singleShot(0, &window, [&] {
+            auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget()); ASSERT_NE(dialog, nullptr);
+            seen = true; EXPECT_NE(dialog->findChild<QCheckBox *>("calibrated"), nullptr); dialog->reject();
+        });
+        sendKey(doc->viewer, key, Qt::AltModifier); EXPECT_TRUE(seen); EXPECT_FALSE(window.jobs().busy());
+    }
+}
+
+TEST(Shortcuts, PrintPreviewCanProducePdfWithoutEditingScientificImage)
+{
+    QTemporaryDir directory; ASSERT_TRUE(directory.isValid());
+    MainWindow window; auto *doc = window.addDocument(Image::allocate(PixelType::UInt16, {32, 24}));
+    doc->viewer->setLut("viridis");
+    const auto path = directory.filePath("print.pdf"); bool seen = false;
+    QTimer::singleShot(0, &window, [&] {
+        auto *dialog = qobject_cast<QPrintPreviewDialog *>(QApplication::activeModalWidget()); ASSERT_NE(dialog, nullptr);
+        seen = true; dialog->printer()->setOutputFormat(QPrinter::PdfFormat); dialog->printer()->setOutputFileName(path);
+        auto *preview = dialog->findChild<QPrintPreviewWidget *>(); ASSERT_NE(preview, nullptr);
+        preview->print(); dialog->reject();
+    });
+    window.commands().execute("file.printPreview");
+    EXPECT_TRUE(seen); QFile pdf(path); ASSERT_TRUE(pdf.open(QIODevice::ReadOnly)); EXPECT_EQ(pdf.read(4), "%PDF");
+    EXPECT_FALSE(doc->modified); EXPECT_EQ(doc->revision, 0u);
 }

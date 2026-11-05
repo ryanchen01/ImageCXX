@@ -1304,3 +1304,131 @@ TEST(Viewer, GpuNormalizesExtremeAndTinyFiniteFloat64Ranges)
         EXPECT_GT(displayColor(viewer, {3.5, .5}).red(), 250);
     }
 }
+
+TEST(Viewer, AreaModifiersCombineWithHolesAndMoveTheResult)
+{
+    DocumentWidget document(Image::allocate(PixelType::UInt8, {100, 100}));
+    auto &viewer = *document.viewer;
+    viewer.resize(400, 400); viewer.setZoom(4); viewer.setTool(ImageViewer::Tool::Rectangle);
+    roiDrag(viewer, {10, 10}, {40, 40});
+    roiDrag(viewer, {20, 20}, {30, 30}, Qt::AltModifier);
+    ASSERT_TRUE(document.selection); EXPECT_EQ(document.selection->type, RoiType::Composite);
+    EXPECT_TRUE(document.selection->contains({15, 15})); EXPECT_FALSE(document.selection->contains({25, 25}));
+    roiDrag(viewer, {50, 10}, {60, 20}, Qt::ShiftModifier);
+    ASSERT_TRUE(document.selection); EXPECT_TRUE(document.selection->contains({55, 15}));
+    EXPECT_FALSE(document.selection->contains({45, 15}));
+    roiClick(viewer, {15, 15}); roiDrag(viewer, {15, 15}, {20, 20});
+    EXPECT_FALSE(document.selection->contains({11, 11})); EXPECT_TRUE(document.selection->contains({20, 20}));
+}
+
+TEST(Viewer, CenterAndAspectModifiersResizeExistingSelections)
+{
+    DocumentWidget document(Image::allocate(PixelType::UInt8, {100, 100}));
+    auto &viewer = *document.viewer;
+    viewer.resize(400, 400); viewer.setZoom(4); viewer.setTool(ImageViewer::Tool::Rectangle);
+    roiDrag(viewer, {30, 30}, {50, 40}); roiClick(viewer, {40, 35});
+    roiDrag(viewer, {50, 40}, {60, 45}, Qt::ControlModifier | Qt::AltModifier);
+    ASSERT_TRUE(document.selection);
+    EXPECT_EQ(document.selection->bounds(), QRectF(20, 25, 40, 20));
+    document.setSelection({}); viewer.setTool(ImageViewer::Tool::Line);
+    roiDrag(viewer, {30, 30}, {50, 30}); roiClick(viewer, {40, 30});
+    roiDrag(viewer, {50, 30}, {40, 50}, Qt::AltModifier);
+    EXPECT_NEAR(QLineF(document.selection->points[0], document.selection->points[1]).length(), 20, 1e-9);
+}
+
+TEST(Viewer, PolygonModifierClicksInsertAndDeleteNodes)
+{
+    DocumentWidget document(Image::allocate(PixelType::UInt8, {100, 100}));
+    auto &viewer = *document.viewer;
+    viewer.resize(400, 400); viewer.setZoom(4); viewer.setTool(ImageViewer::Tool::Polygon);
+    Roi roi; roi.type = RoiType::Polygon; roi.points = {{10, 10}, {50, 10}, {30, 50}};
+    document.setSelection(roi);
+    roiDrag(viewer, {30, 50}, {40, 55}, Qt::ShiftModifier);
+    ASSERT_TRUE(document.selection); ASSERT_EQ(document.selection->points.size(), 4u);
+    const auto node = document.selection->points[2];
+    roiMouse(viewer, QEvent::MouseButtonPress, node, Qt::AltModifier);
+    roiMouse(viewer, QEvent::MouseButtonRelease, node, Qt::AltModifier);
+    EXPECT_EQ(document.selection->points.size(), 3u);
+}
+
+TEST(Viewer, PrintRasterAppliesDisplaySettingsMasksAndPlaneAnnotationsWithoutChangingPixels)
+{
+    DocumentWidget document(Image::allocate(PixelType::UInt16, {32, 24, 2}));
+    for (std::size_t z = 0; z < 2; ++z) for (std::size_t y = 0; y < 24; ++y) for (std::size_t x = 0; x < 32; ++x)
+        document.image.setValue(std::array<std::size_t, 3>{x, y, z}, 1000);
+    document.refresh(); auto &viewer = *document.viewer;
+    viewer.resize(320, 240); viewer.setZoom(4); viewer.setWindow(0, 4000); viewer.setGamma(2);
+    viewer.setLut("hot");
+    auto raster = viewer.renderedImage(); ASSERT_EQ(raster.size(), QSize(32, 24));
+    EXPECT_EQ(raster.pixelColor(16, 12), QColor(255, 128, 0));
+    viewer.setInverted(true); viewer.setLut("grayscale");
+    EXPECT_EQ(viewer.renderedImage().pixelColor(16, 12), QColor(128, 128, 128));
+    Annotation annotation; annotation.geometry.points = {{4, 4}, {12, 12}};
+    annotation.geometry.color = QColor(Qt::red).rgba(); document.annotations.push_back(annotation); document.refreshRois();
+    raster = viewer.renderedImage(); EXPECT_GT(raster.pixelColor(4, 8).red(), raster.pixelColor(4, 8).green());
+    viewer.setSlice(1); raster = viewer.renderedImage(); EXPECT_EQ(raster.pixelColor(4, 8), QColor(128, 128, 128));
+    auto mask = Image::allocate(PixelType::UInt8, {32, 24}); mask.setValue(std::array<std::size_t, 2>{16, 12}, 1);
+    viewer.setMask(mask); raster = viewer.renderedImage(); EXPECT_GT(raster.pixelColor(16, 12).red(), raster.pixelColor(16, 12).green());
+    EXPECT_EQ(document.image.sample(16, 12), 1000); EXPECT_EQ(document.revision, 0u); EXPECT_FALSE(document.modified);
+}
+
+TEST(Viewer, PrintCompositeUsesChannelColors)
+{
+    auto image = Image::allocate(PixelType::UInt8, {8, 8, 1, 2});
+    image.metadata().channels = {{"Red", 0xffff0000}, {"Green", 0xff00ff00}};
+    image.setValue(std::array<std::size_t, 4>{4, 4, 0, 0}, 128);
+    image.setValue(std::array<std::size_t, 4>{4, 4, 0, 1}, 64);
+    ImageViewer viewer; viewer.setImage(image); viewer.setWindow(0, 255); viewer.setComposite(true);
+    const auto color = viewer.renderedImage().pixelColor(4, 4);
+    EXPECT_NEAR(color.red(), 128, 1); EXPECT_NEAR(color.green(), 64, 1); EXPECT_EQ(color.blue(), 0);
+}
+
+TEST(Viewer, PrintedOverlaysAndScaleBarDoNotDependOnViewZoomOrPan)
+{
+    ImageViewer viewer; viewer.resize(400, 300);
+    viewer.setImage(Image::allocate(PixelType::UInt8, {256, 192})); viewer.setWindow(0, 255);
+    Annotation annotation; annotation.geometry.points = {{40, 40}, {100, 100}}; annotation.text = "Label";
+    viewer.setAnnotations({annotation}); viewer.setScaleBarVisible(true);
+    viewer.setViewTransform(1, {128, 96}); const auto expected = viewer.renderedImage();
+    EXPECT_EQ(viewer.renderedImage(), expected) << "repeat without transform";
+    for (const auto zoom : {.1, 4.}) {
+        viewer.setViewTransform(zoom, {20, 30});
+        const auto actual = viewer.renderedImage();
+        EXPECT_EQ(actual, expected) << "zoom " << zoom;
+    }
+    viewer.setScaleBarVisible(false); EXPECT_NE(viewer.renderedImage(), expected);
+}
+
+TEST(Viewer, ModifierGesturesIgnoreInvisibleSelectionsFromOtherPlanes)
+{
+    for (const int hidden : {0, 1, 2}) {
+        SCOPED_TRACE(hidden);
+        DocumentWidget document(Image::allocate(PixelType::UInt8, {100, 100, 1, 2, 2}));
+        auto &viewer = *document.viewer;
+        viewer.resize(400, 400); viewer.setZoom(4); viewer.setTool(ImageViewer::Tool::Rectangle);
+        Roi roi; roi.points = {{10, 10}, {40, 40}}; roi.visible = hidden != 0;
+        document.setSelection(roi);
+        viewer.setSlice(0, hidden == 1 ? 1 : 0, hidden == 2 ? 1 : 0);
+        roiDrag(viewer, {50, 50}, {60, 60}, Qt::ShiftModifier);
+        ASSERT_TRUE(document.selection); EXPECT_FALSE(document.selection->contains({20, 20}));
+        EXPECT_TRUE(document.selection->contains({55, 55}));
+        roi.type = RoiType::Polygon; roi.points = {{10, 10}, {40, 10}, {40, 40}, {10, 40}};
+        document.rois = {roi}; document.setSelection(roi); viewer.setTool(ImageViewer::Tool::Polygon);
+        roiMouse(viewer, QEvent::MouseButtonPress, {40, 40}, Qt::AltModifier);
+        roiMouse(viewer, QEvent::MouseButtonRelease, {40, 40}, Qt::AltModifier);
+        EXPECT_EQ(document.rois.front().points.size(), 4u);
+    }
+}
+
+TEST(Viewer, CenteredAspectResizeClampsAtImageEdgesInsteadOfResetting)
+{
+    DocumentWidget document(Image::allocate(PixelType::UInt8, {100, 100}));
+    auto &viewer = *document.viewer;
+    viewer.resize(400, 400); viewer.setZoom(4); viewer.setTool(ImageViewer::Tool::Rectangle);
+    roiDrag(viewer, {30, 30}, {50, 40}); roiClick(viewer, {40, 35});
+    roiDrag(viewer, {50, 40}, {95, 60}, Qt::ControlModifier | Qt::AltModifier);
+    ASSERT_TRUE(document.selection);
+    EXPECT_EQ(document.selection->bounds(), QRectF(0, 15, 80, 40));
+    roiDrag(viewer, {80, 55}, {95, 80}, Qt::AltModifier);
+    EXPECT_EQ(document.selection->bounds(), QRectF(0, 15, 100, 50));
+}

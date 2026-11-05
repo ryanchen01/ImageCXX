@@ -33,22 +33,9 @@
 namespace imagecxx {
 namespace {
 
-QPainterPath roiPath(const Roi &roi)
-{
-    QPainterPath path;
-    if (roi.points.size() < 2) return path;
-    if (roi.type == RoiType::Rectangle) path.addRect(roi.bounds());
-    else if (roi.type == RoiType::Ellipse) path.addEllipse(roi.bounds());
-    else {
-        path.moveTo(roi.points.front());
-        for (std::size_t i = 1; i < roi.points.size(); ++i) path.lineTo(roi.points[i]);
-        if (roi.type == RoiType::Polygon) path.closeSubpath();
-    }
-    return path;
-}
-
 std::vector<QPointF> roiHandles(const Roi &roi)
 {
+    if (roi.type == RoiType::Composite) return {};
     if (roi.type == RoiType::Line || roi.type == RoiType::Polygon) return roi.points;
     const auto bounds = roi.bounds();
     const auto center = bounds.center();
@@ -58,6 +45,7 @@ std::vector<QPointF> roiHandles(const Roi &roi)
 
 bool validRoi(const Roi &roi)
 {
+    if (roi.type == RoiType::Composite) return !roi.region.isEmpty();
     if (roi.points.size() < 2) return false;
     if (roi.type == RoiType::Line) return QLineF(roi.points[0], roi.points[1]).length() >= 0.5;
     if (roi.type != RoiType::Polygon) return roi.bounds().width() >= 0.5 && roi.bounds().height() >= 0.5;
@@ -412,10 +400,13 @@ public:
     bool pickingPosition = false;
     Tool tool = Tool::Pointer;
     std::vector<Roi> rois;
+    std::vector<Annotation> annotations;
     std::optional<Roi> draft, selection, dragOriginal;
     bool editing = false;
     int dragHandle = -1;
     QPointF dragStart;
+    std::optional<Roi> combineOriginal;
+    bool subtract = false;
     bool panning = false, drawing = false, fitted = true, spacePan = false;
     bool crosshair = false, scaleBar = false, composite = false, autoRangePending = true;
     bool loading = false;
@@ -438,97 +429,7 @@ ImageViewer::ImageViewer(QWidget *parent) : QWidget(parent), d(std::make_unique<
     d->canvas = new SliceCanvas(this);
     d->overlay = new ViewerOverlay(this);
     d->canvas->failed = [this](const QString &message) { Q_EMIT loadFailed(message); };
-    d->overlay->paint = [this](QPainter &painter) {
-        if (d->image.empty()) {
-            painter.setPen(QColor("#1A1C1F"));
-            painter.drawText(rect(), Qt::AlignCenter, tr("Open an image to begin"));
-            return;
-        }
-        const auto drawRoi = [this, &painter](const Roi &roi, bool draft) {
-            if (!roi.visible || roi.time != d->time
-                || (!d->composite && roi.channel != d->channel) || roi.points.size() < 2)
-                return;
-            painter.save();
-            const QColor color = draft ? QColor(255, 213, 115) : QColor::fromRgba(roi.color);
-            painter.setPen(QPen(color, 1.6, draft ? Qt::DashLine : Qt::SolidLine));
-            painter.setBrush(Qt::NoBrush);
-            const QRectF bounds(imageToWidget(roi.bounds().topLeft()), imageToWidget(roi.bounds().bottomRight()));
-            const auto origin = imageToWidget({0, 0});
-            const QTransform transform(d->zoom, 0, 0, d->zoom * d->pixelAspect, origin.x(), origin.y());
-            if (draft && roi.type == RoiType::Polygon) {
-                QPolygonF points;
-                for (QPointF point : roi.points) points << imageToWidget(point);
-                painter.drawPolyline(points);
-            } else painter.drawPath(transform.map(roiPath(roi)));
-            if (!roi.name.isEmpty()) {
-                const QPointF label = bounds.topLeft() + QPointF(3, -5);
-                painter.setPen(QPen(QColor(8, 12, 17), 3));
-                QPainterPath path;
-                path.addText(label, painter.font(), roi.name);
-                painter.drawPath(path);
-                painter.fillPath(path, color);
-            }
-            painter.restore();
-        };
-        for (const Roi &roi : d->rois)
-            if (!d->selection || roi.id != d->selection->id) drawRoi(roi, false);
-        if (d->selection) {
-            drawRoi(*d->selection, false);
-            if (d->editing && d->selection->visible && d->selection->time == d->time
-                && (d->composite || d->selection->channel == d->channel)) {
-                painter.setPen(Qt::NoPen);
-                painter.setBrush(QColor(255, 213, 115));
-                for (const auto &handle : roiHandles(*d->selection))
-                    painter.drawRect(QRectF(imageToWidget(handle) - QPointF(3, 3), QSizeF(6, 6)));
-            }
-        }
-        if (d->draft) drawRoi(*d->draft, true);
-        if (d->crosshair && d->mouseImage.x() >= 0) {
-            const QPointF point = imageToWidget(d->mouseImage);
-            painter.setPen(QPen(QColor(240, 245, 255, 150), 1, Qt::DashLine));
-            painter.drawLine(QPointF(point.x(), 0), QPointF(point.x(), height()));
-            painter.drawLine(QPointF(0, point.y()), QPointF(width(), point.y()));
-        }
-        if (d->navigationCrosshair) {
-            const auto point = imageToWidget(*d->navigationCrosshair);
-            const auto bounds = QRectF(imageToWidget({0, 0}), imageToWidget(
-                {double(d->image.width()), double(d->image.height())}));
-            painter.save();
-            painter.setClipRect(bounds);
-            painter.setPen(QPen(QColor(70, 220, 235, 210), 1));
-            painter.drawLine(QPointF(point.x(), bounds.top()), QPointF(point.x(), bounds.bottom()));
-            painter.setPen(QPen(QColor(255, 213, 115, 210), 1));
-            painter.drawLine(QPointF(bounds.left(), point.y()), QPointF(bounds.right(), point.y()));
-            painter.restore();
-        }
-        if (d->scaleBar && width() > 180 && height() > 100) {
-            const auto &axes = d->image.metadata().axes;
-            const double spacing = axes.empty() ? 1.0 : axes[0].spacing;
-            const QString unit = axes.empty() ? QStringLiteral("px") : axes[0].unit;
-            const double target = 110.0 * spacing / d->zoom;
-            if (spacing > 0 && std::isfinite(target) && target > 0) {
-                const double power = std::pow(10.0, std::floor(std::log10(target)));
-                const double fraction = target / power;
-                const double length = (fraction >= 5 ? 5 : fraction >= 2 ? 2 : 1) * power;
-                const double pixels = length / spacing * d->zoom;
-                const QPointF end(width() - 24.0, height() - 26.0);
-                painter.setPen(QPen(QColor(0, 0, 0, 170), 6));
-                painter.drawLine(end - QPointF(pixels, 0), end);
-                painter.setPen(QPen(Qt::white, 2));
-                painter.drawLine(end - QPointF(pixels, 0), end);
-                const QRectF textRect(end.x() - pixels - 25, end.y() - 24, pixels + 50, 19);
-                painter.fillRect(textRect.adjusted(10, 0, -10, 0), QColor(0, 0, 0, 160));
-                painter.drawText(textRect,
-                                 Qt::AlignCenter, QStringLiteral("%1 %2").arg(length, 0, 'g', 4).arg(unit));
-            }
-        }
-        if (!d->viewLabel.isEmpty()) {
-            const QRect label(8, 8, painter.fontMetrics().horizontalAdvance(d->viewLabel) + 20, 28);
-            painter.fillRect(label, QColor(12, 18, 26, 210));
-            painter.setPen(QColor(230, 237, 246));
-            painter.drawText(label, Qt::AlignCenter, d->viewLabel);
-        }
-    };
+    d->overlay->paint = [this](QPainter &painter) { paintOverlays(painter); };
 
     // One worker owns decode scheduling. A new serial interrupts decode between rows,
     // and the GUI also checks the serial before publishing a result.
@@ -734,6 +635,110 @@ ImageViewer::ImageViewer(QWidget *parent) : QWidget(parent), d(std::make_unique<
     });
 }
 
+void ImageViewer::paintOverlays(QPainter &painter, bool printing)
+{
+    if (d->image.empty()) {
+        painter.setPen(QColor("#1A1C1F"));
+        painter.drawText(rect(), Qt::AlignCenter, tr("Open an image to begin"));
+        return;
+    }
+    const double zoom = printing ? 1 : d->zoom;
+    const auto origin = printing ? QPointF{} : imageToWidget({0, 0});
+    const QTransform transform(zoom, 0, 0, printing ? 1 : zoom * d->pixelAspect, origin.x(), origin.y());
+    const auto mapPoint = [&transform](QPointF point) { return transform.map(point); };
+    const auto drawRoi = [this, &painter, &transform, &mapPoint](const Roi &roi, bool draft) {
+        if (!roi.visible || roi.time != d->time
+            || (!d->composite && roi.channel != d->channel) || roi.points.size() < 2)
+            return;
+        painter.save();
+        const QColor color = draft ? QColor(255, 213, 115) : QColor::fromRgba(roi.color);
+        painter.setPen(QPen(color, 1.6, draft ? Qt::DashLine : Qt::SolidLine));
+        painter.setBrush(Qt::NoBrush);
+        const QRectF bounds(mapPoint(roi.bounds().topLeft()), mapPoint(roi.bounds().bottomRight()));
+        if (draft && roi.type == RoiType::Polygon) {
+            QPolygonF points;
+            for (QPointF point : roi.points) points << mapPoint(point);
+            painter.drawPolyline(points);
+        } else painter.drawPath(transform.map(roi.path()));
+        if (!roi.name.isEmpty()) {
+            const QPointF label = bounds.topLeft() + QPointF(3, -5);
+            painter.setPen(QPen(QColor(8, 12, 17), 3));
+            QPainterPath path;
+            path.addText(label, painter.font(), roi.name);
+            painter.drawPath(path);
+            painter.fillPath(path, color);
+        }
+        painter.restore();
+    };
+    for (const auto &annotation : d->annotations) {
+        if (annotation.geometry.z != d->z) continue;
+        auto outline = annotation.geometry; outline.name = annotation.text;
+        drawRoi(outline, false);
+    }
+    for (const Roi &roi : d->rois)
+        if (!d->selection || roi.id != d->selection->id) drawRoi(roi, false);
+    if (d->selection) {
+        drawRoi(*d->selection, false);
+        if (!printing && d->editing && d->selection->visible && d->selection->time == d->time
+            && (d->composite || d->selection->channel == d->channel)) {
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(255, 213, 115));
+            for (const auto &handle : roiHandles(*d->selection))
+                painter.drawRect(QRectF(mapPoint(handle) - QPointF(3, 3), QSizeF(6, 6)));
+        }
+    }
+    if (!printing && d->draft) drawRoi(*d->draft, true);
+    const QRectF viewport = printing ? QRectF(mapPoint({0, 0}), mapPoint(
+        {double(d->image.width()), double(d->image.height())})) : QRectF(rect());
+    if (d->crosshair && d->mouseImage.x() >= 0) {
+        const QPointF point = mapPoint(d->mouseImage);
+        painter.setPen(QPen(QColor(240, 245, 255, 150), 1, Qt::DashLine));
+        painter.drawLine(QPointF(point.x(), viewport.top()), QPointF(point.x(), viewport.bottom()));
+        painter.drawLine(QPointF(viewport.left(), point.y()), QPointF(viewport.right(), point.y()));
+    }
+    if (d->navigationCrosshair) {
+        const auto point = mapPoint(*d->navigationCrosshair);
+        const auto bounds = QRectF(mapPoint({0, 0}), mapPoint(
+            {double(d->image.width()), double(d->image.height())}));
+        painter.save();
+        painter.setClipRect(bounds);
+        painter.setPen(QPen(QColor(70, 220, 235, 210), 1));
+        painter.drawLine(QPointF(point.x(), bounds.top()), QPointF(point.x(), bounds.bottom()));
+        painter.setPen(QPen(QColor(255, 213, 115, 210), 1));
+        painter.drawLine(QPointF(bounds.left(), point.y()), QPointF(bounds.right(), point.y()));
+        painter.restore();
+    }
+    if (d->scaleBar && viewport.width() > 180 && viewport.height() > 100) {
+        const auto &axes = d->image.metadata().axes;
+        const double spacing = axes.empty() ? 1.0 : axes[0].spacing;
+        const QString unit = axes.empty() ? QStringLiteral("px") : axes[0].unit;
+        const double target = 110.0 * spacing / zoom;
+        if (spacing > 0 && std::isfinite(target) && target > 0) {
+            const double power = std::pow(10.0, std::floor(std::log10(target)));
+            const double fraction = target / power;
+            const double length = (fraction >= 5 ? 5 : fraction >= 2 ? 2 : 1) * power;
+            const double pixels = length / spacing * zoom;
+            const QPointF end(viewport.right() - 24.0, viewport.bottom() - 26.0);
+            painter.setPen(QPen(QColor(0, 0, 0, 170), 6));
+            painter.drawLine(end - QPointF(pixels, 0), end);
+            painter.setPen(QPen(Qt::white, 2));
+            painter.drawLine(end - QPointF(pixels, 0), end);
+            const QRectF textRect(end.x() - pixels - 25, end.y() - 24, pixels + 50, 19);
+            painter.fillRect(textRect.adjusted(10, 0, -10, 0), QColor(0, 0, 0, 160));
+            QPainterPath label;
+            label.addText(QPointF{}, painter.font(), QStringLiteral("%1 %2").arg(length, 0, 'g', 4).arg(unit));
+            const auto offset = textRect.center() - label.boundingRect().center();
+            painter.fillPath(label.translated(offset), Qt::white);
+        }
+    }
+    if (!d->viewLabel.isEmpty()) {
+        const QRect label(8, 8, painter.fontMetrics().horizontalAdvance(d->viewLabel) + 20, 28);
+        painter.fillRect(label, QColor(12, 18, 26, 210));
+        painter.setPen(QColor(230, 237, 246));
+        painter.drawText(label, Qt::AlignCenter, d->viewLabel);
+    }
+}
+
 ImageViewer::~ImageViewer()
 {
     d->worker.request_stop();
@@ -758,7 +763,7 @@ void ImageViewer::setImage(const Image &image, bool preserveInversion)
     d->canvas->mask.clear();
     d->canvas->frame.reset();
     d->canvas->metadata = image.metadata();
-    d->draft.reset();
+    d->draft.reset(); d->combineOriginal.reset();
     d->selection.reset(); d->dragOriginal.reset(); d->editing = d->drawing = false;
     {
         std::lock_guard lock(d->mutex);
@@ -787,7 +792,7 @@ void ImageViewer::setSlice(std::size_t z, std::size_t channel, std::size_t time)
     // A mask created on one plane must not appear on unrelated slices.
     d->mask = {};
     d->canvas->mask.clear();
-    d->draft.reset();
+    d->draft.reset(); d->combineOriginal.reset();
     if (d->dragOriginal) d->selection = d->dragOriginal;
     d->dragOriginal.reset(); d->drawing = false;
     if (planeGroupChanged) d->editing = false;
@@ -904,6 +909,60 @@ void ImageViewer::setComposite(bool enabled)
 }
 bool ImageViewer::composite() const { return d->composite; }
 
+QImage ImageViewer::renderedImage()
+{
+    if (d->image.empty()) return {};
+    constexpr std::size_t budget = 512 * 1024 * 1024;
+    if (d->image.width() > std::size_t(std::numeric_limits<int>::max())
+        || d->image.height() > std::size_t(std::numeric_limits<int>::max())
+        || d->image.width() > budget / 4 / d->image.height())
+        throw std::length_error(tr("The print image exceeds the 512 MiB display budget.").toStdString());
+    QImage result(int(d->image.width()), int(d->image.height()), QImage::Format_ARGB32);
+    if (result.isNull()) throw std::runtime_error(tr("Cannot allocate print image.").toStdString());
+    const auto components = componentCount(d->image.pixelType());
+    const auto normalize = [this](double raw) {
+        const double minimum = windowMinimum(), maximum = windowMaximum();
+        const double range = maximum - minimum;
+        double value = std::isfinite(raw) ? (std::isfinite(range) ? (raw - minimum) / range
+            : (raw / 2 - minimum / 2) / (maximum / 2 - minimum / 2)) : 0;
+        value = std::pow(std::clamp(std::isfinite(value) ? value : 0., 0., 1.), 1. / gamma());
+        return isInverted() ? 1. - value : value;
+    };
+    constexpr std::array<QRgb, 4> defaults{0xffff4545, 0xff55e887, 0xff529bff, 0xffeeeeee};
+    constexpr std::array<std::array<double, 3>, 6> palette{{{.267,.005,.329}, {.254,.265,.530},
+        {.164,.471,.558}, {.135,.659,.518}, {.478,.821,.318}, {.993,.906,.144}}};
+    for (int y = 0; y < result.height(); ++y) for (int x = 0; x < result.width(); ++x) {
+        std::array<double, 3> color{};
+        double alpha = 1;
+        if (components >= 3) {
+            for (std::size_t c = 0; c < 3; ++c) color[c] = normalize(d->image.sample(x, y, d->z, d->channel, d->time, c));
+            if (components == 4) alpha = std::clamp(d->image.sample(x, y, d->z, d->channel, d->time, 3) / 255., 0., 1.);
+        } else if (d->composite && d->image.channels() > 1) {
+            for (std::size_t c = 0; c < std::min<std::size_t>(4, d->image.channels()); ++c) {
+                const double value = normalize(d->image.sample(x, y, d->z, c, d->time));
+                const auto tint = QColor::fromRgba(c < d->image.metadata().channels.size() ? d->image.metadata().channels[c].color : defaults[c]);
+                color[0] += value * tint.redF(); color[1] += value * tint.greenF(); color[2] += value * tint.blueF();
+            }
+        } else {
+            const double value = normalize(d->image.sample(x, y, d->z, d->channel, d->time));
+            if (d->canvas->lut == 2) {
+                const double position = value * 5; const auto index = std::min<std::size_t>(std::size_t(position), 4);
+                for (std::size_t c = 0; c < 3; ++c) color[c] = std::lerp(palette[index][c], palette[index + 1][c], position - index);
+            } else if (d->canvas->lut == 1) color = {3 * value, 3 * value - 1, 3 * value - 2};
+            else color.fill(value);
+        }
+        for (auto &value : color) value = std::clamp(value, 0., 1.);
+        if (!d->mask.empty() && d->mask.sample(x, y) != 0) {
+            constexpr std::array<double, 3> tint{.95, .25, .34};
+            for (std::size_t c = 0; c < 3; ++c) color[c] = std::lerp(color[c], tint[c], .36);
+        }
+        result.setPixelColor(x, y, QColor::fromRgbF(color[0], color[1], color[2], alpha));
+    }
+    QPainter painter(&result); painter.setRenderHint(QPainter::Antialiasing); painter.setFont(font());
+    paintOverlays(painter, true);
+    return result;
+}
+
 void ImageViewer::setOverlayLayers(const QList<OverlayLayer> &layers)
 {
     for (const auto &connection : d->layerConnections) disconnect(connection);
@@ -962,7 +1021,7 @@ void ImageViewer::setPixelAspectRatio(double heightOverWidth)
 void ImageViewer::setTool(Tool tool)
 {
     d->tool = tool;
-    d->draft.reset();
+    d->draft.reset(); d->combineOriginal.reset();
     d->drawing = false; d->editing = false; d->dragOriginal.reset();
     d->panning = false; d->pickingPosition = false;
     setCursor(toolCursor());
@@ -974,6 +1033,12 @@ Qt::CursorShape ImageViewer::toolCursor() const
     return d->spacePan ? Qt::OpenHandCursor : Qt::CrossCursor;
 }
 ImageViewer::Tool ImageViewer::tool() const { return d->tool; }
+void ImageViewer::setAnnotations(const std::vector<Annotation> &annotations)
+{
+    d->annotations = annotations;
+    d->overlay->update();
+}
+
 void ImageViewer::setRois(const std::vector<Roi> &rois)
 {
     d->rois = rois;
@@ -1185,8 +1250,30 @@ void ImageViewer::mousePressEvent(QMouseEvent *event)
         }
         return;
     }
+    const auto selectable = [this](const Roi &roi) {
+        return roi.visible && roi.time == d->time && (d->composite || roi.channel == d->channel);
+    };
     if (!d->draft) {
-        if (d->editing && d->selection) {
+        if (d->selection && selectable(*d->selection) && d->selection->type == RoiType::Polygon
+            && (event->modifiers() & (Qt::ShiftModifier | Qt::AltModifier))) {
+            auto roi = *d->selection;
+            for (std::size_t i = 0; i < roi.points.size(); ++i) {
+                if (QLineF(event->position(), imageToWidget(roi.points[i])).length() > 6) continue;
+                if (event->modifiers().testFlag(Qt::AltModifier)) {
+                    if (roi.points.size() <= 3) return;
+                    roi.points.erase(roi.points.begin() + qptrdiff(i));
+                } else {
+                    // Insert a duplicate and drag it to place the new vertex.
+                    roi.points.insert(roi.points.begin() + qptrdiff(i), roi.points[i]);
+                }
+                if (validRoi(roi)) { d->selection = roi; Q_EMIT roiEdited(roi); }
+                if (!event->modifiers().testFlag(Qt::AltModifier)) {
+                    d->dragOriginal = roi; d->dragHandle = int(i); d->dragStart = point;
+                }
+                updateCanvas(); return;
+            }
+        }
+        if (d->editing && d->selection && selectable(*d->selection)) {
             const auto handles = roiHandles(*d->selection);
             for (std::size_t i = 0; i < handles.size(); ++i) {
                 const auto offset = event->position() - imageToWidget(handles[i]);
@@ -1198,18 +1285,23 @@ void ImageViewer::mousePressEvent(QMouseEvent *event)
                 }
             }
         }
-        const auto hit = [this, event, point](const Roi &roi) {
-            if (!roi.visible || roi.time != d->time
-                || (!d->composite && roi.channel != d->channel)) return false;
+        const bool combine = onImage && d->selection && selectable(*d->selection) && d->selection->type != RoiType::Line
+            && d->tool != Tool::Line && (event->modifiers() & (Qt::ShiftModifier | Qt::AltModifier));
+        if (combine) {
+            d->combineOriginal = d->selection;
+            d->subtract = event->modifiers().testFlag(Qt::AltModifier);
+        }
+        const auto hit = [this, event, point, &selectable](const Roi &roi) {
+            if (!selectable(roi)) return false;
             const auto origin = imageToWidget({0, 0});
             const QTransform transform(d->zoom, 0, 0, d->zoom * d->pixelAspect, origin.x(), origin.y());
             QPainterPathStroker stroker;
             stroker.setWidth(12);
-            return roi.contains(point) || stroker.createStroke(transform.map(roiPath(roi))).contains(event->position());
+            return roi.contains(point) || stroker.createStroke(transform.map(roi.path())).contains(event->position());
         };
         std::optional<Roi> picked;
-        if (d->selection && hit(*d->selection)) picked = d->selection;
-        else for (auto it = d->rois.rbegin(); it != d->rois.rend(); ++it)
+        if (!combine && d->selection && hit(*d->selection)) picked = d->selection;
+        else if (!combine) for (auto it = d->rois.rbegin(); it != d->rois.rend(); ++it)
             if (hit(*it)) { picked = *it; break; }
         if (picked) {
             d->selection = picked;
@@ -1221,11 +1313,11 @@ void ImageViewer::mousePressEvent(QMouseEvent *event)
             updateCanvas();
             return;
         }
-        if (onImage && d->editing) {
+        if (!combine && onImage && d->editing) {
             d->editing = false; d->dragOriginal.reset(); updateCanvas();
             return;
         }
-        if (onImage && d->selection) {
+        if (!combine && onImage && d->selection) {
             d->selection.reset();
             Q_EMIT selectionCleared();
             updateCanvas();
@@ -1242,7 +1334,9 @@ void ImageViewer::mousePressEvent(QMouseEvent *event)
         roi.z = d->z; roi.channel = d->channel; roi.time = d->time;
         roi.type = d->tool == Tool::Rectangle ? RoiType::Rectangle : d->tool == Tool::Ellipse ? RoiType::Ellipse
             : d->tool == Tool::Line ? RoiType::Line : RoiType::Polygon;
-        roi.points = d->tool == Tool::Polygon ? std::vector<QPointF>{point} : std::vector<QPointF>{point, point};
+        const QPointF start = roi.type == RoiType::Line && event->modifiers().testFlag(Qt::AltModifier)
+            ? QPointF(std::round(point.x()), std::round(point.y())) : point;
+        roi.points = d->tool == Tool::Polygon ? std::vector<QPointF>{point} : std::vector<QPointF>{start, start};
         d->draft = std::move(roi);
     }
     d->drawing = d->tool != Tool::Polygon;
@@ -1254,7 +1348,8 @@ void ImageViewer::updateRoiDrag(QPointF point, Qt::KeyboardModifiers modifiers)
     const QSizeF size(double(d->image.width()), double(d->image.height()));
     const bool shift = modifiers.testFlag(Qt::ShiftModifier);
     if (d->drawing && d->draft) {
-        d->draft->points[1] = constrainedPoint(d->draft->points[0], point, d->draft->type, size, shift);
+        if (d->draft->type == RoiType::Line && modifiers.testFlag(Qt::AltModifier)) point = {std::round(point.x()), std::round(point.y())};
+        d->draft->points[1] = constrainedPoint(d->draft->points[0], point, d->draft->type, size, shift && !d->combineOriginal);
     } else if (d->dragOriginal && d->selection) {
         const auto &original = *d->dragOriginal;
         Roi roi = original;
@@ -1265,6 +1360,54 @@ void ImageViewer::updateRoiDrag(QPointF point, Qt::KeyboardModifiers modifiers)
             delta.setX(std::clamp(delta.x(), -bounds.left(), size.width() - bounds.right()));
             delta.setY(std::clamp(delta.y(), -bounds.top(), size.height() - bounds.bottom()));
             for (auto &vertex : roi.points) vertex += delta;
+            if (roi.type == RoiType::Composite) roi.region.translate(delta);
+        } else if (roi.type == RoiType::Line && (modifiers & (Qt::AltModifier | Qt::ControlModifier))) {
+            const auto index = std::size_t(d->dragHandle);
+            const auto anchor = modifiers.testFlag(Qt::ControlModifier) ? original.bounds().center() : original.points[1 - index];
+            auto end = constrainedPoint(anchor, point, RoiType::Line, size, shift);
+            if (modifiers.testFlag(Qt::AltModifier)) {
+                QLineF direction(anchor, end);
+                if (direction.length() > 0) direction.setLength(QLineF(anchor, original.points[index]).length());
+                end = direction.p2();
+            }
+            if (modifiers.testFlag(Qt::ControlModifier)) {
+                const auto center = anchor; auto delta = end - center;
+                double scale = 1;
+                if (delta.x() != 0) scale = std::min(scale, std::min(center.x(), size.width() - center.x()) / std::abs(delta.x()));
+                if (delta.y() != 0) scale = std::min(scale, std::min(center.y(), size.height() - center.y()) / std::abs(delta.y()));
+                roi.points[index] = center + delta * scale; roi.points[1 - index] = center - delta * scale;
+            } else if (end.x() >= 0 && end.y() >= 0 && end.x() <= size.width() && end.y() <= size.height()) roi.points[index] = end;
+        } else if ((roi.type == RoiType::Rectangle || roi.type == RoiType::Ellipse)
+                   && (modifiers & (Qt::AltModifier | Qt::ControlModifier))) {
+            const auto bounds = original.bounds();
+            const bool centered = modifiers.testFlag(Qt::ControlModifier);
+            const bool aspect = shift || modifiers.testFlag(Qt::AltModifier);
+            const auto handles = roiHandles(original);
+            const auto anchor = centered ? bounds.center() : handles[std::size_t((d->dragHandle + 4) % 8)];
+            auto delta = point - anchor;
+            const bool horizontal = d->dragHandle == 3 || d->dragHandle == 7;
+            const bool vertical = d->dragHandle == 1 || d->dragHandle == 5;
+            const double ratio = shift ? 1 : bounds.width() / bounds.height();
+            double w = std::abs(delta.x()), h = std::abs(delta.y());
+            if (horizontal) h = aspect ? w / ratio : bounds.height() / (centered ? 2 : 1);
+            else if (vertical) w = aspect ? h * ratio : bounds.width() / (centered ? 2 : 1);
+            else if (aspect) { w = std::max(w, h * ratio); h = w / ratio; }
+            const auto center = bounds.center();
+            const double availableWidth = centered ? std::min(center.x(), size.width() - center.x())
+                : vertical ? 2 * std::min(center.x(), size.width() - center.x())
+                : delta.x() < 0 ? anchor.x() : size.width() - anchor.x();
+            const double availableHeight = centered ? std::min(center.y(), size.height() - center.y())
+                : horizontal ? 2 * std::min(center.y(), size.height() - center.y())
+                : delta.y() < 0 ? anchor.y() : size.height() - anchor.y();
+            if (aspect) {
+                const double scale = std::min({1., w > 0 ? availableWidth / w : 1., h > 0 ? availableHeight / h : 1.});
+                w *= scale; h *= scale;
+            } else { w = std::min(w, availableWidth); h = std::min(h, availableHeight); }
+            QPointF first = centered ? center - QPointF(w, h) : anchor;
+            QPointF last = centered ? center + QPointF(w, h) : anchor + QPointF(std::copysign(w, delta.x()), std::copysign(h, delta.y()));
+            if (!centered && horizontal) { first.setY(center.y() - h / 2); last.setY(center.y() + h / 2); }
+            if (!centered && vertical) { first.setX(center.x() - w / 2); last.setX(center.x() + w / 2); }
+            roi.points = {first, last};
         } else if (roi.type == RoiType::Line || roi.type == RoiType::Polygon) {
             const auto index = std::size_t(d->dragHandle);
             const auto anchor = roi.points[(index + roi.points.size() - 1) % roi.points.size()];
@@ -1348,20 +1491,27 @@ void ImageViewer::completeRoi()
     Roi roi = *d->draft;
     d->draft.reset();
     roi.points.erase(std::unique(roi.points.begin(), roi.points.end()), roi.points.end());
-    if (validRoi(roi)) { d->selection = roi; d->editing = false; Q_EMIT roiCreated(roi); }
+    if (d->combineOriginal && validRoi(roi)) {
+        roi.region = d->subtract ? d->combineOriginal->path().subtracted(roi.path()) : d->combineOriginal->path().united(roi.path());
+        roi.type = RoiType::Composite;
+        const auto bounds = roi.region.boundingRect(); roi.points = {bounds.topLeft(), bounds.bottomRight()};
+    }
+    d->combineOriginal.reset();
+    if (roi.type == RoiType::Composite && roi.region.isEmpty()) { d->selection.reset(); Q_EMIT selectionCleared(); }
+    else if (validRoi(roi)) { d->selection = roi; d->editing = false; Q_EMIT roiCreated(roi); }
     updateCanvas();
 }
 void ImageViewer::keyPressEvent(QKeyEvent *event)
 {
     if (d->image.empty()) { QWidget::keyPressEvent(event); return; }
     if (event->key() == Qt::Key_Escape) {
-        d->draft.reset(); d->drawing = false;
+        d->draft.reset(); d->combineOriginal.reset(); d->drawing = false;
         if (d->dragOriginal) { d->selection = d->dragOriginal; d->dragOriginal.reset(); }
         if (d->editing) d->editing = false;
         else if (d->selection) { d->selection.reset(); Q_EMIT selectionCleared(); }
         updateCanvas();
-    } else if (event->key() == Qt::Key_Shift && !event->isAutoRepeat()) {
-        updateRoiDrag(widgetToImage(d->lastMouse), event->modifiers() | Qt::ShiftModifier);
+    } else if ((event->key() == Qt::Key_Shift || event->key() == Qt::Key_Alt || event->key() == Qt::Key_Control) && !event->isAutoRepeat()) {
+        updateRoiDrag(widgetToImage(d->lastMouse), event->modifiers() | (event->key() == Qt::Key_Shift ? Qt::ShiftModifier : event->key() == Qt::Key_Alt ? Qt::AltModifier : Qt::ControlModifier));
     } else if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) completeRoi();
     else if (event->key() == Qt::Key_Space && !event->isAutoRepeat()) {
         d->spacePan = true; setCursor(Qt::OpenHandCursor);
@@ -1392,8 +1542,8 @@ void ImageViewer::keyReleaseEvent(QKeyEvent *event)
         d->spacePan = false;
         setCursor(toolCursor());
         event->accept();
-    } else if (event->key() == Qt::Key_Shift && !event->isAutoRepeat()) {
-        updateRoiDrag(widgetToImage(d->lastMouse), event->modifiers() & ~Qt::ShiftModifier);
+    } else if ((event->key() == Qt::Key_Shift || event->key() == Qt::Key_Alt || event->key() == Qt::Key_Control) && !event->isAutoRepeat()) {
+        updateRoiDrag(widgetToImage(d->lastMouse), event->modifiers() & ~(event->key() == Qt::Key_Shift ? Qt::ShiftModifier : event->key() == Qt::Key_Alt ? Qt::AltModifier : Qt::ControlModifier));
         event->accept();
     } else QWidget::keyReleaseEvent(event);
 }

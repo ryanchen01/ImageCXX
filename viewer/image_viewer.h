@@ -2,6 +2,7 @@
 
 #include "core/image.h"
 #include "core/roi.h"
+#include "core/annotation.h"
 #include <QWidget>
 #include <QList>
 #include <QPointer>
@@ -50,6 +51,7 @@ public:
         QTransform transform;
     };
     // Layers are drawn from bottom to top in this viewer's image coordinates.
+    QImage renderedImage(); // Full current plane with display settings and overlays, without editing handles.
     void setOverlayLayers(const QList<OverlayLayer> &layers);
     static constexpr double minimumZoom = 1e-6;
     static constexpr double maximumZoom = 256.0;
@@ -62,6 +64,7 @@ public:
     void setPixelAspectRatio(double heightOverWidth);
     void setTool(Tool tool);
     Tool tool() const;
+    void setAnnotations(const std::vector<Annotation> &annotations);
     void setRois(const std::vector<Roi> &rois);
     void setSelection(std::optional<Roi> roi);
     void setMask(const Image &mask);
@@ -115,6 +118,7 @@ protected:
 private:
     class Private;
     std::unique_ptr<Private> d;
+    void paintOverlays(QPainter &painter, bool printing = false);
     void requestSlice();
     void updateCanvas();
     void zoomAt(double scale, QPointF position);

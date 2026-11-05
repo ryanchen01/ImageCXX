@@ -2,13 +2,14 @@
 
 #include "core/image.h"
 #include <QPointF>
+#include <QPainterPath>
 #include <QRectF>
 #include <QUuid>
 #include <vector>
 
 namespace imagecxx {
 
-enum class RoiType { Rectangle, Ellipse, Polygon, Line };
+enum class RoiType { Rectangle, Ellipse, Polygon, Line, Composite };
 
 struct Roi {
     QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -21,6 +22,8 @@ struct Roi {
     std::size_t time = 0;
     bool visible = true;
     std::uint32_t color = 0xffffd573;
+    QPainterPath region; // Composite areas retain disjoint contours and holes.
+    QPainterPath path() const;
     QRectF bounds() const;
     bool contains(QPointF point) const;
 };

@@ -5,7 +5,22 @@
 
 namespace imagecxx {
 
+QPainterPath Roi::path() const {
+    if (type == RoiType::Composite) return region;
+    QPainterPath result;
+    if (points.size() < 2) return result;
+    if (type == RoiType::Rectangle) result.addRect(bounds());
+    else if (type == RoiType::Ellipse) result.addEllipse(bounds());
+    else {
+        result.moveTo(points.front());
+        for (std::size_t i = 1; i < points.size(); ++i) result.lineTo(points[i]);
+        if (type == RoiType::Polygon) result.closeSubpath();
+    }
+    return result;
+}
+
 QRectF Roi::bounds() const {
+    if (type == RoiType::Composite) return region.boundingRect();
     if (points.empty()) return {};
     double left = points.front().x(), right = left;
     double top = points.front().y(), bottom = top;
@@ -17,6 +32,7 @@ QRectF Roi::bounds() const {
 }
 
 bool Roi::contains(QPointF point) const {
+    if (type == RoiType::Composite) return region.contains(point);
     if (points.size() < 2 || type == RoiType::Line) return false;
     const auto rectangle = bounds();
     if (!rectangle.contains(point)) return false;

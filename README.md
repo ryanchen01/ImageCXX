@@ -8,6 +8,18 @@ Use **Analyze > Gels** to measure gel or blot bands. Draw a rectangle around a l
 
 **Gel analyzer options...** supports vertical or horizontal lanes and dark or bright bands. Set the direction before selecting lanes; changing it clears that document's lane registrations. Profiles average calibrated intensity across the rectangle's width. Dark-band profiles negate intensity so bands point upward. Areas use trapezoids over positive baseline-subtracted sample values, in intensity units times distance units. Percentages include only the bands you measure. This workflow requires scalar images with finite lane pixels; it does not apply optical-density conversion or automatic band detection.
 
+## Selection shortcuts and printing
+
+Press **B** to copy the active ROI into a display-only annotation. **Alt+B** opens label and color options; **Edit > Show/hide annotations** and **Remove last annotation** manage these snapshots. Annotations use the drawing color, stay on their saved Z/C/T plane, and remain independent of later ROI edits. They are session-only and included in printing; saving an image preserves scientific pixels rather than baking annotations into them.
+
+**Shift+U** opens the control panel. Filter its command tree, then activate a command with Enter. The panel uses the same registry and parameter forms as menus and command search.
+
+For area tools, hold **Shift** when starting another selection to add its area, or **Alt** to subtract it. With no previous selection, Shift constrains rectangles/ellipses to a square/circle. While editing a handle, Alt preserves the rectangle/ellipse aspect ratio or line length; Ctrl (Cmd on macOS) resizes around the center. Alt snaps newly drawn line endpoints to integer coordinates. Shift-click a polygon node and drag to insert a vertex; Alt-click deletes a vertex while retaining at least three. Space-drag pans with any tool. Text fields and modal dialogs retain normal keyboard behavior.
+
+**Alt+H** opens histogram bin, calibration and log-count options; **Shift+H** plots `log10(1 + count)`. **K** plots a line or a rectangular selection's column averages. **Alt+K** offers row averages, calibrated/raw intensities and line sample count. Each plot shows a snapshot of the current plane in a separate window.
+
+**File > Print Preview** and **P** print the full current plane with its display range, gamma, inversion, LUT or channel composite colors, masks, ROIs and annotations. The output respects calibrated pixel aspect. Editing handles and unfinished selections are omitted. Printing never changes scientific image values.
+
 ## Translations
 
 User-facing source text is English. Keep UI text in `tr()` (or
