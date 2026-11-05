@@ -8,17 +8,17 @@ Register new commands through the existing `CommandRegistry`, with Qt actions, m
 
 - [x] Add a color picker.
 - [x] Add selection properties beyond the existing ROI rename and drag/resize controls. Edit names, outline colors and visibility, rectangle/ellipse bounds and line endpoints through the command registry. Apply updates saved ROIs without changing image pixels or their saved Z/C/T positions.
-- [ ] Add the overlay-add command. Use separate project-owned ROI/annotation models and the viewer's overlay layer.
+- [x] Add the overlay-add command. B snapshots the selection into a separate project-owned annotation model; Alt+B edits label/color options. Show/hide and remove-last commands affect only annotations in the viewer overlay layer.
 - [x] Add reslice. Use ITK for resampling and spatial transformations, preserve geometry and numeric types, and declare the operation's scope.
 - [x] Add orthogonal views as separate synchronized windows and keep image ownership in the model.
 - [x] Add gel-lane analysis commands. Register aligned rectangular lanes per document, plot calibrated width-averaged profiles from a fixed Z/C/T plane, measure bands against straight baselines, label per-lane percentages and export CSV.
-- [ ] Add the ImageJ control panel command.
-- [ ] Add the remaining ImageJ tool modifiers. Keep text fields and modal dialogs' keyboard handling intact.
+- [x] Add the ImageJ control panel command. Shift+U opens a searchable command tree backed by the registry.
+- [x] Add modifiers for the supported ImageJ selection tools: Shift/Alt area union/subtraction, Alt aspect-preserving resize and fixed-length line rotation, Ctrl/Cmd centered resize, Alt integer line endpoints, and Shift/Alt polygon node insertion/deletion. Keep text fields and modal dialogs' keyboard handling intact.
 - [x] Add configurable drawing colors. Fill and Draw use the selected color with type-aware scalar intensity mapping. Clear uses zero.
 - [x] Extend Draw beyond area selections. Draw rasterizes line ROI endpoints as a one-pixel-wide line clipped to the current plane, using the selected drawing color and existing typed editing and undo workflow.
 - [x] Add paste modes beyond the existing typed internal copy/paste. Paste special supports typed or system images and current or new image destinations. Copy prepares a PNG in the background at native dimensions, scaled proportionally when needed to reach at least 320 pixels on one axis. Internal copying remains available when PNG export exceeds its memory budget.
-- [ ] Add modifier-specific histogram and profile dialogs. Reuse Qt Graphs 2D in separate `QQuickWidget` plot windows, created on demand.
-- [ ] Extend printing to include display LUTs and overlays. Printing currently uses the current plane's intensity range only. Keep scientific pixels separate from rendered display values.
+- [x] Add modifier-specific histogram and profile dialogs. Alt+H sets histogram bins, calibration and log counts; Shift+H plots log counts. Rectangular profiles average columns by default; Alt+K offers row averages, line sample count and calibration. Reuse Qt Graphs 2D in separate `QQuickWidget` plot windows, created on demand.
+- [x] Extend printing to include display LUTs, gamma, inversion, channel composites, masks and overlays at full-plane resolution and calibrated pixel aspect. Print Preview supports inspection before printing. Keep scientific pixels separate from rendered display values.
 
 ## Viewer, models and desktop tools
 

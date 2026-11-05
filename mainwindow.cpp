@@ -21,6 +21,7 @@
 #include <QColorDialog>
 #include <QImage>
 #include <QPrintDialog>
+#include <QPrintPreviewDialog>
 #include <QPrinter>
 #include <QPainter>
 #include <QCloseEvent>
@@ -575,6 +576,18 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     }});
     commands_.add({"analyze.histogram", tr("Histogram"), QT_TRANSLATE_NOOP("CommandCategories", "Analyze"), QKeySequence("H"), true, {}, [this](const QVariantMap &) { showPlot(false); }});
     commands_.add({"analyze.profile", tr("Line profile"), QT_TRANSLATE_NOOP("CommandCategories", "Analyze"), QKeySequence("K"), true, {}, [this](const QVariantMap &) { showPlot(true); }});
+    commands_.add({"analyze.histogram.options", tr("Histogram options..."), QT_TRANSLATE_NOOP("CommandCategories", "Analyze"), QKeySequence("Alt+H"), true,
+        {{"bins", tr("Bins"), ParameterKind::Integer, 256, 1, 65536, {}},
+         {"calibrated", tr("Calibrated intensity"), ParameterKind::Boolean, true, 0, 1, {}},
+         {"log", tr("Logarithmic counts"), ParameterKind::Boolean, false, 0, 1, {}}},
+        [this](const QVariantMap &options) { showPlot(false, options); }});
+    commands_.add({"analyze.histogram.log", tr("Log histogram"), QT_TRANSLATE_NOOP("CommandCategories", "Analyze"), QKeySequence("Shift+H"), true, {},
+        [this](const QVariantMap &) { showPlot(false, {{"log", true}}); }});
+    commands_.add({"analyze.profile.options", tr("Profile options..."), QT_TRANSLATE_NOOP("CommandCategories", "Analyze"), QKeySequence("Alt+K"), true,
+        {{"samples", tr("Line samples (0 = automatic)"), ParameterKind::Integer, 0, 0, 1048576, {}},
+         {"calibrated", tr("Calibrated intensity"), ParameterKind::Boolean, true, 0, 1, {}},
+         {"rows", tr("Average rows of rectangular selection"), ParameterKind::Boolean, true, 0, 1, {}}},
+        [this](const QVariantMap &options) { showPlot(true, options); }});
     for (bool first : {true, false}) {
         commands_.add({first ? "gel.first" : "gel.next", first ? tr("Select first lane") : tr("Select next lane"),
             QT_TRANSLATE_NOOP("CommandCategories", "Gels"), QKeySequence(first ? "1" : "2"), true, {}, [this, first](const QVariantMap &) {
@@ -866,16 +879,29 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             addDocument(std::move(image))->modified = true; updatePanels();
         }});
     }
-    commands_.add({"file.print", tr("Print..."), QT_TRANSLATE_NOOP("CommandCategories", "File"), QKeySequence("P"), true, {}, [this](const QVariantMap &) {
-        const auto *doc = activeDocument(); if (!doc) return;
-        const auto raster = displayRaster(doc->image.slice(doc->viewer->slice(), doc->viewer->channel(), doc->viewer->time()),
-                                          doc->viewer->windowMinimum(), doc->viewer->windowMaximum());
-        QPrinter printer(QPrinter::HighResolution); QPrintDialog dialog(&printer, this);
-        if (dialog.exec() != QDialog::Accepted) return;
-        QPainter painter(&printer);
-        const auto size = raster.size().scaled(painter.viewport().size(), Qt::KeepAspectRatio);
-        painter.drawImage(QRect(QPoint(0, 0), size), raster);
-    }});
+    for (const bool preview : {false, true}) {
+        commands_.add({preview ? "file.printPreview" : "file.print", preview ? tr("Print preview...") : tr("Print..."),
+            QT_TRANSLATE_NOOP("CommandCategories", "File"), preview ? QKeySequence{} : QKeySequence("P"), true, {}, [this, preview](const QVariantMap &) {
+            const auto *doc = activeDocument(); if (!doc) return;
+            const auto raster = doc->viewer->renderedImage();
+            const auto &axes = doc->image.metadata().axes;
+            const double aspect = axes[0].unit == axes[1].unit ? axes[1].spacing / axes[0].spacing : 1.;
+            const auto paint = [raster, aspect](QPrinter *printer) {
+                QPainter painter(printer);
+                QSizeF size(raster.width(), raster.height() * aspect);
+                size.scale(painter.viewport().size(), Qt::KeepAspectRatio);
+                painter.drawImage(QRectF(QPointF(0, 0), size), raster);
+            };
+            QPrinter printer(QPrinter::HighResolution);
+            if (preview) {
+                QPrintPreviewDialog dialog(&printer, this); dialog.setWindowTitle(tr("Print preview"));
+                connect(&dialog, &QPrintPreviewDialog::paintRequested, &dialog, paint); dialog.exec();
+            } else {
+                QPrintDialog dialog(&printer, this);
+                if (dialog.exec() == QDialog::Accepted) paint(&printer);
+            }
+        }});
+    }
     commands_.add({"file.text", tr("New text window"), QT_TRANSLATE_NOOP("CommandCategories", "File"), QKeySequence("Shift+N"), false, {}, [this](const QVariantMap &) {
         auto *dialog = new QDialog(this, Qt::Window); dialog->setAttribute(Qt::WA_DeleteOnClose);
         dialog->setWindowTitle(tr("Text")); dialog->resize(600, 420);
@@ -1153,6 +1179,38 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             {"view.properties", tr("Image properties")}, {"view.channels", tr("Channels")}};
         commands_.add({entry.first, labels.value(entry.first), QT_TRANSLATE_NOOP("CommandCategories", "View"), {}, QString(entry.first) != "view.display", {}, [this, panel = QString(entry.second)](const QVariantMap &) { showPanel(panel); }});
     }
+    commands_.add({"overlay.add", tr("Add selection to overlay"), QT_TRANSLATE_NOOP("CommandCategories", "Edit"), QKeySequence("B"), true, {}, [this](const QVariantMap &) {
+        const QPointer<DocumentWidget> doc = activeDocument();
+        const auto roi = selectedRoi(); if (!doc) return;
+        if (!roi) { showError(tr("Select an ROI first.")); return; }
+        Annotation annotation{*roi, roi->name};
+        annotation.geometry.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        annotation.geometry.color = drawingColor_.rgba();
+        if (QApplication::keyboardModifiers().testFlag(Qt::AltModifier)) {
+            QDialog dialog(this); dialog.setObjectName("annotationOptions"); dialog.setWindowTitle(tr("Overlay annotation"));
+            auto *layout = new QFormLayout(&dialog);
+            auto *label = new QLineEdit(annotation.text, &dialog); label->setObjectName("annotationText");
+            layout->addRow(tr("Label"), label);
+            auto *color = new QPushButton(tr("Color..."), &dialog); layout->addRow(color);
+            connect(color, &QPushButton::clicked, &dialog, [&] {
+                const auto chosen = QColorDialog::getColor(QColor::fromRgba(annotation.geometry.color), &dialog, tr("Annotation color"));
+                if (chosen.isValid()) annotation.geometry.color = chosen.rgba();
+            });
+            auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog); layout->addRow(buttons);
+            connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+            connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+            if (dialog.exec() != QDialog::Accepted || !doc) return;
+            annotation.text = label->text();
+        }
+        doc->annotations.push_back(std::move(annotation)); doc->annotationsVisible = true;
+        doc->refreshRois(); doc->changed();
+    }});
+    commands_.add({"overlay.toggle", tr("Show/hide annotations"), QT_TRANSLATE_NOOP("CommandCategories", "Edit"), {}, true, {}, [this](const QVariantMap &) {
+        if (auto *doc = activeDocument()) { doc->annotationsVisible = !doc->annotationsVisible; doc->refreshRois(); }
+    }});
+    commands_.add({"overlay.removeLast", tr("Remove last annotation"), QT_TRANSLATE_NOOP("CommandCategories", "Edit"), {}, true, {}, [this](const QVariantMap &) {
+        if (auto *doc = activeDocument(); doc && !doc->annotations.empty()) { doc->annotations.pop_back(); doc->refreshRois(); doc->changed(); }
+    }});
     commands_.add({"selection.add", tr("Add to ROI manager"), QT_TRANSLATE_NOOP("CommandCategories", "Analyze"), QKeySequence("T"), true, {}, [this](const QVariantMap &) {
         auto *doc = activeDocument(); const auto roi = selectedRoi(); if (!doc || !roi) return;
         if (std::none_of(doc->rois.begin(), doc->rois.end(), [&](const Roi &saved) { return saved.id == roi->id; })) {
@@ -1241,6 +1299,44 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         showNormal(); raise(); activateWindow();
     }});
 
+    commands_.add({"view.controlPanel", tr("Control panel..."), QT_TRANSLATE_NOOP("CommandCategories", "View"), QKeySequence("Shift+U"), false, {}, [this](const QVariantMap &) {
+        if (!panel("controlPanel")) {
+            auto *window = new QDialog(this, Qt::Window); window->setObjectName("controlPanel");
+            window->setWindowTitle(tr("Control panel")); window->resize(460, 560);
+            auto *layout = new QVBoxLayout(window);
+            auto *filter = new QLineEdit(window); filter->setPlaceholderText(tr("Find command")); layout->addWidget(filter);
+            auto *tree = new QTreeWidget(window); tree->setObjectName("controlPanelCommands");
+            tree->setHeaderLabels({tr("Command"), tr("Shortcut")}); layout->addWidget(tree);
+            QMap<QString, QTreeWidgetItem *> categories;
+            for (const auto &command : commands_.commands()) {
+                auto *category = categories.value(command.category);
+                if (!category) {
+                    category = new QTreeWidgetItem(tree, {QCoreApplication::translate("CommandCategories", command.category.toUtf8().constData())});
+                    categories.insert(command.category, category);
+                }
+                auto *item = new QTreeWidgetItem(category, {command.label, command.shortcut.toString(QKeySequence::NativeText)});
+                item->setData(0, Qt::UserRole, command.id);
+            }
+            tree->expandAll(); tree->resizeColumnToContents(0);
+            connect(filter, &QLineEdit::textChanged, tree, [tree](const QString &text) {
+                for (int i = 0; i < tree->topLevelItemCount(); ++i) {
+                    auto *category = tree->topLevelItem(i); bool any = false;
+                    for (int j = 0; j < category->childCount(); ++j) {
+                        auto *item = category->child(j); const bool match = item->text(0).contains(text, Qt::CaseInsensitive);
+                        item->setHidden(!match); any |= match;
+                    }
+                    category->setHidden(!any);
+                }
+            });
+            connect(tree, &QTreeWidget::itemActivated, this, [this](QTreeWidgetItem *item) {
+                if (auto *action = findChild<QAction *>(item->data(0, Qt::UserRole).toString()); action && action->isEnabled()) action->trigger();
+            });
+            panels_.insert("controlPanel", window);
+            if (panelGeometries_.contains("controlPanel")) window->restoreGeometry(panelGeometries_.value("controlPanel"));
+        }
+        showPanel("controlPanel");
+    }});
+
     QMap<QString, QMenu *> menus;
     for (const auto &category : {QT_TRANSLATE_NOOP("CommandCategories", "File"),
             QT_TRANSLATE_NOOP("CommandCategories", "Edit"), QT_TRANSLATE_NOOP("CommandCategories", "Process"),
@@ -1254,7 +1350,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             {"file.next", {"Shift+O", "Alt+Shift+O"}}, {"file.revert", {"R", "Alt+R"}},
             {"edit.copy", {"C", "Alt+C", "Ctrl+Alt+C"}}, {"image.duplicate", {"Shift+D", "Alt+Shift+D"}},
             {"edit.undo", {"Z"}}, {"edit.redo", {"Ctrl+Y"}},
-            {"analyze.measure", {"M"}}, {"analyze.histogram", {"H"}}, {"analyze.profile", {"K"}},
+            {"overlay.add", {"B", "Alt+B", "Ctrl+Alt+B"}}, {"analyze.measure", {"M"}}, {"analyze.histogram", {"H"}}, {"analyze.profile", {"K"}},
             {"edit.clear", {"Backspace", "Delete"}}, {"edit.fill", {"F"}}, {"edit.draw", {"D"}},
             {"edit.invert", {"Shift+I"}}, {"edit.smooth", {"Shift+S"}}, {"process.threshold", {"Shift+T"}}, {"process.resample", {"E"}},
             {"view.display", {"Ctrl+J", "Shift+C"}}, {"view.info", {"I"}}, {"view.properties", {"Shift+P"}},
@@ -2142,7 +2238,10 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
             if (key->modifiers().testFlag(Qt::AltModifier) && (roi->type == RoiType::Rectangle || roi->type == RoiType::Ellipse)) {
                 const auto end = roi->points[1] + delta;
                 if (end.x() > roi->points[0].x() && end.y() > roi->points[0].y()) roi->points[1] = end;
-            } else for (auto &point : roi->points) point += delta;
+            } else {
+                for (auto &point : roi->points) point += delta;
+                if (roi->type == RoiType::Composite) roi->region.translate(delta);
+            }
             activeDocument()->editRoi(*roi); return true;
         }
     }
@@ -2238,25 +2337,37 @@ std::optional<Roi> MainWindow::selectedRoi() const
     return roi;
 }
 
-void MainWindow::showPlot(bool profile)
+void MainWindow::showPlot(bool profile, const QVariantMap &options)
 {
     const auto *document = activeDocument(); if (!document) return;
     const auto roi = selectedRoi();
-    if (profile && (!roi || roi->type != RoiType::Line)) { showError(tr("Draw and select a line ROI first.")); return; }
+    if (profile && (!roi || (roi->type != RoiType::Line && roi->type != RoiType::Rectangle))) { showError(tr("Select a line or rectangular ROI first.")); return; }
     const auto slice = document->image.slice(document->viewer->slice(), document->viewer->channel(), document->viewer->time());
+    const bool calibrated = options.value("calibrated", true).toBool();
+    const bool logarithmic = options.value("log", false).toBool();
+    const bool rows = options.value("rows", false).toBool();
+    const auto bins = std::size_t(options.value("bins", 256).toUInt());
+    const auto samples = std::size_t(options.value("samples", 0).toUInt());
     struct PlotData { std::vector<QPointF> points; QString xTitle, yTitle; };
     auto output = std::make_shared<PlotData>();
-    jobs_.submit(profile ? tr("Line profile") : tr("Histogram"), [slice, roi, profile, output](auto stop, auto) {
+    jobs_.submit(profile ? tr("Line profile") : tr("Histogram"), [slice, roi, profile, output, calibrated, logarithmic, rows, bins, samples](auto stop, auto) {
         if (profile) {
             auto start = roi->points.front() - QPointF(.5, .5), end = roi->points.back() - QPointF(.5, .5);
             for (auto *point : {&start, &end}) { point->setX(std::clamp(point->x(), 0.0, double(slice.width() - 1))); point->setY(std::clamp(point->y(), 0.0, double(slice.height() - 1))); }
-            const auto data = lineProfile(slice, start, end, 0, true, stop);
+            auto profileSlice = slice;
+            if (!calibrated) {
+                profileSlice.metadata().intensityScale = 1; profileSlice.metadata().intensityOffset = 0;
+                profileSlice.metadata().intensityUnit.clear();
+            }
+            const auto data = roi->type == RoiType::Rectangle
+                ? gelLaneProfile(profileSlice, *roi, !rows, false, stop)
+                : lineProfile(slice, start, end, samples, calibrated, stop);
             for (std::size_t i = 0; i < data.distance.size(); ++i) output->points.emplace_back(data.distance[i], data.intensity[i]);
             output->xTitle = tr("Distance [%1]").arg(data.distanceUnit); output->yTitle = data.intensityUnit.isEmpty() ? tr("Intensity") : data.intensityUnit;
         } else {
-            const auto data = histogram(slice, 256, roi && roi->type != RoiType::Line ? roi : std::optional<Roi>{}, true, stop);
-            for (std::size_t i = 0; i < data.centers.size(); ++i) output->points.emplace_back(data.centers[i], data.counts[i]);
-            output->xTitle = tr("Intensity"); output->yTitle = tr("Pixel count");
+            const auto data = histogram(slice, bins, roi && roi->type != RoiType::Line ? roi : std::optional<Roi>{}, calibrated, stop);
+            for (std::size_t i = 0; i < data.centers.size(); ++i) output->points.emplace_back(data.centers[i], logarithmic ? std::log10(1.0 + data.counts[i]) : double(data.counts[i]));
+            output->xTitle = tr("Intensity"); output->yTitle = logarithmic ? tr("log10(1 + pixel count)") : tr("Pixel count");
         }
     }, [this, output, profile](auto error) {
         if (showJobError(error)) return;
@@ -2339,6 +2450,14 @@ void MainWindow::updatePanels()
     for (auto *action : imageActions_) action->setEnabled(doc != nullptr);
     findChild<QAction *>("stacks.reslice")->setEnabled(doc && doc->image.depth() > 1);
     findChild<QAction *>("stacks.project3d")->setEnabled(doc && doc->image.depth() > 1);
+    if (auto *control = panel("controlPanel")) {
+        QTreeWidgetItemIterator it(control->findChild<QTreeWidget *>("controlPanelCommands"));
+        while (*it) {
+            const auto id = (*it)->data(0, Qt::UserRole).toString();
+            if (!id.isEmpty()) (*it)->setDisabled(commands_.command(id).needsImage && !doc);
+            ++it;
+        }
+    }
     bool overlayVisible = false;
     for (auto *overlay : findChildren<OverlayWindow *>(QString{}, Qt::FindDirectChildrenOnly))
         overlayVisible |= overlay->document() == doc && overlay->isVisible();

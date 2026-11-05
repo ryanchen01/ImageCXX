@@ -109,6 +109,6 @@ private:
     bool confirmDiscardMeasurements();
     std::optional<QVariantMap> parameterForm(const imagecxx::Command &command, bool batch = false);
     std::optional<imagecxx::Roi> selectedRoi() const;
-    void showPlot(bool profile);
+    void showPlot(bool profile, const QVariantMap &options = {});
     QWidget *plotWindow(bool profile);
 };

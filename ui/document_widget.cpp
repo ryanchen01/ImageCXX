@@ -458,6 +458,7 @@ void DocumentWidget::refreshRois()
     outlines.insert(outlines.end(), gelLanes.begin(), gelLanes.end());
     for (int i = 0; i < views_.size(); ++i) {
         const bool xy = viewAxes(i)[2] == 2;
+        views_[i]->setAnnotations(xy && annotationsVisible ? annotations : std::vector<Annotation>{});
         views_[i]->setRois(xy ? outlines : std::vector<Roi>{});
         views_[i]->setSelection(xy ? selection : std::nullopt);
     }

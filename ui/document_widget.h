@@ -1,6 +1,7 @@
 #pragma once
 #include "core/history.h"
 #include "core/roi.h"
+#include "core/annotation.h"
 #include "image_window.h"
 #include <QWidget>
 #include <QList>
@@ -23,6 +24,8 @@ public:
     ~DocumentWidget() override;
     Image image;
     std::vector<Roi> rois;
+    std::vector<Annotation> annotations;
+    bool annotationsVisible = true;
     std::vector<Roi> gelLanes;
     bool gelHorizontal = false;
     bool gelDarkBands = true;
