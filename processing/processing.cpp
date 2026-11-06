@@ -174,7 +174,9 @@ Image runVolume(const Image &source, std::size_t volume, const ProcessingOptions
         const auto volumes = source.pixelCount() / count;
         if (volumes > std::numeric_limits<std::size_t>::max() - 2)
             throw std::overflow_error(QCoreApplication::translate("Processing", "Resampled image exceeds the addressable buffer size").toStdString());
-        const auto buffers = volumes == 1 ? std::size_t{2} : volumes + 2;
+        // After the first volume, the final result is already allocated and
+        // excluded from available memory. Only the ITK output and copied block remain.
+        const auto buffers = volumes == 1 || volume > 0 ? std::size_t{2} : volumes + 2;
         if (outputBytes > std::numeric_limits<std::size_t>::max() / buffers)
             throw std::overflow_error(QCoreApplication::translate("Processing", "Resampled image exceeds the addressable buffer size").toStdString());
         detail::checkMemoryBudget(outputBytes * buffers, detail::availableMemoryBytes());

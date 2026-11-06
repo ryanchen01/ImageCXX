@@ -1301,3 +1301,89 @@ TEST(ImageIo, DicomReexportPreservesMonochromeOneAndStoredSamples)
     EXPECT_EQ(second.metadata().attributes.value("DICOM.0028,0004"), "MONOCHROME1");
     expectPixels(second, original);
 }
+
+TEST(ImageIo, DefaultExportRetainsValidatedPhotometricInterpretation)
+{
+    QTemporaryDir directory;
+    for (const auto *photometric : {"MONOCHROME1", "MONOCHROME2", "Patient Name"}) {
+        for (const auto *extension : {"dcm", "tif", "raw"}) {
+            SCOPED_TRACE(photometric);
+            SCOPED_TRACE(extension);
+            auto source = fixture(PixelType::UInt16, {5, 3});
+            source.metadata().attributes.insert("DICOM.0028,0004", photometric);
+            const auto path = directory.filePath(QString(photometric) + "." + extension);
+            ASSERT_NO_THROW(writeImage(source, path));
+            const auto loaded = readImage(path);
+            expectPixels(loaded, source);
+            const auto value = loaded.metadata().attributes.value("DICOM.0028,0004");
+            if (QString(photometric) == "Patient Name") EXPECT_NE(value, photometric);
+            else EXPECT_EQ(value, photometric);
+            EXPECT_FALSE(loaded.metadata().attributes.contains("Experiment"));
+        }
+    }
+}
+
+TEST(ImageIo, DefaultExportRetainsObliquePlaneGeometry)
+{
+    QTemporaryDir directory;
+    auto volume = fixture(PixelType::Int16);
+    volume.metadata().direction = {1, 0, 0, 0, 0, -1, 0, 1, 0};
+    volume.metadata().axes[2].unit = QString::fromUtf8("μm");
+    const auto slice = volume.slice(1);
+    for (const auto *extension : {"dcm", "tif", "raw"}) {
+        SCOPED_TRACE(extension);
+        const auto path = directory.filePath(QString("slice.") + extension);
+        ASSERT_NO_THROW(writeImage(slice, path));
+        const auto loaded = readImage(path);
+        expectPixels(loaded, slice);
+        EXPECT_EQ(loaded.metadata().direction, slice.metadata().direction);
+        if (QString(extension) == "dcm") {
+            EXPECT_DOUBLE_EQ(loaded.metadata().axes[0].origin, 10);
+            EXPECT_DOUBLE_EQ(loaded.metadata().axes[1].origin, -3.5);
+            EXPECT_DOUBLE_EQ(loaded.metadata().axes[2].origin, .007);
+        } else {
+            EXPECT_EQ(loaded.metadata().attributes.value("ImageCXX.EmbeddedPlaneOrigin"),
+                      slice.metadata().attributes.value("ImageCXX.EmbeddedPlaneOrigin"));
+            EXPECT_EQ(loaded.metadata().attributes.value("ImageCXX.EmbeddedPlaneZUnit"), "um");
+        }
+    }
+    auto invalid = slice.clone();
+    invalid.metadata().attributes.insert("ImageCXX.EmbeddedPlaneOrigin", "[1,2,3,\"Patient Name\"]");
+    invalid.metadata().attributes.insert("ImageCXX.EmbeddedPlaneZUnit", "Patient ID");
+    const auto path = directory.filePath("invalid.tif");
+    writeImage(invalid, path);
+    const auto loaded = readImage(path);
+    EXPECT_FALSE(loaded.metadata().attributes.contains("ImageCXX.EmbeddedPlaneOrigin"));
+    EXPECT_FALSE(loaded.metadata().attributes.contains("ImageCXX.EmbeddedPlaneZUnit"));
+}
+
+TEST(ImageIo, DefaultExportNormalizesUnicodeMicrometerAndMicrosecondUnits)
+{
+    QTemporaryDir directory;
+    for (const auto *micro : {"µ", "μ"}) {
+        for (const auto *extension : {"tif", "raw", "nii", "dcm"}) {
+            SCOPED_TRACE(micro);
+            SCOPED_TRACE(extension);
+            auto source = fixture(PixelType::UInt16, QString(extension) == "dcm"
+                ? std::vector<std::size_t>{5, 3} : std::vector<std::size_t>{5, 3, 2, 1, 2});
+            for (std::size_t axis = 0; axis < std::min<std::size_t>(3, source.shape().size()); ++axis)
+                source.metadata().axes[axis].unit = QString::fromUtf8(micro) + "m";
+            if (source.shape().size() == 5) source.metadata().axes[4].unit = QString::fromUtf8(micro) + "s";
+            const auto path = directory.filePath(QString::fromUtf8(micro) + "." + extension);
+            ASSERT_NO_THROW(writeImage(source, path));
+            const auto loaded = readImage(path);
+            expectPixels(loaded, source);
+            if (QString(extension) == "nii" || QString(extension) == "dcm") {
+                EXPECT_EQ(loaded.metadata().axes[0].unit, "mm");
+                EXPECT_NEAR(loaded.metadata().axes[0].spacing, .00025, 1e-10);
+                if (QString(extension) == "nii") {
+                    EXPECT_EQ(loaded.metadata().axes[4].unit, "s");
+                    EXPECT_NEAR(loaded.metadata().axes[4].spacing, .000002, 1e-12);
+                }
+            } else {
+                EXPECT_EQ(loaded.metadata().axes[0].unit, "um");
+                EXPECT_EQ(loaded.metadata().axes[4].unit, "us");
+            }
+        }
+    }
+}

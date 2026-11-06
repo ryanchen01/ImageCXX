@@ -485,6 +485,29 @@ void writeImage(const Image &input, const QString &path, std::stop_token stop, I
         metadata.sourcePath.clear();
         metadata.intensityUnit.clear();
         metadata.attributes.clear();
+        // Keep only validated, non-identifying encoding and plane geometry.
+        const auto photometric = image.metadata().attributes.value("DICOM.0028,0004").trimmed();
+        if (photometric == "MONOCHROME1" || photometric == "MONOCHROME2" || photometric == "RGB")
+            metadata.attributes.insert("DICOM.0028,0004", photometric);
+        const auto safeUnit = [](QString unit) {
+            unit = unit.trimmed().toLower();
+            unit.replace(QString::fromUtf8("µ"), QStringLiteral("u"));
+            unit.replace(QString::fromUtf8("μ"), QStringLiteral("u"));
+            return QStringList{QStringLiteral("px"), QStringLiteral("m"), QStringLiteral("cm"),
+                               QStringLiteral("mm"), QStringLiteral("um"), QStringLiteral("nm"),
+                               QStringLiteral("s"), QStringLiteral("ms"), QStringLiteral("us"),
+                               QStringLiteral("min"), QString()}.contains(unit) ? unit : QString();
+        };
+        const auto plane = QJsonDocument::fromJson(image.metadata().attributes.value("ImageCXX.EmbeddedPlaneOrigin").toUtf8()).array();
+        if (plane.size() == 3 && std::all_of(plane.begin(), plane.end(), [](const QJsonValue &value) {
+                return value.isDouble() && std::isfinite(value.toDouble());
+            })) {
+            metadata.attributes.insert("ImageCXX.EmbeddedPlaneOrigin",
+                QString::fromUtf8(QJsonDocument(plane).toJson(QJsonDocument::Compact)));
+            if (image.metadata().attributes.contains("ImageCXX.EmbeddedPlaneZUnit"))
+                metadata.attributes.insert("ImageCXX.EmbeddedPlaneZUnit",
+                    safeUnit(image.metadata().attributes.value("ImageCXX.EmbeddedPlaneZUnit")));
+        }
         metadata.dicomSequences = {};
         metadata.originalMetadata = {};
         for (auto &channel : metadata.channels) channel.name.clear();
@@ -493,11 +516,7 @@ void writeImage(const Image &input, const QString &path, std::stop_token stop, I
         for (std::size_t axis = 0; axis < image.shape().size(); ++axis) {
             auto &value = metadata.axes[axis];
             value.name = axis < 5 ? names[static_cast<int>(axis)] : QStringLiteral("Axis%1").arg(axis);
-            if (!QStringList{QStringLiteral("px"), QStringLiteral("m"), QStringLiteral("cm"),
-                             QStringLiteral("mm"), QStringLiteral("um"), QStringLiteral("nm"),
-                             QStringLiteral("s"), QStringLiteral("ms"), QStringLiteral("us"),
-                             QStringLiteral("min"), QString()}.contains(value.unit))
-                value.unit.clear();
+            value.unit = safeUnit(value.unit);
         }
         image.metadata() = std::move(metadata);
     }
