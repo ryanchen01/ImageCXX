@@ -1359,8 +1359,8 @@ TEST(ImageIo, DefaultExportRetainsObliquePlaneGeometry)
 
 TEST(ImageIo, DefaultExportNormalizesUnicodeMicrometerAndMicrosecondUnits)
 {
-    QTemporaryDir directory;
     for (const auto *micro : {"µ", "μ"}) {
+        QTemporaryDir directory;
         for (const auto *extension : {"tif", "raw", "nii", "dcm"}) {
             SCOPED_TRACE(micro);
             SCOPED_TRACE(extension);

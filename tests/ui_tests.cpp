@@ -118,10 +118,13 @@ void chooseDrawingColor(MainWindow &window, QColor color, bool accept = true)
 QString saveImage(MainWindow &window, const QString &path, bool includeFullMetadata = false)
 {
     QString error;
+    bool selected = false;
     QTimer picker;
     QObject::connect(&picker, &QTimer::timeout, &window, [&] {
         auto *modal = QApplication::activeModalWidget();
         if (auto *dialog = qobject_cast<QFileDialog *>(modal)) {
+            if (selected) return;
+            selected = true;
             auto *checkbox = dialog->findChild<QCheckBox *>("includeFullMetadata");
             EXPECT_NE(checkbox, nullptr);
             if (checkbox) {
