@@ -1,5 +1,6 @@
 #include "io/image_io.h"
 #include "io/io_detail.h"
+#include "core/memory.h"
 
 #include <QFile>
 #include <QFileInfo>
@@ -30,8 +31,15 @@
 #include <chrono>
 #include <stdexcept>
 #include <tuple>
+#include <thread>
 
 using namespace imagecxx;
+
+void writeImageWithMetadata(const Image &image, const QString &path, std::stop_token stop = {},
+                            IoProgress progress = {}, bool includeFullMetadata = true)
+{
+    imagecxx::writeImage(image, path, stop, progress, includeFullMetadata);
+}
 
 namespace {
 class LazyStorage final : public Storage {
@@ -102,7 +110,7 @@ TEST(ImageIo, ExportsLazyStorageWithoutDirectDataAccess)
         const auto path = directory.filePath(QString("lazy.") + suffix);
         if (QString(suffix) == "dcm") writeDicom(lazy, path);
         else if (QString(suffix) == "mha") writeScientific(lazy, path);
-        else writeImage(lazy, path);
+        else writeImageWithMetadata(lazy, path);
         expectPixels(readImage(path), original);
     }
 }
@@ -115,7 +123,7 @@ TEST(ImageIo, TiffPreservesEveryPixelTypeAndFiveDimensionalMetadata)
                             PixelType::Float64, PixelType::RGB8, PixelType::RGBA8}) {
         const auto original = fixture(type, {5, 3, 2, 2, 2});
         const auto path = directory.filePath(pixelTypeName(type) + ".tif");
-        writeImage(original, path);
+        writeImageWithMetadata(original, path);
         const auto loaded = readImage(path);
         expectPixels(loaded, original);
         EXPECT_EQ(loaded.shape(), original.shape());
@@ -232,7 +240,7 @@ TEST(ImageIo, TiffConvertsAssociatedAlphaAndChecksEveryPagesAlphaEncoding)
                 EXPECT_DOUBLE_EQ(image.sample(0, 0, z, 0, 0, 3), 0);
             }
             const auto saved = directory.filePath("straight.tif");
-            writeImage(image, saved);
+            writeImageWithMetadata(image, saved);
             expectPixels(readImage(saved), image);
         }
         write(tiled, {EXTRASAMPLE_UNASSALPHA, EXTRASAMPLE_ASSOCALPHA});
@@ -280,7 +288,7 @@ TEST(ImageIo, NativeNrrdPreservesSpaceUnitsAndNormalizesMixedWorldUnits)
         }
         EXPECT_EQ(image.metadata().direction, (std::vector<double>{0, -1, 0, 1, 0, 0, 0, 0, 1}));
         const auto saved = directory.filePath("roundtrip.nrrd");
-        writeImage(image, saved);
+        writeImageWithMetadata(image, saved);
         const auto restored = readImage(saved);
         for (std::size_t axis = 0; axis < 3; ++axis) {
             EXPECT_EQ(restored.metadata().axes[axis].unit, axes[axis].unit);
@@ -320,7 +328,7 @@ TEST(ImageIo, RawRoundTripMapsAndPreservesSidecarMetadata)
     QTemporaryDir directory;
     const auto original = fixture(PixelType::Float64);
     const auto path = directory.filePath("image.raw");
-    writeImage(original, path);
+    writeImageWithMetadata(original, path);
     const auto loaded = readImage(path);
     expectPixels(loaded, original);
     EXPECT_EQ(loaded.storageKind(), "Memory mapped");
@@ -354,13 +362,28 @@ TEST(ImageIo, RawImportSwapsEndianSkipsHeaderAndRejectsTruncation)
     EXPECT_THROW(readImage(path, options), std::exception);
 }
 
+TEST(ImageIo, RawImportRejectsDeclaredBytesBeforeAllocation)
+{
+    QTemporaryDir directory;
+    const auto path = directory.filePath("short.raw");
+    QFile file(path);
+    ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+    ASSERT_EQ(file.write("x", 1), 1);
+    file.close();
+    RawImportOptions options;
+    options.pixelType = PixelType::UInt8;
+    options.shape = {100000, 100000};
+    options.memoryMap = false;
+    EXPECT_THROW(readImage(path, options), std::runtime_error);
+}
+
 TEST(ImageIo, PngPreservesGray16AndRgbaWithoutPaddingBytes)
 {
     QTemporaryDir directory;
     for (const auto type : {PixelType::UInt8, PixelType::UInt16, PixelType::RGB8, PixelType::RGBA8}) {
         const auto original = fixture(type, {5, 3});
         const auto path = directory.filePath(pixelTypeName(type) + ".png");
-        writeImage(original, path);
+        writeImageWithMetadata(original, path);
         const auto loaded = readImage(path);
         expectPixels(loaded, original);
         EXPECT_EQ(loaded.metadata().axes[0].spacing, 0.25);
@@ -375,7 +398,7 @@ TEST(ImageIo, PngReopensSingletonStackAxesAndRetainsItsPlane)
         auto image = fixture(PixelType::UInt16, shape);
         if (implicitDirection) image.metadata().direction.clear();
         const auto path = directory.filePath("plane.png");
-        writeImage(image, path);
+        writeImageWithMetadata(image, path);
         const auto loaded = readImage(path);
         expectPixels(loaded, image);
         EXPECT_EQ(loaded.shape(), (std::vector<std::size_t>{5, 3}));
@@ -393,14 +416,14 @@ TEST(ImageIo, JpegLoadsAndUnsupportedRasterConversionsFail)
     auto *bytes = reinterpret_cast<unsigned char *>(image.mutableData());
     for (std::size_t i = 0; i < image.byteCount(); i += 3) { bytes[i] = 160; bytes[i + 1] = 80; bytes[i + 2] = 40; }
     const auto path = directory.filePath("image.jpg");
-    writeImage(image, path);
+    writeImageWithMetadata(image, path);
     const auto loaded = readImage(path);
     ASSERT_EQ(loaded.pixelType(), PixelType::RGB8);
     EXPECT_NEAR(loaded.sample(5, 5, 0, 0, 0, 0), 160, 3);
     EXPECT_NEAR(loaded.sample(5, 5, 0, 0, 0, 1), 80, 3);
-    EXPECT_THROW(writeImage(fixture(PixelType::Float32, {5, 3}), directory.filePath("float.png")), std::runtime_error);
-    EXPECT_THROW(writeImage(fixture(PixelType::UInt16, {5, 3}), directory.filePath("gray16.jpg")), std::runtime_error);
-    EXPECT_THROW(writeImage(fixture(PixelType::UInt8), directory.filePath("volume.png")), std::runtime_error);
+    EXPECT_THROW(writeImageWithMetadata(fixture(PixelType::Float32, {5, 3}), directory.filePath("float.png")), std::runtime_error);
+    EXPECT_THROW(writeImageWithMetadata(fixture(PixelType::UInt16, {5, 3}), directory.filePath("gray16.jpg")), std::runtime_error);
+    EXPECT_THROW(writeImageWithMetadata(fixture(PixelType::UInt8), directory.filePath("volume.png")), std::runtime_error);
 }
 
 TEST(ImageIo, ScientificFormatsPreserveNumericVolumeAndGeometry)
@@ -410,7 +433,7 @@ TEST(ImageIo, ScientificFormatsPreserveNumericVolumeAndGeometry)
         SCOPED_TRACE(extension);
         const auto original = fixture(PixelType::Int16);
         const auto path = directory.filePath(QString("image.") + extension);
-        writeImage(original, path);
+        writeImageWithMetadata(original, path);
         const auto loaded = readImage(path);
         expectPixels(loaded, original);
         EXPECT_EQ(loaded.shape(), original.shape());
@@ -427,7 +450,7 @@ TEST(ImageIo, MetaImagePreservesCalibrationAndAxes)
     QTemporaryDir directory;
     const auto original = fixture(PixelType::Float32, {5, 3, 2, 2, 1});
     const auto path = directory.filePath("image.mha");
-    writeImage(original, path);
+    writeImageWithMetadata(original, path);
     const auto loaded = readImage(path);
     expectPixels(loaded, original);
     EXPECT_EQ(loaded.shape(), original.shape());
@@ -441,7 +464,7 @@ TEST(ImageIo, DicomPreservesSignedValuesCalibrationAndPatientGeometry)
     QTemporaryDir directory;
     const auto original = fixture(PixelType::Int16, {5, 3, 1});
     const auto path = directory.filePath("image.dcm");
-    writeImage(original, path);
+    writeImageWithMetadata(original, path);
     const auto loaded = readImage(path);
     expectPixels(loaded, original);
     EXPECT_EQ(loaded.metadata().axes[0].spacing, 0.25);
@@ -459,7 +482,7 @@ TEST(ImageIo, DicomSequenceHierarchySurvivesImportAndTiffSave)
     ASSERT_TRUE(directory.isValid());
     const auto path = directory.filePath("sequences.dcm");
     const auto original = fixture(PixelType::UInt16, {5, 3, 1});
-    writeImage(original, path);
+    writeImageWithMetadata(original, path);
     DcmFileFormat file;
     ASSERT_TRUE(file.loadFile(QFile::encodeName(path).constData()).good());
     const QByteArray text(40000, 'a');
@@ -484,10 +507,10 @@ TEST(ImageIo, DicomSequenceHierarchySurvivesImportAndTiffSave)
     EXPECT_FALSE(loaded.metadata().attributes.contains("DICOM.0008,1155"));
     expectPixels(loaded, original);
     const auto tiff = directory.filePath("sequences.tif");
-    writeImage(loaded, tiff);
+    writeImageWithMetadata(loaded, tiff);
     EXPECT_EQ(readImage(tiff).metadata().dicomSequences, expected);
     const auto exported = directory.filePath("exported.dcm");
-    writeImage(loaded, exported);
+    writeImageWithMetadata(loaded, exported);
     EXPECT_EQ(readImage(exported).metadata().dicomSequences, expected);
     DcmFileFormat derived;
     ASSERT_TRUE(derived.loadFile(QFile::encodeName(exported).constData()).good());
@@ -496,6 +519,48 @@ TEST(ImageIo, DicomSequenceHierarchySurvivesImportAndTiffSave)
     EXPECT_EQ(sopClass, UID_SecondaryCaptureImageStorage);
     EXPECT_FALSE(derived.getDataset()->tagExists(DCM_ReferencedSeriesSequence));
     EXPECT_FALSE(derived.getDataset()->tagExists(DCM_ReferencedStudySequence));
+}
+
+TEST(ImageIo, SafeExportOmitsNestedPatientMetadata)
+{
+    QTemporaryDir directory;
+    ASSERT_TRUE(directory.isValid());
+    auto source = fixture(PixelType::UInt8, {5, 3});
+    source.metadata().axes[0].unit = source.metadata().axes[1].unit = "mm";
+    source.metadata().direction.clear();
+    source.metadata().name = "Patient Name";
+    source.metadata().attributes.insert("DICOM.0010,0010", "Patient Name");
+    source.metadata().dicomSequences = {{"DICOM.0040,0275", QJsonArray{QJsonObject{{"DICOM.0010,0020", "Patient ID"}}}}};
+    source.metadata().originalMetadata = QJsonObject{{"attributes", QJsonObject{{"DICOM.0010,0010", "Patient Name"}}}};
+    for (const auto *extension : {"tif", "png", "mha", "nii", "raw", "dcm"}) {
+        SCOPED_TRACE(extension);
+        const auto path = directory.filePath(QString("safe.") + extension);
+        if (QString(extension) == "tif") ASSERT_NO_THROW(writeImage(source, path));
+        else ASSERT_NO_THROW(writeImageWithMetadata(source, path, {}, {}, false));
+        const auto loaded = readImage(path);
+        expectPixels(loaded, source);
+        const auto description = QJsonDocument(detail::imageDescription(loaded)).toJson();
+        EXPECT_FALSE(description.contains("Patient Name"));
+        EXPECT_FALSE(description.contains("Patient ID"));
+        EXPECT_NE(loaded.metadata().name, source.metadata().name);
+    }
+    const auto full = directory.filePath("full.tif");
+    writeImageWithMetadata(source, full, {}, {}, true);
+    EXPECT_EQ(readImage(full).metadata().dicomSequences, source.metadata().dicomSequences);
+}
+
+TEST(ImageIo, ImportAdmissionWaitCanBeCancelled)
+{
+    auto held = detail::lockMemoryAllocation({});
+    std::promise<void> waiting;
+    auto started = waiting.get_future();
+    std::jthread waiter([&](std::stop_token stop) {
+        waiting.set_value();
+        EXPECT_THROW(detail::lockMemoryAllocation(stop), std::runtime_error);
+    });
+    started.wait();
+    waiter.request_stop();
+    waiter.join();
 }
 
 TEST(ImageIo, EverySaveFormatPreservesLargeUnicodeAndNestedMetadata)
@@ -518,7 +583,7 @@ TEST(ImageIo, EverySaveFormatPreservesLargeUnicodeAndNestedMetadata)
     for (const auto *extension : {"tif", "tiff", "png", "jpg", "jpeg", "mha", "mhd", "nrrd", "nhdr", "nii", "nii.gz", "dcm", "dicom", "raw", "bin"}) {
         SCOPED_TRACE(extension);
         const auto path = directory.filePath(QString("metadata.") + extension);
-        ASSERT_NO_THROW(writeImage(original, path));
+        ASSERT_NO_THROW(writeImageWithMetadata(original, path));
         const auto loaded = readImage(path);
         EXPECT_EQ(loaded.metadata().dicomSequences, original.metadata().dicomSequences);
         EXPECT_EQ(loaded.metadata().originalMetadata, original.metadata().originalMetadata);
@@ -579,14 +644,14 @@ TEST(ImageIo, UnrepresentableMetadataDoesNotReplaceExistingFiles)
     for (const auto *extension : {"tif", "png", "jpg", "mha", "mhd", "nrrd", "nhdr", "nii", "nii.gz", "dcm", "raw"}) {
         SCOPED_TRACE(extension);
         const auto path = directory.filePath(QString("existing.") + extension);
-        writeImage(original, path);
+        writeImageWithMetadata(original, path);
         QFile file(path);
         ASSERT_TRUE(file.open(QIODevice::ReadOnly));
         const auto before = file.readAll();
         file.close();
         auto invalid = original;
         invalid.metadata().axes[0].origin = std::numeric_limits<double>::quiet_NaN();
-        EXPECT_THROW(writeImage(invalid, path), std::runtime_error);
+        EXPECT_THROW(writeImageWithMetadata(invalid, path), std::runtime_error);
         ASSERT_TRUE(file.open(QIODevice::ReadOnly));
         EXPECT_EQ(file.readAll(), before);
     }
@@ -596,7 +661,7 @@ TEST(ImageIo, UnrepresentableMetadataDoesNotReplaceExistingFiles)
     ASSERT_TRUE(destination.open(QIODevice::WriteOnly));
     ASSERT_EQ(destination.write("previous contents"), 17);
     destination.close();
-    EXPECT_THROW(writeImage(original, path), std::runtime_error);
+    EXPECT_THROW(writeImageWithMetadata(original, path), std::runtime_error);
     ASSERT_TRUE(destination.open(QIODevice::ReadOnly));
     EXPECT_EQ(destination.readAll(), "previous contents");
 }
@@ -642,7 +707,7 @@ TEST(ImageIo, DicomSeriesOrdersPhysicalPositionsAndRejectsMixedSeries)
         slice.metadata().attributes.insert("DICOM.0020,000d", "1.2.826.0.1.3680043.10.543.10");
         slice.setValue(std::array<std::size_t, 3>{0, 0, 0}, z * 100);
         const auto path = directory.filePath(QString("slice-%1.dcm").arg(z));
-        writeImage(slice, path);
+        writeImageWithMetadata(slice, path);
         paths << path;
     }
     const auto image = readDicomSeries(paths);
@@ -655,7 +720,7 @@ TEST(ImageIo, DicomSeriesOrdersPhysicalPositionsAndRejectsMixedSeries)
     EXPECT_EQ(image.metadata().axes[2].spacing, 1.5);
     auto different = fixture(PixelType::UInt16, {5, 3});
     const auto path = directory.filePath("other-series.dcm");
-    writeImage(different, path);
+    writeImageWithMetadata(different, path);
     paths << path;
     EXPECT_THROW(readDicomSeries(paths), std::runtime_error);
     EXPECT_THROW(readDicomSeries({paths[0], paths[0]}), std::runtime_error);
@@ -681,7 +746,7 @@ TEST(ImageIo, ImportDiscoveryRecursesGroupsStudiesAndDeduplicatesSelections)
         }
     }
     const auto raster = directory.filePath("ordinary.PNG");
-    writeImage(fixture(PixelType::UInt16, {5, 3}), raster);
+    writeImageWithMetadata(fixture(PixelType::UInt16, {5, 3}), raster);
     QFile notes(directory.filePath("notes.txt"));
     ASSERT_TRUE(notes.open(QIODevice::WriteOnly)); notes.write("Not an image\n"); notes.close();
     QFile sidecar(directory.filePath("ordinary.PNG.json"));
@@ -768,7 +833,7 @@ TEST(ImageIo, ImportDiscoveryReportsEmptyMissingAndUnsupportedInputsAndSupportsC
     const auto png = directory.filePath("image.png");
     const auto renamed = directory.filePath("image.unknown");
     const auto original = fixture(PixelType::UInt8, {5, 3});
-    writeImage(original, png);
+    writeImageWithMetadata(original, png);
     ASSERT_TRUE(QFile::rename(png, renamed));
     plan = discoverImageImports({renamed});
     EXPECT_TRUE(plan.errors.isEmpty());
@@ -869,7 +934,7 @@ TEST(ImageIo, DicomConvertsSpatialUnitsAndEmbedsTwoDimensionalRotation)
     for (const auto &[unit, factor] : {std::pair{"m", 1000.}, {"cm", 10.}, {"mm", 1.},
                                       {"um", .001}, {"µm", .001}, {"μm", .001}, {"nm", .000001}}) {
         for (auto &axis : image.metadata().axes) axis.unit = QString::fromUtf8(unit);
-        writeImage(image, path);
+        writeImageWithMetadata(image, path);
         const auto loaded = readImage(path);
         expectPixels(loaded, image);
         for (std::size_t axis = 0; axis < 2; ++axis) {
@@ -882,13 +947,13 @@ TEST(ImageIo, DicomConvertsSpatialUnitsAndEmbedsTwoDimensionalRotation)
     QFile saved(path); ASSERT_TRUE(saved.open(QIODevice::ReadOnly));
     const auto before = saved.readAll(); saved.close();
     image.metadata().axes[0].unit = "px";
-    EXPECT_THROW(writeImage(image, path), std::runtime_error);
+    EXPECT_THROW(writeImageWithMetadata(image, path), std::runtime_error);
     ASSERT_TRUE(saved.open(QIODevice::ReadOnly)); EXPECT_EQ(saved.readAll(), before);
     saved.close();
 
     auto volume = fixture(PixelType::UInt16);
     for (auto &axis : volume.metadata().axes) axis.unit = "um";
-    writeImage(volume.slice(1), path);
+    writeImageWithMetadata(volume.slice(1), path);
     const auto loaded = readImage(path);
     EXPECT_NEAR(loaded.metadata().axes[2].origin, .0085, 1e-12);
 }
@@ -903,14 +968,14 @@ TEST(ImageIo, DicomRetainsMixedUnitPlanePositionThroughRasterAndTiff)
         const auto image = Image::allocate(PixelType::UInt16, {4, 4, 2}, metadata);
         for (const auto *extension : {"dcm", "png", "tif"}) {
             const auto path = directory.filePath(QString("plane.") + extension);
-            writeImage(image.slice(1), path);
+            writeImageWithMetadata(image.slice(1), path);
             auto loaded = readImage(path);
             if (QString(extension) != "dcm") {
                 // Cropping and slicing an already embedded plane must keep its depth unit.
                 loaded = loaded.region(std::array<std::size_t, 2>{1, 1},
                                        std::array<std::size_t, 2>{2, 2}).slice();
                 const auto dicom = directory.filePath("reexport.dcm");
-                writeImage(loaded, dicom);
+                writeImageWithMetadata(loaded, dicom);
                 loaded = readImage(dicom);
                 EXPECT_NEAR(loaded.metadata().axes[0].origin, .001, 1e-12);
                 EXPECT_NEAR(loaded.metadata().axes[1].origin, .001, 1e-12);
@@ -929,7 +994,7 @@ TEST(ImageIo, NiftiPreservesSingletonSpatialAxisAndObliquePlane)
     image.metadata().direction = {1, 0, 0, 0, 0, -1, 0, 1, 0};
     for (const auto *extension : {"nii", "nii.gz"}) {
         const auto path = directory.filePath(QString("plane.") + extension);
-        writeImage(image, path);
+        writeImageWithMetadata(image, path);
         const auto loaded = readImage(path);
         expectPixels(loaded, image);
         EXPECT_EQ(loaded.shape(), image.shape());
@@ -972,11 +1037,11 @@ TEST(ImageIo, CancellationAndCorruptFilesReportErrors)
 {
     QTemporaryDir directory;
     const auto validPath = directory.filePath("valid.tif");
-    writeImage(fixture(PixelType::UInt8), validPath);
+    writeImageWithMetadata(fixture(PixelType::UInt8), validPath);
     std::stop_source cancellation;
     cancellation.request_stop();
     EXPECT_THROW(readImage(validPath, {}, cancellation.get_token()), std::runtime_error);
-    EXPECT_THROW(writeImage(fixture(PixelType::UInt8), directory.filePath("cancel.tif"), cancellation.get_token()), std::runtime_error);
+    EXPECT_THROW(writeImageWithMetadata(fixture(PixelType::UInt8), directory.filePath("cancel.tif"), cancellation.get_token()), std::runtime_error);
     const auto path = directory.filePath("corrupt.png");
     QFile file(path);
     ASSERT_TRUE(file.open(QIODevice::WriteOnly));
@@ -990,10 +1055,10 @@ TEST(ImageIo, CancelledTiffExportPreservesThePreviousFile)
     QTemporaryDir directory;
     const auto path = directory.filePath("existing.tif");
     const auto original = fixture(PixelType::UInt8, {5, 3, 2});
-    writeImage(original, path);
+    writeImageWithMetadata(original, path);
     std::stop_source cancellation;
     const auto replacement = fixture(PixelType::Float32, {5, 3, 4});
-    EXPECT_THROW(writeImage(replacement, path, cancellation.get_token(), [&cancellation](double progress) {
+    EXPECT_THROW(writeImageWithMetadata(replacement, path, cancellation.get_token(), [&cancellation](double progress) {
         if (progress > 0.1) cancellation.request_stop();
     }), std::runtime_error);
     expectPixels(readImage(path), original);
@@ -1017,7 +1082,7 @@ TEST(ImageIo, CancelledExportsPreserveExistingScientificRasterAndDicomFiles)
         const auto path = directory.filePath(QString("existing.") + extension);
         const bool twoDimensional = QString(extension) == "png" || QString(extension) == "jpg" || QString(extension) == "dcm";
         const auto original = fixture(PixelType::UInt8, twoDimensional ? std::vector<std::size_t>{5, 3} : std::vector<std::size_t>{5, 3, 2});
-        writeImage(original, path);
+        writeImageWithMetadata(original, path);
         QFile beforeFile(path);
         ASSERT_TRUE(beforeFile.open(QIODevice::ReadOnly));
         const auto before = beforeFile.readAll();
@@ -1026,7 +1091,7 @@ TEST(ImageIo, CancelledExportsPreserveExistingScientificRasterAndDicomFiles)
         auto replacement = original.clone();
         std::fill_n(replacement.mutableData(), replacement.byteCount(), std::byte{255});
         std::stop_source cancellation;
-        EXPECT_THROW(writeImage(replacement, path, cancellation.get_token(), [&cancellation](double progress) {
+        EXPECT_THROW(writeImageWithMetadata(replacement, path, cancellation.get_token(), [&cancellation](double progress) {
             if (progress > .8) cancellation.request_stop();
         }), std::runtime_error);
         QFile afterFile(path);
@@ -1041,23 +1106,23 @@ TEST(ImageIo, RawSaveRefusesToOverwriteEitherPartAndCleansCancelledFreshPair)
     QTemporaryDir directory;
     const auto path = directory.filePath("original.raw");
     const auto original = fixture(PixelType::UInt16);
-    writeImage(original, path);
+    writeImageWithMetadata(original, path);
     QFile sidecar(path + ".json");
     ASSERT_TRUE(sidecar.open(QIODevice::ReadOnly));
     const auto metadata = sidecar.readAll();
     sidecar.close();
-    EXPECT_THROW(writeImage(fixture(PixelType::Float64), path), std::runtime_error);
+    EXPECT_THROW(writeImageWithMetadata(fixture(PixelType::Float64), path), std::runtime_error);
     expectPixels(readImage(path), original);
     ASSERT_TRUE(sidecar.open(QIODevice::ReadOnly));
     EXPECT_EQ(sidecar.readAll(), metadata);
     sidecar.close();
     ASSERT_TRUE(QFile::remove(path));
-    EXPECT_THROW(writeImage(original, path), std::runtime_error);
+    EXPECT_THROW(writeImageWithMetadata(original, path), std::runtime_error);
     ASSERT_TRUE(sidecar.open(QIODevice::ReadOnly));
     EXPECT_EQ(sidecar.readAll(), metadata);
     const auto cancelled = directory.filePath("cancelled.raw");
     std::stop_source cancellation;
-    EXPECT_THROW(writeImage(original, cancelled, cancellation.get_token(), [&cancellation](double progress) {
+    EXPECT_THROW(writeImageWithMetadata(original, cancelled, cancellation.get_token(), [&cancellation](double progress) {
         if (progress > .8) cancellation.request_stop();
     }), std::runtime_error);
     EXPECT_FALSE(QFile::exists(cancelled));
@@ -1072,15 +1137,15 @@ TEST(ImageIo, DetachedScientificReplacementRetainsReferencedPayloads)
         const auto path = directory.filePath(QString("image.") + extension);
         const auto backup = directory.filePath(QString("previous.") + extension);
         const auto original = fixture(PixelType::UInt16);
-        writeImage(original, path);
+        writeImageWithMetadata(original, path);
         ASSERT_TRUE(QFile::copy(path, backup));
         const auto replacement = fixture(PixelType::Float64);
-        writeImage(replacement, path);
+        writeImageWithMetadata(replacement, path);
         expectPixels(readImage(path), replacement);
         expectPixels(readImage(backup), original);
         const auto before = QDir(directory.path()).entryList(QDir::Files);
         std::stop_source cancellation;
-        EXPECT_THROW(writeImage(original, path, cancellation.get_token(), [&cancellation](double progress) {
+        EXPECT_THROW(writeImageWithMetadata(original, path, cancellation.get_token(), [&cancellation](double progress) {
             if (progress > .8) cancellation.request_stop();
         }), std::runtime_error);
         EXPECT_EQ(QDir(directory.path()).entryList(QDir::Files), before);
@@ -1104,7 +1169,7 @@ TEST(ImageIo, DetachedScientificExportsCopyMultiplePayloadChunks)
         QTemporaryDir directory;
         ASSERT_TRUE(directory.isValid());
         const auto path = directory.filePath(QString("image.") + extension);
-        ASSERT_NO_THROW(writeImage(image, path));
+        ASSERT_NO_THROW(writeImageWithMetadata(image, path));
         const auto payloads = QDir(directory.path()).entryList({"*.imagecxx-*"}, QDir::Files);
         ASSERT_EQ(payloads.size(), 1);
         EXPECT_GT(QFileInfo(directory.filePath(payloads.front())).size(), 4 * 1024 * 1024);
@@ -1122,7 +1187,7 @@ TEST(ImageIo, DetachedScientificFailuresCleanUnpublishedPayloads)
         QDir parent(directory.path());
         const auto path = directory.filePath(QString("image.") + extension);
         std::stop_source cancellation;
-        EXPECT_THROW(writeImage(image, path, cancellation.get_token(), [&cancellation](double progress) {
+        EXPECT_THROW(writeImageWithMetadata(image, path, cancellation.get_token(), [&cancellation](double progress) {
             if (progress > .8) cancellation.request_stop();
         }), std::runtime_error);
         EXPECT_TRUE(parent.entryList(QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot).isEmpty());
@@ -1134,7 +1199,7 @@ TEST(ImageIo, DetachedScientificFailuresCleanUnpublishedPayloads)
         ASSERT_EQ(sentinel.write("keep"), 4);
         sentinel.close();
         const auto before = parent.entryList(QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot);
-        EXPECT_THROW(writeImage(image, path), std::runtime_error);
+        EXPECT_THROW(writeImageWithMetadata(image, path), std::runtime_error);
         EXPECT_EQ(parent.entryList(QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot), before);
         ASSERT_TRUE(sentinel.open(QIODevice::ReadOnly));
         EXPECT_EQ(sentinel.readAll(), "keep");
@@ -1149,7 +1214,7 @@ TEST(ImageIo, ObliqueSliceRetainsPatientPlaneThroughDicomAndTiff)
     const auto slice = volume.slice(1);
     ASSERT_TRUE(slice.metadata().attributes.contains("ImageCXX.EmbeddedPlaneOrigin"));
     const auto dicomPath = directory.filePath("slice.dcm");
-    writeImage(slice, dicomPath);
+    writeImageWithMetadata(slice, dicomPath);
     const auto dicom = readImage(dicomPath);
     expectPixels(dicom, slice.clone());
     EXPECT_EQ(dicom.metadata().direction, volume.metadata().direction);
@@ -1157,13 +1222,13 @@ TEST(ImageIo, ObliqueSliceRetainsPatientPlaneThroughDicomAndTiff)
     EXPECT_DOUBLE_EQ(dicom.metadata().axes[1].origin, -3.5);
     EXPECT_DOUBLE_EQ(dicom.metadata().axes[2].origin, 7);
     const auto tiffPath = directory.filePath("slice.tif");
-    writeImage(slice, tiffPath);
+    writeImageWithMetadata(slice, tiffPath);
     const auto tiff = readImage(tiffPath);
     expectPixels(tiff, slice.clone());
     EXPECT_EQ(tiff.metadata().direction, slice.metadata().direction);
     EXPECT_EQ(tiff.metadata().attributes.value("ImageCXX.EmbeddedPlaneOrigin"), slice.metadata().attributes.value("ImageCXX.EmbeddedPlaneOrigin"));
     const auto scientificPath = directory.filePath("slice.mha");
-    EXPECT_THROW(writeImage(slice, scientificPath), std::runtime_error);
+    EXPECT_THROW(writeImageWithMetadata(slice, scientificPath), std::runtime_error);
     EXPECT_FALSE(QFile::exists(scientificPath));
 }
 
@@ -1174,7 +1239,7 @@ TEST(ImageIo, NiftiPreservesStoredTypesAndStandardIntensityCalibration)
         for (const auto extension : {"nii", "nii.gz"}) {
             const auto original = fixture(type);
             const auto path = directory.filePath(pixelTypeName(type) + "." + extension);
-            writeImage(original, path);
+            writeImageWithMetadata(original, path);
             const auto loaded = readImage(path);
             expectPixels(loaded, original);
             EXPECT_DOUBLE_EQ(loaded.metadata().intensityScale, 2);
@@ -1192,7 +1257,7 @@ TEST(ImageIo, NiftiConvertsSpatialAndTimeUnitsWithoutChangingPixels)
     for (std::size_t axis = 0; axis < 3; ++axis) original.metadata().axes[axis].unit = QString::fromUtf8("µm");
     original.metadata().axes[4].unit = "ms";
     const auto path = directory.filePath("microscopy.nii.gz");
-    writeImage(original, path);
+    writeImageWithMetadata(original, path);
     const auto loaded = readImage(path);
     expectPixels(loaded, original);
     EXPECT_EQ(loaded.shape(), original.shape());
@@ -1205,18 +1270,18 @@ TEST(ImageIo, NiftiConvertsSpatialAndTimeUnitsWithoutChangingPixels)
     EXPECT_NEAR(loaded.metadata().axes[4].spacing, .002, 1e-9);
     auto invalid = original;
     invalid.metadata().axes[0].unit = "px";
-    EXPECT_THROW(writeImage(invalid, path), std::runtime_error);
+    EXPECT_THROW(writeImageWithMetadata(invalid, path), std::runtime_error);
     expectPixels(readImage(path), loaded);
     invalid = original;
     invalid.metadata().intensityScale = 0;
-    EXPECT_THROW(writeImage(invalid, directory.filePath("zero-slope.nii")), std::runtime_error);
+    EXPECT_THROW(writeImageWithMetadata(invalid, directory.filePath("zero-slope.nii")), std::runtime_error);
     EXPECT_FALSE(QFile::exists(directory.filePath("zero-slope.nii")));
     auto color = fixture(PixelType::RGB8);
-    EXPECT_THROW(writeImage(color, directory.filePath("calibrated-color.nii")), std::runtime_error);
+    EXPECT_THROW(writeImageWithMetadata(color, directory.filePath("calibrated-color.nii")), std::runtime_error);
     color.metadata().intensityScale = 1;
     color.metadata().intensityOffset = 0;
     const auto colorPath = directory.filePath("color.nii");
-    writeImage(color, colorPath);
+    writeImageWithMetadata(color, colorPath);
     expectPixels(readImage(colorPath), color);
 }
 
@@ -1226,13 +1291,99 @@ TEST(ImageIo, DicomReexportPreservesMonochromeOneAndStoredSamples)
     auto original = fixture(PixelType::UInt16, {5, 3, 1});
     original.metadata().attributes.insert("DICOM.0028,0004", "MONOCHROME1");
     const auto firstPath = directory.filePath("first.dcm");
-    writeImage(original, firstPath);
+    writeImageWithMetadata(original, firstPath);
     const auto first = readImage(firstPath);
     EXPECT_EQ(first.metadata().attributes.value("DICOM.0028,0004"), "MONOCHROME1");
     expectPixels(first, original);
     const auto secondPath = directory.filePath("second.dcm");
-    writeImage(first, secondPath);
+    writeImageWithMetadata(first, secondPath);
     const auto second = readImage(secondPath);
     EXPECT_EQ(second.metadata().attributes.value("DICOM.0028,0004"), "MONOCHROME1");
     expectPixels(second, original);
+}
+
+TEST(ImageIo, DefaultExportRetainsValidatedPhotometricInterpretation)
+{
+    QTemporaryDir directory;
+    for (const auto *photometric : {"MONOCHROME1", "MONOCHROME2", "Patient Name"}) {
+        for (const auto *extension : {"dcm", "tif", "raw"}) {
+            SCOPED_TRACE(photometric);
+            SCOPED_TRACE(extension);
+            auto source = fixture(PixelType::UInt16, {5, 3});
+            source.metadata().attributes.insert("DICOM.0028,0004", photometric);
+            const auto path = directory.filePath(QString(photometric) + "." + extension);
+            ASSERT_NO_THROW(writeImage(source, path));
+            const auto loaded = readImage(path);
+            expectPixels(loaded, source);
+            const auto value = loaded.metadata().attributes.value("DICOM.0028,0004");
+            if (QString(photometric) == "Patient Name") EXPECT_NE(value, photometric);
+            else EXPECT_EQ(value, photometric);
+            EXPECT_FALSE(loaded.metadata().attributes.contains("Experiment"));
+        }
+    }
+}
+
+TEST(ImageIo, DefaultExportRetainsObliquePlaneGeometry)
+{
+    QTemporaryDir directory;
+    auto volume = fixture(PixelType::Int16);
+    volume.metadata().direction = {1, 0, 0, 0, 0, -1, 0, 1, 0};
+    volume.metadata().axes[2].unit = QString::fromUtf8("μm");
+    const auto slice = volume.slice(1);
+    for (const auto *extension : {"dcm", "tif", "raw"}) {
+        SCOPED_TRACE(extension);
+        const auto path = directory.filePath(QString("slice.") + extension);
+        ASSERT_NO_THROW(writeImage(slice, path));
+        const auto loaded = readImage(path);
+        expectPixels(loaded, slice);
+        EXPECT_EQ(loaded.metadata().direction, slice.metadata().direction);
+        if (QString(extension) == "dcm") {
+            EXPECT_DOUBLE_EQ(loaded.metadata().axes[0].origin, 10);
+            EXPECT_DOUBLE_EQ(loaded.metadata().axes[1].origin, -3.5);
+            EXPECT_DOUBLE_EQ(loaded.metadata().axes[2].origin, .007);
+        } else {
+            EXPECT_EQ(loaded.metadata().attributes.value("ImageCXX.EmbeddedPlaneOrigin"),
+                      slice.metadata().attributes.value("ImageCXX.EmbeddedPlaneOrigin"));
+            EXPECT_EQ(loaded.metadata().attributes.value("ImageCXX.EmbeddedPlaneZUnit"), "um");
+        }
+    }
+    auto invalid = slice.clone();
+    invalid.metadata().attributes.insert("ImageCXX.EmbeddedPlaneOrigin", "[1,2,3,\"Patient Name\"]");
+    invalid.metadata().attributes.insert("ImageCXX.EmbeddedPlaneZUnit", "Patient ID");
+    const auto path = directory.filePath("invalid.tif");
+    writeImage(invalid, path);
+    const auto loaded = readImage(path);
+    EXPECT_FALSE(loaded.metadata().attributes.contains("ImageCXX.EmbeddedPlaneOrigin"));
+    EXPECT_FALSE(loaded.metadata().attributes.contains("ImageCXX.EmbeddedPlaneZUnit"));
+}
+
+TEST(ImageIo, DefaultExportNormalizesUnicodeMicrometerAndMicrosecondUnits)
+{
+    for (const auto *micro : {"µ", "μ"}) {
+        QTemporaryDir directory;
+        for (const auto *extension : {"tif", "raw", "nii", "dcm"}) {
+            SCOPED_TRACE(micro);
+            SCOPED_TRACE(extension);
+            auto source = fixture(PixelType::UInt16, QString(extension) == "dcm"
+                ? std::vector<std::size_t>{5, 3} : std::vector<std::size_t>{5, 3, 2, 1, 2});
+            for (std::size_t axis = 0; axis < std::min<std::size_t>(3, source.shape().size()); ++axis)
+                source.metadata().axes[axis].unit = QString::fromUtf8(micro) + "m";
+            if (source.shape().size() == 5) source.metadata().axes[4].unit = QString::fromUtf8(micro) + "s";
+            const auto path = directory.filePath(QString("image.") + extension);
+            ASSERT_NO_THROW(writeImage(source, path));
+            const auto loaded = readImage(path);
+            expectPixels(loaded, source);
+            if (QString(extension) == "nii" || QString(extension) == "dcm") {
+                EXPECT_EQ(loaded.metadata().axes[0].unit, "mm");
+                EXPECT_NEAR(loaded.metadata().axes[0].spacing, .00025, 1e-10);
+                if (QString(extension) == "nii") {
+                    EXPECT_EQ(loaded.metadata().axes[4].unit, "s");
+                    EXPECT_NEAR(loaded.metadata().axes[4].spacing, .000002, 1e-12);
+                }
+            } else {
+                EXPECT_EQ(loaded.metadata().axes[0].unit, "um");
+                EXPECT_EQ(loaded.metadata().axes[4].unit, "us");
+            }
+        }
+    }
 }

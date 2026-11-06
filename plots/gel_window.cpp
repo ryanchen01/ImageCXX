@@ -2,6 +2,7 @@
 #include <QCoreApplication>
 #include "plots/plot_widget.h"
 #include "processing/processing.h"
+#include "core/csv.h"
 #include <QComboBox>
 #include <QFileDialog>
 #include <QHeaderView>
@@ -103,12 +104,12 @@ GelWindow::GelWindow(std::vector<LineProfile> profiles, QString title, bool dark
         for (int row = -1; row < results_->rowCount(); ++row) {
             QStringList fields{row < 0 ? tr("Source") : windowTitle(),
                 row < 0 ? tr("Polarity") : (darkBands ? tr("Dark bands") : tr("Bright bands"))};
-            for (auto &field : fields) { field.replace('"', "\"\""); field = '"' + field + '"'; }
+            for (auto &field : fields) field = detail::spreadsheetCsvCell(std::move(field));
             for (int col = 0; col < results_->columnCount(); ++col) {
                 const auto value = row < 0 ? results_->headerData(col, Qt::Horizontal) : results_->index(row, col).data();
                 QString text = value.metaType().id() == QMetaType::Double
                     ? QString::number(value.toDouble(), 'g', std::numeric_limits<double>::max_digits10) : value.toString();
-                text.replace('"', "\"\""); fields.append('"' + text + '"');
+                fields.append(detail::spreadsheetCsvCell(std::move(text)));
             }
             csv += fields.join(',').toUtf8() + '\n';
         }

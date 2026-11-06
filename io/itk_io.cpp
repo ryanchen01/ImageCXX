@@ -1,6 +1,7 @@
 #include "io/image_io.h"
 #include <QCoreApplication>
 #include "io/io_detail.h"
+#include "core/memory.h"
 
 #include <QFile>
 #include <QFileInfo>
@@ -40,6 +41,7 @@ itk::ImageIOBase::Pointer scientificAdapter(const QString &path)
 Image readScientific(const QString &path, std::stop_token stop, IoProgress progress)
 {
     detail::checkIo(stop, progress, 0);
+    auto importLock = detail::lockMemoryAllocation(stop);
     try {
         auto io = scientificAdapter(path);
         io->SetFileName(QFile::encodeName(path).toStdString());
@@ -217,6 +219,11 @@ Image readScientific(const QString &path, std::stop_token stop, IoProgress progr
             for (auto it = saved.attributes.cbegin(); it != saved.attributes.cend(); ++it)
                 if (!metadata.attributes.contains(it.key())) metadata.attributes.insert(it.key(), it.value());
         }
+        const auto bytes = detail::checkedImageBytes(type, shape);
+        const bool reorder = dimensions == 5 && !ownMetadata && shape[3] > 1 && shape[4] > 1;
+        if (reorder && bytes > std::numeric_limits<std::size_t>::max() / 2)
+            throw std::overflow_error(QCoreApplication::translate("ItkIo", "Scientific image exceeds the addressable buffer size").toStdString());
+        detail::checkMemoryBudget(reorder ? bytes * 2 : bytes, detail::availableMemoryBytes());
         auto image = Image::allocate(type, shape, metadata);
         io->SetIORegion(region);
         detail::checkIo(stop, progress, 0.1);

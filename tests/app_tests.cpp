@@ -48,13 +48,16 @@ TEST(Batch, ProducesTiffReportsFailuresAndNeverOverwrites)
 {
     QTemporaryDir directory;
     auto image = Image::allocate(PixelType::UInt8, {8, 8});
+    image.metadata().attributes.insert("DICOM.0010,0010", "Patient Name");
     image.mutableData()[0] = std::byte{200};
-    const auto source = directory.filePath("input.tif"); writeImage(image, source);
+    const auto source = directory.filePath("input.tif"); writeImage(image, source, {}, {}, true);
     const auto targetDirectory = directory.filePath("outputs");
     const auto result = runBatch({source, directory.filePath("missing.tif")}, targetDirectory,
         "process.threshold", {{"lower", 100}, {"upper", 255}});
     ASSERT_EQ(result.outputs.size(), 1); EXPECT_EQ(result.errors.size(), 1);
     const auto output = readImage(result.outputs.front());
+    EXPECT_FALSE(output.metadata().attributes.contains("DICOM.0010,0010"));
+    EXPECT_FALSE(QFileInfo(result.outputs.front()).fileName().contains("input"));
     EXPECT_DOUBLE_EQ(output.sample(0, 0), 255); EXPECT_DOUBLE_EQ(output.sample(1, 0), 0);
     const auto duplicate = runBatch({source}, targetDirectory, "process.threshold", {{"lower", 0}, {"upper", 100}});
     EXPECT_TRUE(duplicate.outputs.empty()); EXPECT_EQ(duplicate.errors.size(), 1);

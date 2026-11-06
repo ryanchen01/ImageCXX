@@ -1,6 +1,7 @@
 #include "processing/processing.h"
 #include <QCoreApplication>
 #include "processing_detail.h"
+#include "core/memory.h"
 
 #include <itkBinaryBallStructuringElement.h>
 #include <itkBinaryDilateImageFilter.h>
@@ -170,6 +171,15 @@ Image runVolume(const Image &source, std::size_t volume, const ProcessingOptions
                 throw std::overflow_error(QCoreApplication::translate("Processing", "Resampled image exceeds the addressable buffer size").toStdString());
             outputBytes *= outputSize[axis];
         }
+        const auto volumes = source.pixelCount() / count;
+        if (volumes > std::numeric_limits<std::size_t>::max() - 2)
+            throw std::overflow_error(QCoreApplication::translate("Processing", "Resampled image exceeds the addressable buffer size").toStdString());
+        // After the first volume, the final result is already allocated and
+        // excluded from available memory. Only the ITK output and copied block remain.
+        const auto buffers = volumes == 1 || volume > 0 ? std::size_t{2} : volumes + 2;
+        if (outputBytes > std::numeric_limits<std::size_t>::max() / buffers)
+            throw std::overflow_error(QCoreApplication::translate("Processing", "Resampled image exceeds the addressable buffer size").toStdString());
+        detail::checkMemoryBudget(outputBytes * buffers, detail::availableMemoryBytes());
         filter->SetInput(input); filter->SetSize(outputSize);
         filter->SetOutputSpacing(outputSpacing); filter->SetOutputOrigin(origin); filter->SetOutputDirection(direction);
         filter->SetTransform(itk::IdentityTransform<double, Dimension>::New());
@@ -228,6 +238,10 @@ Image process(const Image &image, const ProcessingOptions &options, std::stop_to
     }
     if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("Processing", "Processing cancelled").toStdString());
     if (progress) progress(0.0);
+    auto allocationLock = options.operation == Operation::Resample
+        ? detail::lockMemoryAllocation(stop) : std::unique_lock<std::recursive_timed_mutex>{};
+    if (options.operation == Operation::Resample && (!image.contiguous() || !image.data()))
+        detail::checkMemoryBudget(image.byteCount(), detail::availableMemoryBytes());
     const Image source = image.materialized();
     const auto volumePixels = image.width() * image.height() * (dimensions == 3 ? image.depth() : 1);
     const auto volumes = image.pixelCount() / volumePixels;

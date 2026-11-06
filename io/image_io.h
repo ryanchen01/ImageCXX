@@ -30,7 +30,7 @@ RawImportOptions rawImportOptionsFromJson(const QJsonObject &description);
 Image readImage(const QString &path, const std::optional<RawImportOptions> &raw = {},
                 std::stop_token stop = {}, IoProgress progress = {});
 void writeImage(const Image &image, const QString &path,
-                std::stop_token stop = {}, IoProgress progress = {});
+                std::stop_token stop = {}, IoProgress progress = {}, bool includeFullMetadata = false);
 
 // All files must belong to one scalar series with consistent geometry and encoding.
 // The reader orders slices by their patient-space position, not file name.

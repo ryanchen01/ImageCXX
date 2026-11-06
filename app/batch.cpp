@@ -26,7 +26,7 @@ BatchResult runBatch(const QStringList &inputs, const QString &directory, const 
     for (qsizetype i = 0; i < inputs.size(); ++i) {
         if (stop.stop_requested()) break;
         const QString input = inputs[i];
-        const QString target = QDir(directory).filePath(QFileInfo(input).completeBaseName() + "_" + suffix + ".tif");
+        const QString target = QDir(directory).filePath(QStringLiteral("image_%1_%2.tif").arg(i + 1).arg(suffix));
         QString temporary;
         try {
             if (targets.contains(target) || QFileInfo::exists(target))
@@ -39,7 +39,7 @@ BatchResult runBatch(const QStringList &inputs, const QString &directory, const 
             auto filtered = process(image, imageOptions, stop, [update](double p) { update(.2 + p * .6); });
             if (stop.stop_requested()) break;
             temporary = QDir(directory).filePath(".imagecxx-" + QUuid::createUuid().toString(QUuid::WithoutBraces) + ".tif");
-            writeImage(filtered, temporary, stop, [update](double p) { update(.8 + p * .2); });
+            writeImage(filtered, temporary, stop, [update](double p) { update(.8 + p * .2); }, false);
             if (stop.stop_requested()) { QFile::remove(temporary); break; }
             if (!QFile::rename(temporary, target)) throw std::runtime_error(QCoreApplication::translate("Batch", "Cannot publish batch output").toStdString());
             result.outputs.append(target);

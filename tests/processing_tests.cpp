@@ -1,3 +1,4 @@
+#include "core/csv.h"
 #include "processing/processing.h"
 #include "core/memory.h"
 #include <gtest/gtest.h>
@@ -796,4 +797,23 @@ TEST(ItkProcessing, CancellationAndValidationFailWithoutPublishingResult) {
     double progress = -1;
     process(image, options, {}, [&progress](double value) { progress = value; });
     EXPECT_DOUBLE_EQ(progress, 1);
+}
+
+TEST(ItkProcessing, ResampleRejectsUnbudgetedOutputBeforeItkAllocation) {
+    auto image = Image::allocate(PixelType::UInt8, {5, 5});
+    ProcessingOptions options;
+    options.operation = Operation::Resample;
+    options.outputSpacing = {1e-6, 1e-6};
+    EXPECT_THROW(process(image, options), std::length_error);
+}
+
+TEST(CsvExport, FormulaPrefixesRemainTextAndOrdinaryFieldsRoundTrip) {
+    for (const QString prefix : {QStringLiteral("="), QStringLiteral("+"), QStringLiteral("-"), QStringLiteral("@"), QStringLiteral("\t=")})
+        EXPECT_EQ(detail::spreadsheetCsvCell(prefix + QStringLiteral("SUM(1,2)")),
+                  QStringLiteral("\"Text: ") + prefix + QStringLiteral("SUM(1,2)\""));
+    EXPECT_EQ(detail::spreadsheetCsvCell(QStringLiteral("＝SUM(1,2)")),
+              QStringLiteral("\"Text: ＝SUM(1,2)\""));
+    EXPECT_EQ(detail::spreadsheetCsvCell(QStringLiteral("plain, \"quoted\" ☃")),
+              QStringLiteral("\"plain, \"\"quoted\"\" ☃\""));
+    EXPECT_EQ(detail::spreadsheetCsvCell(QStringLiteral("-2.5")), QStringLiteral("\"-2.5\""));
 }
