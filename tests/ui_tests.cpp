@@ -71,6 +71,12 @@
 #include <QTreeWidget>
 
 using namespace imagecxx;
+
+void writeImageWithMetadata(const Image &image, const QString &path, std::stop_token stop = {},
+                            IoProgress progress = {}, bool includeFullMetadata = true)
+{
+    imagecxx::writeImage(image, path, stop, progress, includeFullMetadata);
+}
 namespace {
 void sendKey(QWidget *target, Qt::Key key, Qt::KeyboardModifiers modifiers = {})
 {
@@ -109,13 +115,19 @@ void chooseDrawingColor(MainWindow &window, QColor color, bool accept = true)
     window.commands().execute("edit.color");
 }
 
-QString saveImage(MainWindow &window, const QString &path)
+QString saveImage(MainWindow &window, const QString &path, bool includeFullMetadata = false)
 {
     QString error;
     QTimer picker;
     QObject::connect(&picker, &QTimer::timeout, &window, [&] {
         auto *modal = QApplication::activeModalWidget();
         if (auto *dialog = qobject_cast<QFileDialog *>(modal)) {
+            auto *checkbox = dialog->findChild<QCheckBox *>("includeFullMetadata");
+            EXPECT_NE(checkbox, nullptr);
+            if (checkbox) {
+                EXPECT_FALSE(checkbox->isChecked());
+                checkbox->setChecked(includeFullMetadata);
+            }
             dialog->setDirectory(QFileInfo(path).absolutePath());
             dialog->selectFile(QFileInfo(path).fileName());
             if (auto *name = dialog->findChild<QLineEdit *>("fileNameEdit")) name->setText(QFileInfo(path).fileName());
@@ -812,7 +824,7 @@ TEST(Desktop, RoiMeasurementPlotsPreserveCalibrationScopeAndExportSnapshotStatis
         SCOPED_TRACE(overTime);
         MainWindow window;
         ImageMetadata metadata;
-        metadata.name = "Sample,\"A\"";
+        metadata.name = "=Sample,\"A\"";
         metadata.axes = {{"X", .5, 0, "um"}, {"Y", .25, 0, "um"}, {"Z", 2, 10, "um"},
                          {"C", 1, 0, ""}, {"T", .5, 7, "s"}};
         metadata.intensityScale = 2; metadata.intensityOffset = 3; metadata.intensityUnit = "a.u.";
@@ -879,7 +891,7 @@ TEST(Desktop, RoiMeasurementPlotsPreserveCalibrationScopeAndExportSnapshotStatis
             const auto &row = rows[i + 1];
             ASSERT_TRUE(row.startsWith('"') && row.endsWith('"'));
             const auto fields = row.mid(1, row.size() - 2).split("\",\""); ASSERT_EQ(fields.size(), 15);
-            EXPECT_EQ(fields[0], "Sample,\"\"A\"\""); EXPECT_EQ(fields[1], "ROI,\"\"one\"\"");
+            EXPECT_EQ(fields[0], "Text: =Sample,\"\"A\"\""); EXPECT_EQ(fields[1], "ROI,\"\"one\"\"");
             EXPECT_EQ(fields[2].toInt(), overTime ? 2 : i + 1); EXPECT_EQ(fields[3].toInt(), 2);
             EXPECT_EQ(fields[4].toInt(), overTime ? i + 1 : 2);
             EXPECT_DOUBLE_EQ(fields[5].toDouble(), points[i].x());
@@ -1080,17 +1092,17 @@ TEST(Desktop, OverlappingSavesAreRejectedAndReservationsReleaseAfterCancellation
         auto original = Image::allocate(PixelType::UInt16, {4, 4});
         original.mutableData()[0] = std::byte{11};
         auto *doc = window.addDocument(original);
-        EXPECT_TRUE(saveImage(window, path).isEmpty());
+        EXPECT_TRUE(saveImage(window, path, true).isEmpty());
         auto newer = Image::allocate(PixelType::UInt16, {2, 2});
         newer.mutableData()[0] = std::byte{22};
         doc->replaceImage(newer, "New revision");
-        EXPECT_TRUE(saveImage(window, directory.filePath("./" + fileName)).contains("still being saved"));
+        EXPECT_TRUE(saveImage(window, directory.filePath("./" + fileName), true).contains("still being saved"));
         if (cancel) window.jobs().cancelAll(); else release.store(true);
         ASSERT_TRUE(finishJobs(window));
         EXPECT_TRUE(doc->modified);
         if (cancel) EXPECT_FALSE(QFileInfo::exists(path));
         else EXPECT_DOUBLE_EQ(readImage(path).sample(0, 0), 11);
-        EXPECT_TRUE(saveImage(window, path).isEmpty());
+        EXPECT_TRUE(saveImage(window, path, true).isEmpty());
         ASSERT_TRUE(finishJobs(window));
         EXPECT_FALSE(doc->modified);
         const auto saved = readImage(path);
@@ -1111,13 +1123,32 @@ TEST(Desktop, DicomSaveRetainsNestedMetadataAfterDocumentIsMarkedClean)
     auto *document = window.addDocument(Image::allocate(PixelType::UInt16, {4, 4}, metadata));
     document->modified = true;
     const auto path = directory.filePath("saved.dcm");
-    ASSERT_TRUE(saveImage(window, path).isEmpty());
+    ASSERT_TRUE(saveImage(window, path, true).isEmpty());
     ASSERT_TRUE(finishJobs(window));
     EXPECT_FALSE(document->modified);
     EXPECT_EQ(document->image.metadata().sourcePath, path);
     const auto saved = readImage(path);
     EXPECT_EQ(saved.metadata().dicomSequences, metadata.dicomSequences);
     EXPECT_EQ(saved.metadata().attributes.value("Experiment"), "Preserve this too");
+}
+
+TEST(Desktop, SaveImageOmitsPatientMetadataByDefault)
+{
+    QTemporaryDir directory;
+    ImageMetadata metadata;
+    metadata.name = "Patient Name";
+    metadata.axes = {{"X", 1, 0, "mm"}, {"Y", 1, 0, "mm"}};
+    metadata.attributes.insert("DICOM.0010,0010", "Patient Name");
+    MainWindow window;
+    auto *document = window.addDocument(Image::allocate(PixelType::UInt16, {4, 4}, metadata));
+    document->modified = true;
+    const auto path = directory.filePath("safe.tif");
+    ASSERT_TRUE(saveImage(window, path).isEmpty());
+    ASSERT_TRUE(finishJobs(window));
+    const auto saved = readImage(path);
+    EXPECT_FALSE(saved.metadata().attributes.contains("DICOM.0010,0010"));
+    EXPECT_NE(saved.metadata().name, metadata.name);
+    EXPECT_TRUE(document->modified);
 }
 
 TEST(Desktop, HiddenPanelsDeferRefreshAndPropertiesOnlyTrackMetadataChanges)
@@ -1832,7 +1863,7 @@ TEST(Desktop, NiftiPropertiesShowOnlyReadableHeaderFields)
         metadata.axes = {{"X", .5, 0, "mm"}, {"Y", .75, 0, "mm"}, {"Z", 1, 0, "mm"}};
         metadata.attributes.insert("ITK_FileNotes", "Example header");
         const auto path = directory.filePath("properties." + extension);
-        writeImage(Image::allocate(PixelType::UInt16, {4, 4, 2}, metadata), path);
+        writeImageWithMetadata(Image::allocate(PixelType::UInt16, {4, 4, 2}, metadata), path);
         auto image = readImage(path);
         ASSERT_TRUE(image.metadata().attributes.contains("nifti_type"));
         image.metadata().attributes.insert("Experiment", "Unrelated metadata");
@@ -2073,7 +2104,7 @@ TEST(Desktop, WorkerOpensImageAndPublishesOnUiThread)
     QTemporaryDir directory;
     auto image = Image::allocate(PixelType::Float32, {12, 10, 3});
     reinterpret_cast<float *>(image.mutableData())[2 * 12 * 10 + 7 * 12 + 4] = -17.25f;
-    writeImage(image, directory.filePath("input.tif"));
+    writeImageWithMetadata(image, directory.filePath("input.tif"));
     MainWindow window; window.openPaths({directory.filePath("input.tif")});
     QElapsedTimer timer; timer.start();
     while ((window.jobs().busy() || !window.activeDocument()) && timer.elapsed() < 5000) { QCoreApplication::processEvents(); QThread::msleep(2); }
@@ -2110,7 +2141,7 @@ TEST(Desktop, ImportMultipleSeriesAndOrdinaryImagesThroughLauncherAndImageWindow
     auto paths = writeImportSeries(directory.path(), 1);
     paths.append(writeImportSeries(directory.filePath("nested"), 2));
     const auto raster = directory.filePath("ordinary.tif");
-    writeImage(Image::allocate(PixelType::UInt8, {4, 4}), raster);
+    writeImageWithMetadata(Image::allocate(PixelType::UInt8, {4, 4}), raster);
     paths.append(raster);
     for (int mode : {0, 1, 2}) {
         MainWindow window; window.show();
@@ -2143,7 +2174,7 @@ TEST(Desktop, InvalidDicomSeriesDoesNotBlockOtherImports)
     paths.append(duplicate);
     paths.append(writeImportSeries(directory.path(), 2));
     const auto raster = directory.filePath("ordinary.tif");
-    writeImage(Image::allocate(PixelType::UInt8, {4, 4}), raster);
+    writeImageWithMetadata(Image::allocate(PixelType::UInt8, {4, 4}), raster);
     paths.append(raster);
     MainWindow window;
     QStringList errors;
@@ -2222,7 +2253,7 @@ TEST(Desktop, DroppedMetaImagePayloadOpensOnlyThroughItsHeader)
     ASSERT_TRUE(QDir(directory.path()).mkpath("payloads"));
     const auto dicom = writeImportSeries(directory.path(), 1).front();
     const auto raw = directory.filePath("payloads/scan data.raw");
-    writeImage(Image::allocate(PixelType::UInt16, {4, 4, 1}), raw);
+    writeImageWithMetadata(Image::allocate(PixelType::UInt16, {4, 4, 1}), raw);
     QFile header(directory.filePath("different-name.MHD"));
     ASSERT_TRUE(header.open(QIODevice::WriteOnly));
     header.write("ObjectType = Image\nNDims = 3\nBinaryData = True\nBinaryDataByteOrderMSB = False\n"
@@ -2231,7 +2262,7 @@ TEST(Desktop, DroppedMetaImagePayloadOpensOnlyThroughItsHeader)
     header.close();
     // A same-named raw file in another directory is still a separate image.
     const auto unrelated = directory.filePath("scan data.raw");
-    writeImage(Image::allocate(PixelType::UInt16, {4, 4}), unrelated);
+    writeImageWithMetadata(Image::allocate(PixelType::UInt16, {4, 4}), unrelated);
     for (bool sidecar : {true, false}) {
         if (!sidecar) ASSERT_TRUE(QFile::remove(raw + ".json"));
         for (int mode : {0, 1, 2}) {
@@ -2273,7 +2304,7 @@ TEST(Desktop, ExcessiveDicomMemoryDoesNotBlockOrdinaryImages)
     ASSERT_TRUE(file.saveFile(QFile::encodeName(path).constData(), EXS_LittleEndianExplicit).good());
     EXPECT_THROW(readDicom(path), std::length_error);
     const auto raster = directory.filePath("ordinary.tif");
-    writeImage(Image::allocate(PixelType::UInt8, {4, 4}), raster);
+    writeImageWithMetadata(Image::allocate(PixelType::UInt8, {4, 4}), raster);
     MainWindow window;
     QString error;
     QTimer dismiss;
@@ -2294,8 +2325,8 @@ TEST(Desktop, ExplicitRawAndOverlappingFolderImportOnlyOnce)
 {
     QTemporaryDir directory;
     const auto raw = directory.filePath("image.raw");
-    writeImage(Image::allocate(PixelType::UInt16, {4, 4}), raw);
-    writeImage(Image::allocate(PixelType::UInt8, {4, 4}), directory.filePath("ordinary.tif"));
+    writeImageWithMetadata(Image::allocate(PixelType::UInt16, {4, 4}), raw);
+    writeImageWithMetadata(Image::allocate(PixelType::UInt8, {4, 4}), directory.filePath("ordinary.tif"));
     MainWindow window;
     window.openPaths({raw, directory.path(), raw});
     ASSERT_TRUE(finishJobs(window));
@@ -2492,7 +2523,7 @@ TEST(Desktop, CancellingRawImportContinuesOpeningOtherFiles)
     const auto imagePath = directory.filePath("next.tif");
     auto image = Image::allocate(PixelType::UInt8, {4, 4});
     image.mutableData()[15] = std::byte{173};
-    writeImage(image, imagePath);
+    writeImageWithMetadata(image, imagePath);
     for (bool onDocument : {false, true}) {
         MainWindow window; window.show();
         auto *document = onDocument ? window.addDocument(Image::allocate(PixelType::UInt8, {4, 4})) : nullptr;
@@ -2539,7 +2570,7 @@ TEST(Desktop, UnsupportedFileInRawDropReportsItsNameAndOtherImagesStillOpen)
     const auto imagePath = directory.filePath("next.tif");
     auto image = Image::allocate(PixelType::UInt8, {4, 4});
     image.mutableData()[15] = std::byte{173};
-    writeImage(image, imagePath);
+    writeImageWithMetadata(image, imagePath);
     paths.append(imagePath);
     MainWindow window; window.show();
     int cancelled = 0;
@@ -2576,7 +2607,7 @@ TEST(Desktop, RawWithSidecarOpensWithoutPrompting)
     const auto path = directory.filePath("with-layout.bin");
     auto original = Image::allocate(PixelType::Float32, {3, 2, 2});
     original.setValue(std::array<std::size_t, 3>{1, 1, 1}, -2.5);
-    writeImage(original, path);
+    writeImageWithMetadata(original, path);
     MainWindow window;
     bool prompted = false;
     QTimer guard;
@@ -2929,7 +2960,7 @@ TEST(Desktop, MeasurementsWarnOnWindowCloseAndVisibleAppExitUntilExported)
         QTemporaryDir directory;
         MainWindow window;
         auto image = Image::allocate(PixelType::UInt8, {8, 8});
-        image.metadata().name = "Measured image";
+        image.metadata().name = exportCsv ? "=Measured image" : "Measured image";
         std::fill_n(image.mutableData(), image.byteCount(), std::byte{7});
         auto *document = window.addDocument(std::move(image));
         window.executeCommand("analyze.measure");
@@ -2951,7 +2982,7 @@ TEST(Desktop, MeasurementsWarnOnWindowCloseAndVisibleAppExitUntilExported)
             window.executeCommand("results.export");
             QFile file(output); ASSERT_TRUE(file.open(QIODevice::ReadOnly));
             const auto csv = file.readAll();
-            EXPECT_TRUE(csv.contains("Measured image"));
+            EXPECT_TRUE(csv.contains("\"Text: =Measured image\""));
             EXPECT_TRUE(csv.contains("Slice Z1 C1 T1"));
             const auto rows = csv.trimmed().split('\n');
             ASSERT_EQ(rows.size(), 2);
@@ -3105,6 +3136,9 @@ TEST(Desktop, SavingPixelsWithRoisClearsModifiedState)
     const auto output = directory.filePath("saved.tif");
     QTimer::singleShot(0, &window, [output] {
         for (auto *widget : QApplication::topLevelWidgets()) if (auto *dialog = qobject_cast<QFileDialog *>(widget)) {
+            auto *checkbox = dialog->findChild<QCheckBox *>("includeFullMetadata");
+            ASSERT_NE(checkbox, nullptr);
+            checkbox->setChecked(true);
             dialog->setDirectory(QFileInfo(output).absolutePath());
             dialog->selectFile(QFileInfo(output).fileName());
             if (auto *name = dialog->findChild<QLineEdit *>("fileNameEdit")) name->setText(QFileInfo(output).fileName());
@@ -3310,7 +3344,7 @@ TEST(Desktop, GelCommandsPlotSnapshotMeasureLabelRemoveAndExportBands)
 {
     MainWindow window;
     auto image = Image::allocate(PixelType::UInt16, {6, 9, 2, 2, 2});
-    image.metadata().name = "Gel";
+    image.metadata().name = "=Gel";
     image.metadata().axes[1].spacing = .25; image.metadata().axes[1].unit = "mm";
     image.metadata().intensityScale = 2; image.metadata().intensityOffset = 3; image.metadata().intensityUnit = "a.u.";
     const std::array signal{0, 2, 4, 2, 0, 0, 6, 0, 0};
@@ -3383,6 +3417,7 @@ TEST(Desktop, GelCommandsPlotSnapshotMeasureLabelRemoveAndExportBands)
     picker.start(1); plot->findChild<QPushButton *>("gelExport")->click(); picker.stop();
     QFile csv(path); ASSERT_TRUE(csv.open(QIODevice::ReadOnly));
     const auto contents = csv.readAll(); EXPECT_TRUE(contents.contains("Percent of lane"));
+    EXPECT_TRUE(contents.contains("\"Text: =Gel"));
     EXPECT_TRUE(contents.contains("\"4\",\"100\",\"a.u.·mm\""));
     EXPECT_EQ(contents.count('\n'), 3);
 }

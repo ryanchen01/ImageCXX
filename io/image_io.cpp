@@ -1,6 +1,7 @@
 #include "io/image_io.h"
 #include <QCoreApplication>
 #include "io/io_detail.h"
+#include "core/memory.h"
 
 #include <QFile>
 #include <QFileInfo>
@@ -213,6 +214,8 @@ Image readImage(const QString &path, const std::optional<RawImportOptions> &raw,
     detail::checkIo(stop, progress, 0);
     const QFileInfo info(path);
     const QString suffix = info.suffix().toLower();
+    auto importLock = (suffix == "dcm" || suffix == "dicom" || suffix.isEmpty())
+        ? std::unique_lock<std::recursive_timed_mutex>{} : detail::lockMemoryAllocation(stop);
     Image image;
     if (raw || suffix == "raw" || suffix == "bin") {
         RawImportOptions options;
@@ -230,11 +233,15 @@ Image readImage(const QString &path, const std::optional<RawImportOptions> &raw,
              (options.byteOrder == ByteOrder::BigEndian && std::endian::native == std::endian::little));
         if (options.memoryMap && !swap) image = Image::map(path, options.pixelType, options.shape, options.headerBytes, options.metadata);
         else {
-            image = Image::allocate(options.pixelType, options.shape, options.metadata);
+            const auto bytes = detail::checkedImageBytes(options.pixelType, options.shape);
             QFile file(path);
             if (!file.open(QIODevice::ReadOnly) || options.headerBytes > static_cast<std::size_t>(file.size()) ||
                 !file.seek(static_cast<qint64>(options.headerBytes)))
                 throw std::runtime_error(QCoreApplication::translate("ImageIo", "Cannot open raw image").toStdString());
+            if (bytes > static_cast<std::size_t>(file.size()) - options.headerBytes)
+                throw std::runtime_error(QCoreApplication::translate("ImageIo", "Raw image is truncated").toStdString());
+            detail::checkMemoryBudget(bytes, detail::availableMemoryBytes());
+            image = Image::allocate(options.pixelType, options.shape, options.metadata);
             auto *destination = reinterpret_cast<char *>(image.mutableData());
             std::size_t remaining = image.byteCount();
             while (remaining) {
@@ -347,6 +354,7 @@ Image readImage(const QString &path, const std::optional<RawImportOptions> &raw,
             metadata.axes[1].spacing = factor / yResolution;
             if (resolutionUnit != RESUNIT_NONE) metadata.axes[0].unit = metadata.axes[1].unit = "mm";
         }
+        detail::checkMemoryBudget(detail::checkedImageBytes(type, shape), detail::availableMemoryBytes());
         image = Image::allocate(type, shape, metadata);
         const std::size_t rowBytes = width * bytesPerPixel(type), pageBytes = rowBytes * height;
         const bool imageJ = metadata.attributes.contains("TIFF.ImageJ");
@@ -387,6 +395,7 @@ Image readImage(const QString &path, const std::optional<RawImportOptions> &raw,
                 if (tileWidth > static_cast<std::size_t>(tileSize) / bytesPerPixel(type) / tileHeight
                     || static_cast<std::size_t>(tileWidth) * bytesPerPixel(type) * tileHeight != static_cast<std::size_t>(tileSize))
                     throw std::runtime_error(QCoreApplication::translate("ImageIo", "Invalid TIFF tile buffer size").toStdString());
+                detail::checkMemoryBudget(static_cast<std::size_t>(tileSize), detail::availableMemoryBytes());
                 std::vector<std::byte> tile(static_cast<std::size_t>(tileSize));
                 for (std::size_t y = 0; y < height; y += tileHeight) {
                     detail::checkIo(stop, {}, 0);
@@ -464,12 +473,34 @@ Image readImage(const QString &path, const std::optional<RawImportOptions> &raw,
     return image;
 }
 
-void writeImage(const Image &input, const QString &path, std::stop_token stop, IoProgress progress)
+void writeImage(const Image &input, const QString &path, std::stop_token stop, IoProgress progress, bool includeFullMetadata)
 {
     if (input.empty()) throw std::runtime_error(QCoreApplication::translate("ImageIo", "Cannot save an empty image").toStdString());
     detail::checkIo(stop, progress, 0);
     const QString suffix = QFileInfo(path).suffix().toLower();
-    const Image image = input.materialized();
+    Image image = input.materialized();
+    if (!includeFullMetadata) {
+        auto metadata = image.metadata();
+        metadata.name.clear();
+        metadata.sourcePath.clear();
+        metadata.intensityUnit.clear();
+        metadata.attributes.clear();
+        metadata.dicomSequences = {};
+        metadata.originalMetadata = {};
+        for (auto &channel : metadata.channels) channel.name.clear();
+        const QStringList names{QStringLiteral("X"), QStringLiteral("Y"), QStringLiteral("Z"),
+                                QStringLiteral("C"), QStringLiteral("T")};
+        for (std::size_t axis = 0; axis < image.shape().size(); ++axis) {
+            auto &value = metadata.axes[axis];
+            value.name = axis < 5 ? names[static_cast<int>(axis)] : QStringLiteral("Axis%1").arg(axis);
+            if (!QStringList{QStringLiteral("px"), QStringLiteral("m"), QStringLiteral("cm"),
+                             QStringLiteral("mm"), QStringLiteral("um"), QStringLiteral("nm"),
+                             QStringLiteral("s"), QStringLiteral("ms"), QStringLiteral("us"),
+                             QStringLiteral("min"), QString()}.contains(value.unit))
+                value.unit.clear();
+        }
+        image.metadata() = std::move(metadata);
+    }
     if (suffix == "mhd" || suffix == "mha" || suffix == "nii" || suffix == "gz" || suffix == "nrrd" || suffix == "nhdr") {
         writeScientific(image, path, stop, progress);
     } else if (suffix == "dcm" || suffix == "dicom") {

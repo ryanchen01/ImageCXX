@@ -6,6 +6,7 @@
 #include "plots/plot_widget.h"
 #include "processing/processing.h"
 #include "core/memory.h"
+#include "core/csv.h"
 #include "ui/overlay_window.h"
 #include "plots/gel_window.h"
 #include <dcmtk/dcmdata/dctag.h>
@@ -231,7 +232,16 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     }});
     commands_.add({"file.save", tr("Save image as..."), QT_TRANSLATE_NOOP("CommandCategories", "File"), QKeySequence::Save, true, {}, [this](const QVariantMap &) {
         const QPointer<DocumentWidget> document = activeDocument(); if (!document) return;
-        const auto path = QFileDialog::getSaveFileName(this, tr("Save image"), (document->image.metadata().name.isEmpty() ? tr("Untitled") : QFileInfo(document->image.metadata().name).completeBaseName()) + ".tif", imageSaveFilter());
+        QFileDialog dialog(this, tr("Save image"),
+            tr("Exported image.tif"),
+            imageSaveFilter());
+        dialog.setAcceptMode(QFileDialog::AcceptSave);
+        dialog.setOption(QFileDialog::DontUseNativeDialog);
+        QCheckBox includeMetadata(tr("Include full metadata"), &dialog);
+        includeMetadata.setObjectName("includeFullMetadata");
+        dialog.layout()->addWidget(&includeMetadata);
+        if (dialog.exec() != QDialog::Accepted) return;
+        const auto path = dialog.selectedFiles().value(0);
         if (path.isEmpty() || !document) return;
         const QFileInfo destination(path);
         QString key = destination.canonicalFilePath();
@@ -249,11 +259,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         }
         const Image image = document->image; const QPointer<DocumentWidget> target = document;
         const auto revision = document->revision;
-        jobs_.submit(tr("Saving image"), [image, path](auto stop, auto progress) { writeImage(image, path, stop, progress); },
-            [this, target, revision, path, reservation](auto error) {
+        const bool includeFullMetadata = includeMetadata.isChecked();
+        jobs_.submit(tr("Saving image"), [image, path, includeFullMetadata](auto stop, auto progress) {
+            writeImage(image, path, stop, progress, includeFullMetadata);
+        },
+            [this, target, revision, path, reservation, includeFullMetadata](auto error) {
                 reservation->unlock();
                 if (showJobError(error)) return;
-                if (target && target->revision == revision) {
+                if (includeFullMetadata && target && target->revision == revision) {
                     target->modified = false; target->image.metadata().sourcePath = QFileInfo(path).absoluteFilePath();
                     target->image.metadata().name = QFileInfo(path).fileName(); emit target->changed();
                 }
@@ -696,7 +709,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             [image, roi, roiName, overTime, calibrated, z, channel, time, count, xTitle, output](auto stop, auto progress) {
                 const auto &axis = image.metadata().axes[overTime ? 4 : 2];
                 const auto appendRow = [&output](QStringList fields) {
-                    for (auto &field : fields) { field.replace('"', "\"\""); field = '"' + field + '"'; }
+                    for (auto &field : fields) field = detail::spreadsheetCsvCell(std::move(field));
                     output->csv += fields.join(',').toUtf8() + '\n';
                 };
                 const auto number = [](double value) { return QString::number(value, 'g', std::numeric_limits<double>::max_digits10); };
@@ -768,7 +781,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         for (int row = -1; row < rowCount; ++row) {
             for (int column = 0; column < results_->columnCount(); ++column) {
                 QString text = row < 0 ? results_->headerData(column, Qt::Horizontal).toString() : results_->data(results_->index(row, column)).toString();
-                text.replace('"', "\"\""); if (column) bytes += ','; bytes += '"' + text.toUtf8() + '"';
+                if (column) bytes += ',';
+                bytes += detail::spreadsheetCsvCell(std::move(text)).toUtf8();
             }
             bytes += '\n';
         }

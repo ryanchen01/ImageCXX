@@ -20,10 +20,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <chrono>
 #include <cstring>
 #include <numeric>
-#include <mutex>
 #include <limits>
 #include <stdexcept>
 
@@ -50,16 +48,6 @@ std::size_t detail::dicomImageBytes(DcmItem &dataset)
 }
 
 namespace {
-std::unique_lock<std::recursive_timed_mutex> lockDicomImport(std::stop_token stop)
-{
-    // Serialize decoding so separate import requests cannot race their memory checks.
-    static std::recursive_timed_mutex mutex;
-    std::unique_lock lock(mutex, std::defer_lock);
-    while (!lock.try_lock_for(std::chrono::milliseconds(50))) detail::checkIo(stop, {}, 0);
-    detail::checkIo(stop, {}, 0);
-    return lock;
-}
-
 void dicomCheck(const OFCondition &condition)
 {
     if (condition.bad()) throw std::runtime_error(condition.text());
@@ -105,7 +93,7 @@ double dicomNumber(DcmItem *dataset, const DcmTagKey &tag, double fallback, unsi
 
 Image readDicom(const QString &path, std::stop_token stop, IoProgress progress)
 {
-    const auto admission = lockDicomImport(stop);
+    const auto admission = detail::lockMemoryAllocation(stop);
     detail::checkIo(stop, progress, 0);
     DcmFileFormat file;
     dicomCheck(file.loadFile(QFile::encodeName(path).constData()));
@@ -270,7 +258,7 @@ Image readDicom(const QString &path, std::stop_token stop, IoProgress progress)
 Image readDicomSeries(const QStringList &paths, std::stop_token stop, IoProgress progress)
 {
     if (paths.isEmpty()) throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM series is empty").toStdString());
-    const auto admission = lockDicomImport(stop);
+    const auto admission = detail::lockMemoryAllocation(stop);
     std::vector<Image> slices;
     for (int i = 0; i < paths.size(); ++i) {
         detail::checkIo(stop, progress, 0.8 * i / paths.size());

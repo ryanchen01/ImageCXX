@@ -10,6 +10,7 @@
 #include <limits>
 #include <stdexcept>
 #include <utility>
+#include <chrono>
 
 #if defined(Q_OS_WIN)
 #ifndef NOMINMAX
@@ -24,6 +25,27 @@
 #endif
 
 namespace imagecxx::detail {
+std::unique_lock<std::recursive_timed_mutex> lockMemoryAllocation(std::stop_token stop) {
+    static std::recursive_timed_mutex mutex;
+    std::unique_lock lock(mutex, std::defer_lock);
+    while (!lock.try_lock_for(std::chrono::milliseconds(50))) {
+        if (stop.stop_requested())
+            throw std::runtime_error(QCoreApplication::translate("Memory", "Memory admission cancelled").toStdString());
+    }
+    if (stop.stop_requested())
+        throw std::runtime_error(QCoreApplication::translate("Memory", "Memory admission cancelled").toStdString());
+    return lock;
+}
+std::size_t checkedImageBytes(PixelType type, std::span<const std::size_t> shape) {
+    std::size_t bytes = bytesPerPixel(type);
+    for (const auto axis : shape) {
+        if (!axis) throw std::invalid_argument(QCoreApplication::translate("Image", "Image axes cannot have zero length").toStdString());
+        if (bytes > std::numeric_limits<std::size_t>::max() / axis)
+            throw std::overflow_error(QCoreApplication::translate("Image", "Image dimensions exceed the addressable size").toStdString());
+        bytes *= axis;
+    }
+    return bytes;
+}
 namespace {
 #if defined(Q_OS_LINUX)
 std::optional<std::size_t> readBytes(const QString &path, const QByteArray &key = {}) {
