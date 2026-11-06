@@ -1369,7 +1369,7 @@ TEST(ImageIo, DefaultExportNormalizesUnicodeMicrometerAndMicrosecondUnits)
             for (std::size_t axis = 0; axis < std::min<std::size_t>(3, source.shape().size()); ++axis)
                 source.metadata().axes[axis].unit = QString::fromUtf8(micro) + "m";
             if (source.shape().size() == 5) source.metadata().axes[4].unit = QString::fromUtf8(micro) + "s";
-            const auto path = directory.filePath(QString::fromUtf8(micro) + "." + extension);
+            const auto path = directory.filePath(QString("image.") + extension);
             ASSERT_NO_THROW(writeImage(source, path));
             const auto loaded = readImage(path);
             expectPixels(loaded, source);
