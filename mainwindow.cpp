@@ -135,7 +135,7 @@ Image cropToBounds(const Image &image, const QRectF &bounds)
     return image.region(start, extent);
 }
 
-QImage displayRaster(const Image &image, double minimum, double maximum, std::stop_token stop = {})
+QImage displayRaster(const Image &image, double minimum, double maximum, bool inverted, std::stop_token stop = {})
 {
     QImage raster(int(image.width()), int(image.height()), QImage::Format_RGBA8888);
     if (raster.isNull()) throw std::runtime_error(QCoreApplication::translate("MainWindow", "Cannot allocate display image").toStdString());
@@ -147,7 +147,8 @@ QImage displayRaster(const Image &image, double minimum, double maximum, std::st
             for (int c = 0; c < 4; ++c) {
                 double value = c == 3 && components != 4 ? 255 : image.sample(x, y, 0, 0, 0, components >= 3 ? c : 0);
                 if (c < 3 && components < 3) value = maximum > minimum ? 255 * (value - minimum) / (maximum - minimum) : 0;
-                pixel[c] = uchar(std::clamp(std::isfinite(value) ? value : 0., 0., 255.));
+                value = std::clamp(std::isfinite(value) ? value : 0., 0., 255.);
+                pixel[c] = uchar(inverted && c < 3 ? 255. - value : value);
             }
         }
     }
@@ -825,12 +826,13 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             mime->image = std::make_shared<Image>(image.clone());
             const std::weak_ptr<const Image> snapshot = mime->image;
             const auto minimum = doc->viewer->windowMinimum(), maximum = doc->viewer->windowMaximum();
+            const bool inverted = doc->viewer->isInverted();
             const QPointer<ImageMimeData> pending = mime.get();
             std::stop_source cancellation;
             connect(mime.get(), &QObject::destroyed, this, [cancellation]() mutable { cancellation.request_stop(); });
             QApplication::clipboard()->setMimeData(mime.release());
             auto output = std::make_shared<std::pair<QImage, QByteArray>>();
-            jobs_.submit(tr("Preparing clipboard PNG"), [snapshot, minimum, maximum, output, cancellation](auto stop, auto progress) mutable {
+            jobs_.submit(tr("Preparing clipboard PNG"), [snapshot, minimum, maximum, inverted, output, cancellation](auto stop, auto progress) mutable {
                 std::stop_callback cancelled(stop, [cancellation]() mutable { cancellation.request_stop(); });
                 const auto token = cancellation.get_token();
                 const auto held = snapshot.lock();
@@ -845,7 +847,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                     throw std::length_error(QCoreApplication::translate("MainWindow", "PNG export exceeds the clipboard memory limit.").toStdString());
                 detail::checkMemoryBudget(std::size_t(required), detail::availableMemoryBytes());
                 auto &[raster, bytes] = *output;
-                raster = displayRaster(image, minimum, maximum, token);
+                raster = displayRaster(image, minimum, maximum, inverted, token);
                 if (token.stop_requested()) return;
                 progress(.5);
                 if (raster.width() < 320 && raster.height() < 320)

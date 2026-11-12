@@ -342,6 +342,41 @@ TEST(Clipboard, CopyPublishesPngAtNativeSizeWithAMinimumOf320OnOneAxis)
     }
 }
 
+TEST(Clipboard, InvertedCopyAndCutPngPreserveAlphaAndTypedPixels)
+{
+    for (const bool cut : {false, true}) for (const auto type : {PixelType::UInt16, PixelType::RGB8, PixelType::RGBA8}) {
+        SCOPED_TRACE(pixelTypeName(type).toStdString() + (cut ? " cut" : " copy"));
+        MainWindow window;
+        auto image = Image::allocate(type, {4, 2});
+        const bool color = componentCount(type) >= 3;
+        for (std::size_t c = 0; c < componentCount(type); ++c) {
+            image.setValue(std::array<std::size_t, 2>{1, 0}, color ? (c == 3 ? 127 : 30 * c) : 1000, c);
+            image.setValue(std::array<std::size_t, 2>{2, 0}, color ? (c == 3 ? 127 : 255 - 30 * c) : 50000, c);
+        }
+        auto *doc = window.addDocument(image);
+        doc->viewer->setWindow(color ? 0 : 1000, color ? 255 : 50000);
+        doc->viewer->setInverted(true);
+        Roi roi; roi.points = {{1, 0}, {3, 1}};
+        doc->setSelection(roi);
+        window.commands().execute(cut ? "edit.cut" : "edit.copy");
+        // Export must retain the inversion from the moment of copying.
+        doc->viewer->setInverted(false);
+        ASSERT_TRUE(finishJobs(window));
+        const auto png = QImage::fromData(QApplication::clipboard()->mimeData()->data("image/png"), "PNG");
+        ASSERT_EQ(png.size(), QSize(320, 160));
+        const int alpha = type == PixelType::RGBA8 ? 127 : 255;
+        EXPECT_EQ(png.pixelColor(0, 0), color ? QColor(255, 225, 195, alpha) : QColor(Qt::white));
+        EXPECT_EQ(png.pixelColor(319, 0), color ? QColor(0, 30, 60, alpha) : QColor(Qt::black));
+        EXPECT_EQ(QApplication::clipboard()->image().pixelColor(0, 0), png.pixelColor(0, 0));
+        window.commands().execute("edit.pasteSpecial", {{"destination", "New image"}});
+        const auto &pasted = window.activeDocument()->image;
+        EXPECT_EQ(pasted.pixelType(), type);
+        EXPECT_EQ(pasted.width(), 2u);
+        EXPECT_DOUBLE_EQ(pasted.sample(0, 0), color ? 0 : 1000);
+        EXPECT_DOUBLE_EQ(pasted.sample(1, 0), color ? 255 : 50000);
+    }
+}
+
 TEST(Clipboard, TypedSelectionSurvivesSourceEditsAndWindowClosure)
 {
     for (const auto type : {PixelType::UInt8, PixelType::UInt16, PixelType::Int16, PixelType::Float32,
