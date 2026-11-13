@@ -55,6 +55,7 @@ signals:
     void activated();
     void closing();
     void pathsDropped(const QStringList &paths);
+    void toolDimensionsChanged(const QString &text);
     void pixelHovered(std::size_t x, std::size_t y, std::size_t z, double value);
     void viewError(const QString &message);
     void displayChanged();

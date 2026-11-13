@@ -64,6 +64,7 @@ public:
     void setPixelAspectRatio(double heightOverWidth);
     void setTool(Tool tool);
     Tool tool() const;
+    QString toolDimensions() const;
     void setAnnotations(const std::vector<Annotation> &annotations);
     void setRois(const std::vector<Roi> &rois);
     void setSelection(std::optional<Roi> roi);
@@ -97,6 +98,7 @@ Q_SIGNALS:
     void viewTransformChanged();
     void displaySettingsChanged();
     void toolChanged();
+    void toolDimensionsChanged(const QString &text);
     void overlaysChanged(bool crosshair, bool scaleBar);
     void positionPicked(QPointF point);
     void loadingChanged(bool loading);

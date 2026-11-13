@@ -1046,6 +1046,7 @@ void ImageViewer::setRois(const std::vector<Roi> &rois)
         const auto saved = std::find_if(rois.begin(), rois.end(), [this](const Roi &roi) { return roi.id == d->selection->id; });
         if (saved != rois.end()) d->selection = *saved;
     }
+    Q_EMIT toolDimensionsChanged(toolDimensions());
     d->overlay->update();
 }
 void ImageViewer::setSelection(std::optional<Roi> roi)
@@ -1055,6 +1056,7 @@ void ImageViewer::setSelection(std::optional<Roi> roi)
         d->dragOriginal.reset();
     }
     d->selection = std::move(roi);
+    Q_EMIT toolDimensionsChanged(toolDimensions());
     d->overlay->update();
 }
 void ImageViewer::setMask(const Image &mask)
@@ -1136,8 +1138,48 @@ QPointF ImageViewer::widgetToImage(QPointF point) const
     const auto offset = (point - imageToWidget({0, 0})) / d->zoom;
     return {offset.x(), offset.y() / d->pixelAspect};
 }
+QString ImageViewer::toolDimensions() const
+{
+    const auto &roi = d->draft ? d->draft : d->selection;
+    if (!roi || !roi->visible || roi->time != d->time
+        || (!d->composite && roi->channel != d->channel)) return {};
+    const auto &axes = d->image.metadata().axes;
+    const auto dimension = [this](double pixels, double calibrated, const QString &unit) {
+        auto text = QString::number(pixels, 'g', 6);
+        if (!unit.isEmpty() && unit != "px")
+            text += tr(" (%1)").arg(calibrated, 0, 'g', 6);
+        return text;
+    };
+    if (roi->type == RoiType::Line && roi->points.size() >= 2) {
+        const auto delta = roi->points[1] - roi->points[0];
+        const auto length = std::hypot(delta.x(), delta.y());
+        double calibrated = length;
+        QString unit;
+        if (axes.size() >= 2) {
+            if (axes[0].unit == axes[1].unit) {
+                calibrated = std::hypot(delta.x() * axes[0].spacing, delta.y() * axes[1].spacing);
+                unit = axes[0].unit;
+            } else if (delta.y() == 0) {
+                calibrated = length * axes[0].spacing;
+                unit = axes[0].unit;
+            } else if (delta.x() == 0) {
+                calibrated = length * axes[1].spacing;
+                unit = axes[1].unit;
+            }
+        }
+        return tr("Length %1").arg(dimension(length, calibrated, unit));
+    }
+    const auto bounds = roi->bounds();
+    return tr("Width %1   Height %2")
+        .arg(dimension(bounds.width(), bounds.width() * (axes.empty() ? 1 : axes[0].spacing),
+            axes.empty() ? QString{} : axes[0].unit))
+        .arg(dimension(bounds.height(), bounds.height() * (axes.size() < 2 ? 1 : axes[1].spacing),
+            axes.size() < 2 ? QString{} : axes[1].unit));
+}
+
 void ImageViewer::updateCanvas()
 {
+    Q_EMIT toolDimensionsChanged(toolDimensions());
     if (!d->image.empty())
         d->canvas->imageRect = QRectF(imageToWidget({0, 0}), QSizeF(double(d->image.width()) * d->zoom,
             double(d->image.height()) * d->zoom * d->pixelAspect));

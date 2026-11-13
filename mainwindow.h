@@ -70,6 +70,9 @@ private:
     QCheckBox *linear_ = nullptr;
     QCheckBox *composite_ = nullptr;
     QLabel *pixelStatus_;
+    QString pixelStatusText_;
+    QString toolDimensions_;
+    void updatePixelStatus();
     QLabel *jobStatus_;
     QProgressBar *progress_;
     imagecxx::PlotWidget *histogramPlot_ = nullptr;

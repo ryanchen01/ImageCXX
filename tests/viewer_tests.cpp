@@ -866,6 +866,31 @@ TEST(Viewer, OversizedDecodedSliceReportsFailure)
     EXPECT_EQ(viewer.decodedCacheBytes(), 0);
 }
 
+TEST(Viewer, ToolDimensionsShowPixelsAndCalibratedAxisSizes)
+{
+    ImageMetadata metadata;
+    metadata.axes = {{"X", 4, 0, "mm"}, {"Y", 3, 0, "mm"}};
+    ImageViewer viewer;
+    viewer.setImage(Image::allocate(PixelType::UInt8, {32, 32}, metadata));
+    Roi roi;
+    roi.type = RoiType::Line;
+    roi.points = {{0, 0}, {4, 0}};
+    viewer.setSelection(roi);
+    EXPECT_EQ(viewer.toolDimensions(), "Length 4 (16)");
+    roi.points = {{0, 0}, {3, 4}};
+    viewer.setSelection(roi);
+    EXPECT_EQ(viewer.toolDimensions(), "Length 5 (16.9706)");
+    roi.type = RoiType::Rectangle;
+    viewer.setSelection(roi);
+    EXPECT_EQ(viewer.toolDimensions(), "Width 3 (12)   Height 4 (12)");
+
+    metadata.axes[0].unit = "px";
+    metadata.axes[1].unit.clear();
+    viewer.setImage(Image::allocate(PixelType::UInt8, {32, 32}, metadata));
+    viewer.setSelection(roi);
+    EXPECT_EQ(viewer.toolDimensions(), "Width 3   Height 4");
+}
+
 TEST(Viewer, DragCreatesRoiInOriginalImageCoordinates)
 {
     ImageViewer viewer;

@@ -194,7 +194,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     pixelStatus_ = new QLabel(tr("Ready"), this);
     jobStatus_ = new QLabel(this);
     jobStatus_->setMaximumWidth(155);
-    pixelStatus_->setMaximumWidth(240);
     progress_ = new QProgressBar(this);
     progress_->setFixedWidth(70); progress_->setRange(0, 1000); progress_->setTextVisible(false); progress_->hide();
     auto *cancelButton = new QPushButton(tr("Cancel"), this);
@@ -1793,6 +1792,13 @@ void MainWindow::showPanel(const QString &id)
     window->activateWindow();
 }
 
+void MainWindow::updatePixelStatus()
+{
+    const auto text = pixelStatusText_ + (toolDimensions_.isEmpty() ? QString{} : "   " + toolDimensions_);
+    pixelStatus_->setText(text);
+    pixelStatus_->setToolTip(text);
+}
+
 void MainWindow::setActiveDocument(DocumentWidget *document)
 {
     if (active_ == document) return;
@@ -1802,12 +1808,13 @@ void MainWindow::setActiveDocument(DocumentWidget *document)
         document->viewer->setScaleBarVisible(scaleBar_->isChecked());
         if (auto *action = tools_->checkedAction())
             document->viewer->setTool(static_cast<ImageViewer::Tool>(action->data().toInt()));
-        pixelStatus_->setText(document->image.metadata().name);
-        pixelStatus_->setToolTip(document->image.metadata().name);
+        pixelStatusText_ = document->image.metadata().name;
+        toolDimensions_ = document->viewer->toolDimensions();
     } else {
-        pixelStatus_->setText(tr("Ready"));
-        pixelStatus_->setToolTip({});
+        pixelStatusText_ = tr("Ready");
+        toolDimensions_.clear();
     }
+    updatePixelStatus();
     updatePanels();
 }
 
@@ -1849,11 +1856,15 @@ DocumentWidget *MainWindow::addDocument(Image image)
         document->setWindowTitle(document->title());
         if (activeDocument() == document) updatePanels();
     });
+    connect(document, &DocumentWidget::toolDimensionsChanged, this, [this, document](const QString &text) {
+        if (activeDocument() != document) return;
+        toolDimensions_ = text;
+        updatePixelStatus();
+    });
     connect(document, &DocumentWidget::pixelHovered, this, [this, document](std::size_t x, std::size_t y, std::size_t z, double value) {
         if (activeDocument() != document) return;
-        const auto text = tr("X %1   Y %2   Z %3   Value %4").arg(x).arg(y).arg(z).arg(value, 0, 'g', 12);
-        pixelStatus_->setText(text);
-        pixelStatus_->setToolTip(text);
+        pixelStatusText_ = tr("X %1   Y %2   Z %3   Value %4").arg(x).arg(y).arg(z).arg(value, 0, 'g', 12);
+        updatePixelStatus();
     });
     connect(document, &DocumentWidget::viewError, this, [this](const QString &error) { statusBar()->showMessage(error, 15000); });
     connect(document, &DocumentWidget::displayChanged, this, [this, document] {

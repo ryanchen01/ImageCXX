@@ -139,10 +139,14 @@ std::array<std::size_t, 3> DocumentWidget::viewAxes(int index) const
 
 void DocumentWidget::connectViewer(ImageViewer *view, int index)
 {
-    connect(view, &ImageViewer::pixelHovered, this, [this, index](int x, int y, double value) {
+    connect(view, &ImageViewer::toolDimensionsChanged, this, [this, view, index](const QString &text) {
+        if (index == 0 || view->underMouse()) emit toolDimensionsChanged(text);
+    });
+    connect(view, &ImageViewer::pixelHovered, this, [this, index, view](int x, int y, double value) {
         auto point = spatial_;
         const auto axes = viewAxes(index);
         point[axes[0]] = std::size_t(x); point[axes[1]] = std::size_t(y);
+        emit toolDimensionsChanged(view->toolDimensions());
         emit pixelHovered(point[0], point[1], point[2], value);
     });
     if (index > 0) connect(view, &ImageViewer::loadFailed, this, &DocumentWidget::viewError);
