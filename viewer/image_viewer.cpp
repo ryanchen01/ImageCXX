@@ -1167,10 +1167,10 @@ QString ImageViewer::toolDimensions() const
                 unit = axes[1].unit;
             }
         }
-        return tr("Length %1").arg(dimension(length, calibrated, unit));
+        return tr("L %1").arg(dimension(length, calibrated, unit));
     }
     const auto bounds = roi->bounds();
-    return tr("Width %1   Height %2")
+    return tr("W %1   H %2")
         .arg(dimension(bounds.width(), bounds.width() * (axes.empty() ? 1 : axes[0].spacing),
             axes.empty() ? QString{} : axes[0].unit))
         .arg(dimension(bounds.height(), bounds.height() * (axes.size() < 2 ? 1 : axes[1].spacing),

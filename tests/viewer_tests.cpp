@@ -876,19 +876,19 @@ TEST(Viewer, ToolDimensionsShowPixelsAndCalibratedAxisSizes)
     roi.type = RoiType::Line;
     roi.points = {{0, 0}, {4, 0}};
     viewer.setSelection(roi);
-    EXPECT_EQ(viewer.toolDimensions(), "Length 4 (16)");
+    EXPECT_EQ(viewer.toolDimensions(), "L 4 (16)");
     roi.points = {{0, 0}, {3, 4}};
     viewer.setSelection(roi);
-    EXPECT_EQ(viewer.toolDimensions(), "Length 5 (16.9706)");
+    EXPECT_EQ(viewer.toolDimensions(), "L 5 (16.9706)");
     roi.type = RoiType::Rectangle;
     viewer.setSelection(roi);
-    EXPECT_EQ(viewer.toolDimensions(), "Width 3 (12)   Height 4 (12)");
+    EXPECT_EQ(viewer.toolDimensions(), "W 3 (12)   H 4 (12)");
 
     metadata.axes[0].unit = "px";
     metadata.axes[1].unit.clear();
     viewer.setImage(Image::allocate(PixelType::UInt8, {32, 32}, metadata));
     viewer.setSelection(roi);
-    EXPECT_EQ(viewer.toolDimensions(), "Width 3   Height 4");
+    EXPECT_EQ(viewer.toolDimensions(), "W 3   H 4");
 }
 
 TEST(Viewer, DragCreatesRoiInOriginalImageCoordinates)

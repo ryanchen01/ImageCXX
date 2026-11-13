@@ -1863,7 +1863,7 @@ DocumentWidget *MainWindow::addDocument(Image image)
     });
     connect(document, &DocumentWidget::pixelHovered, this, [this, document](std::size_t x, std::size_t y, std::size_t z, double value) {
         if (activeDocument() != document) return;
-        pixelStatusText_ = tr("X %1   Y %2   Z %3   Value %4").arg(x).arg(y).arg(z).arg(value, 0, 'g', 12);
+        pixelStatusText_ = tr("X %1   Y %2   Z %3   V %4").arg(x).arg(y).arg(z).arg(value, 0, 'g', 12);
         updatePixelStatus();
     });
     connect(document, &DocumentWidget::viewError, this, [this](const QString &error) { statusBar()->showMessage(error, 15000); });

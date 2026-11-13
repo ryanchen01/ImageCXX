@@ -2818,7 +2818,7 @@ Bounds start at the image&apos;s minimum and maximum finite raw values and are r
     </message>
     <message>
         <location filename="mainwindow.cpp" line="1838"/>
-        <source>X %1   Y %2   Z %3   Value %4</source>
+        <source>X %1   Y %2   Z %3   V %4</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
