@@ -29,20 +29,21 @@ Ctrl means Command on macOS. Alt means Option. Shift keeps its usual meaning. Te
 | Backslash | Toggle animation |
 | Space held while dragging | Temporary pan |
 
-Navigation keys operate in the image canvas. Unmodified hyperstack navigation changes channels. Alt skips ten positions in ordinary stacks. With an active selection, arrows move it one pixel; Alt+arrows resize rectangles and ellipses. Shift+arrows bypass selection movement. Enter completes a polygon while the polygon tool is active.
+## Navigation and selections
 
-On a Mac trackpad, pinch to zoom around the pointer. Two-finger scrolling retains the same behavior as the mouse wheel: browse stack slices or zoom a single image. Ctrl or Command + wheel zooms in either case. Use a middle-button drag or hold Space while dragging to pan.
+- **Canvas keys:** `Left`/`Right` step through channels in hyperstacks (`Ctrl` for slices, `Alt` for frames; `Alt` skips 10 positions in ordinary stacks). With an active selection, arrow keys nudge it by 1 pixel (`Alt`+arrows resize rectangles/ellipses; `Shift`+arrows ignore the selection). Press `Enter` to finish a polygon.
+- **Mouse and trackpad:** Pinch or hold `Ctrl`/`Cmd` while scrolling to zoom. Plain scrolling browses stack slices (or zooms a single image). Middle-drag or hold `Space` while dragging to pan.
+- **Command search:** Press `L` or `Ctrl+L` to focus the bottom-right search bar, type a command name or category, and press `Enter` (or click a result) to run it.
 
-Type in the bottom-right search field to find commands by name or category. Use the arrow keys and Enter, or click a result, to run it. Escape dismisses the suggestions. Commands that are unavailable are disabled.
+## ROIs and drawing
 
-Draw a selection, then press Ctrl+T to retain it in the ROI manager. Select None clears the active selection without deleting saved ROIs. Pixel edits affect the current Z/C/T plane and support undo.
+- **ROI manager:** Press `Ctrl+T` to save the active selection to the ROI manager. **Select none** clears the canvas selection without deleting saved ROIs.
+- **Selection properties:** **Edit > Selection properties** lets you edit an ROI's name, color, visibility, and zero-based pixel coordinates (`Apply` updates without closing, `OK` saves and closes, `Cancel` reverts to the last `Apply`). Polygon vertices remain editable on the canvas.
+- **Drawing color:** **Edit > Drawing color** (or the toolbar swatch, white by default) sets the color used by **Fill** and **Draw** on the current Z/C/T plane (undoable). Scalar images map the chosen grayscale intensity to the image's numeric range; **Clear** writes zero.
 
-Choose Edit > Selection properties to edit the active ROI's name, outline color and visibility. Rectangles and ellipses also have X/Y/width/height fields, and lines have endpoint coordinates. Coordinates use pixels with a zero-based origin. Apply updates the ROI and keeps the dialog open; OK applies and closes it. Cancel discards edits made since the last Apply. These changes also update a saved ROI without changing image pixels or its saved Z/C/T position. Polygon vertices remain editable on the canvas.
+## Copy and paste
 
-Copy and Cut immediately retain the selected bounds, or the entire current Z/C/T plane, with their original scientific pixel type and values. They prepare a PNG in the background for pasting into other applications. The PNG uses the display intensity range and LUT inversion captured when copying, at native pixel dimensions independent of viewer zoom. If both dimensions are below 320 pixels, it scales up proportionally until the longer axis reaches 320 pixels. Internal pastes retain the original dimensions and remain available if PNG export exceeds its memory budget. A status message reports export failures.
+- **Copy and Cut:** Store the selected bounds (or current plane) at full scientific precision internally, while exporting a display-rendered PNG in the background for other apps (images under 320 px on both sides scale up proportionally to 320 px on the longer edge).
+- **Paste:** Pastes the internal typed copy across ImageCXX windows when pixel types match, or falls back to the system clipboard image. Pastes at the selection's top-left corner or image origin, or opens a new image if none is active.
+- **Paste special:** **Edit > Paste special** chooses between **Automatic** or **System image** as the source and **Current image** or **New image** as the destination. `Ctrl+Shift+V` always opens the clipboard image as a new image, preserving 16-bit grayscale and RGB/RGBA alpha.
 
-Paste uses the typed copy while it remains on the clipboard, including across ImageCXX windows. After another application replaces the clipboard, Paste reads its image instead. It writes at the selection's top-left corner, or the image origin, and clips to the current plane. The clipboard and destination pixel types must match. With no image open, Paste creates a new image.
-
-Use Edit > Paste special to choose Automatic or System image as the source, and Current image or New image as the destination. Automatic prefers the typed copy; System image uses the rendered clipboard image. New image preserves the source's type without requiring a matching open image. Ctrl+Shift+V always opens the system image as a new image. Clipboard images preserve 16-bit grayscale and RGB/RGBA pixels, including alpha.
-
-Choose Edit > Drawing color or click the color swatch in the toolbar to set the color for Fill and Draw. The default is white. Both commands change image pixels and support undo/redo. RGB images use the chosen RGB components; RGBA images retain their existing alpha. Scalar images use Qt's grayscale conversion, mapped across the full integer type range or the current float plane's finite raw intensity range. Constant float planes retain their constant value; planes with no finite values reject drawing. Display LUTs and intensity calibration do not affect this mapping. Clear always writes zero.

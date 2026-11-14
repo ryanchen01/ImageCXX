@@ -1,62 +1,22 @@
 # ImageCXX
 
-ImageCXX is a C++20 and Qt Widgets image viewer and analysis application with a compact launcher and separate image and tool windows. It keeps scientific pixel values separate from display settings and provides stack browsing, ROIs, measurements, plots and ITK processing.
+ImageCXX is a desktop viewer and analysis tool for scientific and medical images (such as microscopy stacks, CT/MRI volumes, and gel/blot scans) on macOS, Windows, and Linux.
 
-Select an area ROI and choose **Analyze > Plot ROI measurements...** to plot mean intensity across Time or Z. The ROI's XY shape, current channel and other axis stay fixed. Plots use calibrated coordinates when available and frame or slice numbers otherwise. Each plot has an **Export CSV...** button for per-plane statistics and keeps its measured values when the source image changes.
+It keeps your original pixel data separate from display settings, so adjusting contrast, zoom, color maps, or annotations never alters your underlying scientific measurements.
 
-Use **Analyze > Gels** to measure gel or blot bands. Draw a rectangle around a lane, choose **Select first lane** with `1`, then move the rectangle across the image and use **Select next lane** with `2`. Lanes must have the same size, lengthwise alignment, and Z/C/T plane; their numbered outlines appear on the image. **Plot lanes** with `3` measures the registered plane's current pixels in the background and opens an independent snapshot window. Choose a lane, set the one-based start/end samples around a band, and click **Measure band**. The blue line shows the straight baseline between the endpoints. **Label peaks** labels measured bands with their percentage of the total measured area in that lane. You can remove selected bands and export the results to CSV.
+## What You Can Do
 
-**Gel analyzer options...** supports vertical or horizontal lanes and dark or bright bands. Set the direction before selecting lanes; changing it clears that document's lane registrations. Profiles average calibrated intensity across the rectangle's width. Dark-band profiles negate intensity so bands point upward. Areas use trapezoids over positive baseline-subtracted sample values, in intensity units times distance units. Percentages include only the bands you measure. This workflow requires scalar images with finite lane pixels; it does not apply optical-density conversion or automatic band detection.
+- **Open scientific and medical formats:** Load TIFF/BigTIFF, DICOM (single files and 3D series), NIfTI, NRRD, MetaImage (MHA/MHD), and raw binary files (as well as PNG and JPEG). Drag and drop files or folders directly onto the window.
+- **Browse multi-dimensional stacks:** Step through depth slices (Z), color channels (C), and time frames (T), or compare images side by side and in 3D using **Single**, **Linked**, **Orthogonal**, and **Overlay** views.
+- **Adjust display non-destructively:** Tune intensity range, gamma, inversion, and channel/color lookup tables (LUTs), add display-only annotations (`B`), and print with calibrated aspect ratios.
+- **Measure, plot, and export:** Draw rectangle, ellipse, polygon, or line selections (ROIs) to inspect intensity statistics, histograms (`H` / `Shift+H`), line profiles (`K`), ROI time/Z plots, and gel/blot lanes, then export results to CSV.
+- **Process images and batches:** Apply Gaussian blur, median filtering, thresholding, binary dilation/erosion, resampling, reslicing, and 3D projections on a full image, current slice, or selection, with undo/redo and batch processing.
 
-## Selection shortcuts and printing
+## Quick Tips
 
-Press **B** to copy the active ROI into a display-only annotation. **Alt+B** opens label and color options; **Edit > Show/hide annotations** and **Remove last annotation** manage these snapshots. Annotations use the drawing color, stay on their saved Z/C/T plane, and remain independent of later ROI edits. They are session-only and included in printing; saving an image preserves scientific pixels rather than baking annotations into them.
-
-**Shift+U** opens the control panel. Filter its command tree, then activate a command with Enter. The panel uses the same registry and parameter forms as menus and command search.
-
-For area tools, hold **Shift** when starting another selection to add its area, or **Alt** to subtract it. With no previous selection, Shift constrains rectangles/ellipses to a square/circle. While editing a handle, Alt preserves the rectangle/ellipse aspect ratio or line length; Ctrl (Cmd on macOS) resizes around the center. Alt snaps newly drawn line endpoints to integer coordinates. Shift-click a polygon node and drag to insert a vertex; Alt-click deletes a vertex while retaining at least three. Space-drag pans with any tool. Text fields and modal dialogs retain normal keyboard behavior.
-
-**Alt+H** opens histogram bin, calibration and log-count options; **Shift+H** plots `log10(1 + count)`. **K** plots a line or a rectangular selection's column averages. **Alt+K** offers row averages, calibrated/raw intensities and line sample count. Each plot shows a snapshot of the current plane in a separate window.
-
-**File > Print Preview** and **P** print the full current plane with its display range, gamma, inversion, LUT or channel composite colors, masks, ROIs and annotations. The output respects calibrated pixel aspect. Editing handles and unfinished selections are omitted. Printing never changes scientific image values.
-
-## Translations
-
-User-facing source text is English. Keep UI text in `tr()` (or
-`QCoreApplication::translate()` outside QObject classes), and use `qsTr()` in QML.
-Command IDs, parameter values, file-format keys and scientific unit symbols stay stable.
-Choice and category values use `QT_TRANSLATE_NOOP` so they are extracted without
-changing their stored values; translate them when displaying them.
-
-Update every configured catalog after changing source text:
-
-```sh
-cmake --build --preset dev --target update_translations
-```
-
-`ImageCXX_en_US.ts` is the English reference catalog. To add languages, configure
-with a semicolon-separated locale list, then update the catalogs:
-
-```sh
-cmake --preset dev -DIMAGECXX_TRANSLATION_LANGUAGES="en_US;fr_FR;zh_CN"
-cmake --build --preset dev --target update_translations
-```
-
-Edit the generated `ImageCXX_<locale>.ts` files with Qt Linguist and commit them.
-`lupdate` preserves translations, adds new strings as unfinished, and marks removed
-strings obsolete. Keep the locale list in your build configuration when building
-or packaging those languages.
-
-```sh
-cmake --build --preset dev --target release_translations
-cmake --build --preset dev
-```
-
-The normal build also compiles and embeds the catalogs. At startup, the app selects
-an embedded translation using the system UI locale; unfinished or missing entries
-fall back to the English source text. Restart the app after changing the locale.
-Qt's standard dialog translations are loaded from Qt's installed translation directory
-when available. Diagnostics supplied by external libraries retain their own wording.
+- **Find any command fast:** Press `L` (or `Ctrl+L` / `Cmd+L`) to search commands in the bottom bar, or `Shift+U` to open the Control Panel.
+- **Navigate and pan:** Hold `Space` and drag (or middle-drag) to pan; scroll or press `Left`/`Right` to step through stack slices.
+- **More shortcuts and format details:** See [Keyboard Shortcuts](docs/shortcuts.md) for canvas shortcuts, selection modifiers, and copy/paste behavior, and [Image I/O](docs/io.md) for format-specific details.
 
 ## Build
 
@@ -165,6 +125,44 @@ ctest --preset dev-vcpkg
 ```
 
 The Debug build is written to `build/dev-vcpkg`.
+
+### Translations
+
+User-facing source text is English. Keep UI text in `tr()` (or
+`QCoreApplication::translate()` outside QObject classes), and use `qsTr()` in QML.
+Command IDs, parameter values, file-format keys and scientific unit symbols stay stable.
+Choice and category values use `QT_TRANSLATE_NOOP` so they are extracted without
+changing their stored values; translate them when displaying them.
+
+Update every configured catalog after changing source text:
+
+```sh
+cmake --build --preset dev --target update_translations
+```
+
+`ImageCXX_en_US.ts` is the English reference catalog. To add languages, configure
+with a semicolon-separated locale list, then update the catalogs:
+
+```sh
+cmake --preset dev -DIMAGECXX_TRANSLATION_LANGUAGES="en_US;fr_FR;zh_CN"
+cmake --build --preset dev --target update_translations
+```
+
+Edit the generated `ImageCXX_<locale>.ts` files with Qt Linguist and commit them.
+`lupdate` preserves translations, adds new strings as unfinished, and marks removed
+strings obsolete. Keep the locale list in your build configuration when building
+or packaging those languages.
+
+```sh
+cmake --build --preset dev --target release_translations
+cmake --build --preset dev
+```
+
+The normal build also compiles and embeds the catalogs. At startup, the app selects
+an embedded translation using the system UI locale; unfinished or missing entries
+fall back to the English source text. Restart the app after changing the locale.
+Qt's standard dialog translations are loaded from Qt's installed translation directory
+when available. Diagnostics supplied by external libraries retain their own wording.
 
 ## License
 
