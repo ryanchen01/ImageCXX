@@ -104,7 +104,7 @@ jobs:
           dir: '${{ github.workspace }}/build/qt-installer-tools'
           no-qt-binaries: true
           set-env: false
-          tools: 'tools_ifw,4.7.0,qt.tools.ifw.47'
+          tools: 'tools_ifw,qt.tools.ifw.47'
           cache: true
 
       - name: Verify Windows Qt and installer tool paths
