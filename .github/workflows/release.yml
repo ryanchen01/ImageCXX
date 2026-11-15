@@ -64,18 +64,22 @@ jobs:
         shell: pwsh
         run: '"VCPKG_ROOT=$env:GITHUB_WORKSPACE/build/vcpkg" >> $env:GITHUB_ENV'
 
-      - name: Set up Python for Windows Qt installer
-        if: runner.os == 'Windows'
+      - name: Set up Python for Qt installer
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           # Avoid building Python 3.15 dependencies from source.
           python-version: '3.14'
+          cache: pip
+          # Installer versions are pinned in these workflows.
+          cache-dependency-path: |
+            .github/workflows/build.yml
+            .github/workflows/release.yml
 
       - name: Install official Qt binaries
         uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125 # v4.4.1
         with:
           version: '6.12.0'
-          setup-python: ${{ runner.os != 'Windows' }}
+          setup-python: false
           aqtsource: 'git+https://github.com/miurahr/aqtinstall.git@7e5a5c3d95cf962cfc2f36c86ffa0d2c07f1a0d4'
           arch: ${{ matrix.qt-arch }}
           modules: 'qtshadertools qtgraphs qtimageformats qtquick3d qtquicktimeline'
