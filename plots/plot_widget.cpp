@@ -2,6 +2,7 @@
 #include <QCoreApplication>
 #include <QGraphsTheme>
 #include <QLineSeries>
+#include <QScatterSeries>
 #include <QQuickWidget>
 #include <QValueAxis>
 #include <QVBoxLayout>
@@ -11,16 +12,18 @@
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
 namespace imagecxx {
-PlotWidget::PlotWidget(QWidget *parent) : QWidget(parent), quick_(new QQuickWidget(this)),
-    series_(new QLineSeries(this)), axisX_(new QValueAxis(this)), axisY_(new QValueAxis(this))
+PlotWidget::PlotWidget(QWidget *parent, bool scatter) : QWidget(parent), quick_(new QQuickWidget(this)),
+    series_(scatter ? static_cast<QXYSeries *>(new QScatterSeries(this)) : new QLineSeries(this)),
+    axisX_(new QValueAxis(this)), axisY_(new QValueAxis(this))
 {
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->addWidget(quick_);
     series_->setColor(QColor("#1A1C1F"));
-    series_->setWidth(1);
+    if (auto *line = qobject_cast<QLineSeries *>(series_)) line->setWidth(1);
     auto *theme = new QGraphsTheme(this);
     theme->setColorScheme(QGraphsTheme::ColorScheme::Light);
     theme->setBackgroundColor(QColor("#FAF7F2"));
@@ -40,7 +43,7 @@ PlotWidget::PlotWidget(QWidget *parent) : QWidget(parent), quick_(new QQuickWidg
     quick_->setClearColor(QColor("#FAF7F2"));
     quick_->setMouseTracking(true);
     quick_->setToolTip(tr("Drag to pan. Scroll or pinch to zoom. Move the pointer over the plot for values."));
-    quick_->setInitialProperties({{"theme", QVariant::fromValue(theme)},
+    quick_->setInitialProperties({{"theme", QVariant::fromValue(theme)}, {"scatter", scatter},
         {"axisX", QVariant::fromValue(axisX_)}, {"axisY", QVariant::fromValue(axisY_)},
         {"seriesList", QVariant::fromValue(series_)}});
     quick_->loadFromModule("ImageCXX.Plots", "Plot");
@@ -77,12 +80,17 @@ void PlotWidget::setData(const std::vector<QPointF> &points, const QString &xTit
     };
     expandRange(xMin, xMax);
     expandRange(yMin, yMax);
-    const double padding = yMax * .05 - yMin * .05;
-    constexpr double limit = std::numeric_limits<double>::max();
-    double yLower = yMin >= 0 ? std::max(0.0, yMin - padding) : std::max(-limit, yMin - padding);
-    double yUpper = std::min(limit, yMax + padding);
-    if (!std::isfinite(yUpper - yLower)) { yLower = yMin; yUpper = yMax; }
-    if (!std::isfinite(xMax - xMin) || !std::isfinite(yUpper - yLower))
+    const auto paddedRange = [](double minimum, double maximum, bool clampZero) {
+        constexpr double limit = std::numeric_limits<double>::max();
+        const double padding = maximum * .05 - minimum * .05;
+        const double lower = std::max(clampZero && minimum >= 0 ? 0.0 : -limit, minimum - padding);
+        const double upper = std::min(limit, maximum + padding);
+        return std::isfinite(upper - lower) ? std::pair{lower, upper} : std::pair{minimum, maximum};
+    };
+    const bool scatter = qobject_cast<QScatterSeries *>(series_);
+    const auto [xLower, xUpper] = scatter ? paddedRange(xMin, xMax, false) : std::pair{xMin, xMax};
+    const auto [yLower, yUpper] = paddedRange(yMin, yMax, !scatter);
+    if (!std::isfinite(xUpper - xLower) || !std::isfinite(yUpper - yLower))
         throw std::length_error(QCoreApplication::translate("PlotWidget", "The values span a range too wide to plot.").toStdString());
     const auto setRange = [](QValueAxis *axis, double minimum, double maximum) {
         // Qt reconstructs the limits through their center. At a double limit,
@@ -118,7 +126,7 @@ void PlotWidget::setData(const std::vector<QPointF> &points, const QString &xTit
         emit axis->update();
     };
     series_->replace(finite);
-    setRange(axisX_, xMin, xMax);
+    setRange(axisX_, xLower, xUpper);
     setRange(axisY_, yLower, yUpper);
     axisX_->setTitleText(xTitle);
     axisY_->setTitleText(yTitle);

@@ -23,10 +23,12 @@ Register new commands through the existing `CommandRegistry`, with Qt actions, m
 ## Viewer, models and desktop tools
 
 - [x] Add synchronized multi-view windows. Users place and resize linked windows freely; independent image documents remain separate.
-- [ ] Add a separate project-owned annotation model and annotation tools in the overlay layer. ROI outlines, ROI names, masks, crosshairs and scale bars already exist.
+- [x] Add a separate project-owned annotation model in the overlay layer. Selection snapshots, label/color options, show/hide and remove-last commands already exist, alongside ROI outlines, ROI names, masks, crosshairs and scale bars.
+- [ ] Extend overlay annotation tools to select, edit and remove individual annotations after adding them.
 - [ ] Extend advanced channel/time workflows. Z/C/T browsing, animation and basic compositing already exist, but composite display currently uses at most four channels. Keep channel metadata and original pixel values in the model; apply blending in shaders.
 - [ ] Add tile-based display and partial texture updates where practical. The viewer currently uploads whole changed slices and rejects slices exceeding texture or memory limits. Reuse GPU resources and keep CPU/GPU caches bounded.
-- [ ] Add scatter plots and calibration curves using Qt Graphs 2D and C++ data models. Current plots cover histograms and line profiles.
+- [x] Add scatter plots using Qt Graphs 2D and the existing C++ measurements model. Choose numeric X/Y columns, plot all finite measurement pairs and inspect unordered points with zoom and pan.
+- [ ] Add calibration curves with a linear fit and R² using the plotting module. Current plots cover histograms, profiles, ROI measurement series and measurement scatter plots.
 - [x] Add ROI measurement plots and time-series measurement plots using the same plotting module. Plot a fixed area ROI's mean intensity across Z or Time, with calibrated axes, background cancellation and CSV export of per-plane statistics. QML/Quick details stay inside the plotting module and plot windows are created on demand.
 
 ## Chunked storage and larger-than-RAM processing
@@ -74,7 +76,8 @@ These items need a product decision or measured demand before implementation.
 
 Unfinished delivery and validation work.
 
-- [ ] Add cross-platform release artifact packaging to GitHub Actions and verify deployed applications. Build/test jobs and a Qt deployment install script already exist; CI currently uploads test logs only. Bundle the required modules/plugins and establish platform packaging, signing and notarization.
+- [x] Add cross-platform release artifact packaging to GitHub Actions. Tag builds package and publish Windows installers, Linux AppImages and signed/notarized macOS DMGs with deployed Qt modules/plugins and checksums. CI also tests Windows in-place upgrades and platform packaging scripts.
+- [ ] Verify deployed applications on representative Windows, macOS and Linux systems, including scientific I/O and Qt Graphs rendering. Establish Windows installer signing.
 - [ ] Select minimum OS versions, Linux Wayland/X11 support and supported GPU drivers through prototypes and distribution tests.
 - [ ] Add representative desktop benchmarks for cold/warm launch, time to first slice, cached/uncached rapid scrolling, pan/zoom with overlays, idle/peak RAM, GPU memory/uploads/cache eviction, and processing throughput/core scaling. Current Google Benchmark coverage consists of CPU microbenchmarks.
 - [ ] Measure plugin discovery and first execution after the plugin host exists.

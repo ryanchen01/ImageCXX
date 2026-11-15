@@ -757,6 +757,41 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                 window->show(); window->raise(); window->activateWindow();
             });
     }});
+    const QStringList measurementColumns{QT_TRANSLATE_NOOP("CommandChoices", "Pixels"),
+        QT_TRANSLATE_NOOP("CommandChoices", "Area"), QT_TRANSLATE_NOOP("CommandChoices", "Mean"),
+        QT_TRANSLATE_NOOP("CommandChoices", "StdDev"), QT_TRANSLATE_NOOP("CommandChoices", "Min"),
+        QT_TRANSLATE_NOOP("CommandChoices", "Max"), QT_TRANSLATE_NOOP("CommandChoices", "Sum")};
+    commands_.add({"analyze.scatter", tr("Scatter plot..."), QT_TRANSLATE_NOOP("CommandCategories", "Analyze"), {}, false,
+        {{"x", tr("X axis"), ParameterKind::Choice, "Area", 0, 0, measurementColumns},
+         {"y", tr("Y axis"), ParameterKind::Choice, "Mean", 0, 0, measurementColumns}},
+        [this, measurementColumns](const QVariantMap &p) {
+        if (results_->rowCount() == 0) { showError(tr("Measure an image or selection first.")); return; }
+        const int xColumn = measurementColumns.indexOf(p.value("x").toString()) + 2;
+        const int yColumn = measurementColumns.indexOf(p.value("y").toString()) + 2;
+        std::vector<QPointF> points;
+        points.reserve(results_->rowCount());
+        for (int row = 0; row < results_->rowCount(); ++row) {
+            const double x = results_->data(results_->index(row, xColumn)).toDouble();
+            const double y = results_->data(results_->index(row, yColumn)).toDouble();
+            if (std::isfinite(x) && std::isfinite(y)) points.emplace_back(x, y);
+        }
+        if (points.empty()) { showError(tr("The selected columns have no finite measurement pairs.")); return; }
+        const auto xTitle = results_->headerData(xColumn, Qt::Horizontal).toString();
+        const auto yTitle = results_->headerData(yColumn, Qt::Horizontal).toString();
+        auto *window = new QDialog(this, Qt::Window);
+        window->setAttribute(Qt::WA_DeleteOnClose);
+        window->setObjectName("scatterPlotWindow");
+        window->setWindowTitle(tr("Scatter plot: %1 vs %2").arg(yTitle, xTitle));
+        window->resize(640, 400);
+        window->setMinimumSize(420, 260);
+        auto *layout = new QVBoxLayout(window);
+        layout->setContentsMargins(0, 0, 0, 0);
+        auto *plot = new PlotWidget(window, true);
+        layout->addWidget(plot);
+        try { plot->setData(points, xTitle, yTitle); }
+        catch (...) { delete window; showJobError(std::current_exception()); return; }
+        window->show(); window->raise(); window->activateWindow();
+    }});
     commands_.add({"analyze.mask", tr("Create mask from ROI"), QT_TRANSLATE_NOOP("CommandCategories", "Analyze"), {}, true, {}, [this](const QVariantMap &) {
         auto *doc = activeDocument(); const auto roi = selectedRoi();
         if (!doc || !roi || roi->type == RoiType::Line) { showError(tr("Select an area ROI first.")); return; }
@@ -2671,7 +2706,7 @@ void MainWindow::updateWindowMenu()
         auto *action = windowMenu_->addAction(overlay->windowTitle());
         connect(action, &QAction::triggered, overlay, &OverlayWindow::showEditor);
     }
-    for (auto *plot : findChildren<QDialog *>("roiMeasurementsWindow")) {
+    for (auto *plot : findChildren<QDialog *>("roiMeasurementsWindow") + findChildren<QDialog *>("scatterPlotWindow")) {
         auto *action = windowMenu_->addAction(plot->windowTitle());
         const QPointer<QDialog> target(plot);
         connect(action, &QAction::triggered, this, [target] {
