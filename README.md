@@ -10,6 +10,7 @@ It keeps your original pixel data separate from display settings, so adjusting c
 - **Browse multi-dimensional stacks:** Step through depth slices (Z), color channels (C), and time frames (T), or compare images side by side and in 3D using **Single**, **Linked**, **Orthogonal**, and **Overlay** views.
 - **Adjust display non-destructively:** Tune intensity range, gamma, inversion, and channel/color lookup tables (LUTs), add display-only annotations (`B`), and print with calibrated aspect ratios.
 - **Measure, plot, and export:** Draw rectangle, ellipse, polygon, or line selections (ROIs) to inspect intensity statistics, histograms (`H` / `Shift+H`), line profiles (`K`), ROI time/Z plots, and gel/blot lanes, then export results to CSV.
+- **Compare measurements:** Choose **Analyze → Scatter plot…**, select numeric X/Y columns (Area versus Mean by default), and inspect one point per finite measurement pair from all rows of the Measurements table. Plots snapshot the table when created; drag to pan, scroll to zoom, and hover to inspect the nearest visible point.
 - **Process images and batches:** Apply Gaussian blur, median filtering, thresholding, binary dilation/erosion, resampling, reslicing, and 3D projections on a full image, current slice, or selection, with undo/redo and batch processing.
 
 ## Quick Tips

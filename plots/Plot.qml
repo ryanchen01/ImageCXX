@@ -54,6 +54,7 @@ GraphsView {
     }
 
     property int dataRevision: 0
+    property bool scatter: false
     Connections {
         target: graph.seriesList[0]
         function onPointsReplaced() { graph.dataRevision++ }
@@ -69,11 +70,29 @@ GraphsView {
         && pointer.point.position.y >= plotArea.y
         && pointer.point.position.y <= plotArea.y + plotArea.height
     readonly property point sample: {
-        // Profiles and histograms are ordered by X. Find the bracketing samples.
         const revision = dataRevision
         const series = seriesList[0]
         if (!inspecting || !series || series.count === 0)
             return Qt.point(NaN, NaN)
+        if (scatter) {
+            let nearest = Qt.point(NaN, NaN)
+            let distance = Infinity
+            for (let i = 0; i < series.count; ++i) {
+                const point = series.at(i)
+                const px = (point.x - xValues.visualMin) / (xValues.visualMax - xValues.visualMin)
+                const py = (yValues.visualMax - point.y) / (yValues.visualMax - yValues.visualMin)
+                if (px < 0 || px > 1 || py < 0 || py > 1) continue
+                const dx = plotArea.x + px * plotArea.width - pointer.point.position.x
+                const dy = plotArea.y + py * plotArea.height - pointer.point.position.y
+                const squared = dx * dx + dy * dy
+                if (squared < distance) {
+                    distance = squared
+                    nearest = point
+                }
+            }
+            return nearest
+        }
+        // Profiles and histograms are ordered by X. Find the bracketing samples.
         const x = xValues.visualMin + (pointer.point.position.x - plotArea.x)
                   / plotArea.width * (xValues.visualMax - xValues.visualMin)
         let low = 0
@@ -97,13 +116,19 @@ GraphsView {
         objectName: "plotCursor"
         z: 1
         visible: graph.inspecting && isFinite(graph.sample.x)
-                 && x >= graph.plotArea.x && x <= graph.plotArea.x + graph.plotArea.width
+                 && (graph.scatter || (x >= graph.plotArea.x && x <= graph.plotArea.x + graph.plotArea.width))
         x: graph.plotArea.x + (graph.sample.x - graph.xValues.visualMin)
            / (graph.xValues.visualMax - graph.xValues.visualMin) * graph.plotArea.width
-        y: graph.plotArea.y
-        width: 1
-        height: graph.plotArea.height
-        color: "#80766A"
+           - (graph.scatter ? width / 2 : 0)
+        y: graph.scatter ? graph.plotArea.y + (graph.yValues.visualMax - graph.sample.y)
+           / (graph.yValues.visualMax - graph.yValues.visualMin) * graph.plotArea.height - height / 2
+           : graph.plotArea.y
+        width: graph.scatter ? 12 : 1
+        height: graph.scatter ? 12 : graph.plotArea.height
+        radius: graph.scatter ? 6 : 0
+        color: graph.scatter ? "transparent" : "#80766A"
+        border.width: graph.scatter ? 2 : 0
+        border.color: "#3874CB"
     }
 
     Rectangle {
@@ -179,6 +204,7 @@ GraphsView {
         id: interpolation
         parent: graph
         objectName: "plotInterpolation"
+        visible: !graph.scatter
         anchors.left: parent.left
         anchors.bottom: parent.bottom
         anchors.margins: 4

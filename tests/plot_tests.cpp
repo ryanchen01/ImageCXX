@@ -3,6 +3,7 @@
 #include <QApplication>
 #include <QElapsedTimer>
 #include <QLineSeries>
+#include <QScatterSeries>
 #include <QMouseEvent>
 #include <QQuickItem>
 #include <QQuickWidget>
@@ -209,6 +210,61 @@ TEST(Plots, NativeMouseZoomPanHoverAndReset)
     renderPlot();
     EXPECT_FALSE(cursor->isVisible());
     EXPECT_FALSE(readout->isVisible());
+}
+
+TEST(Plots, ScatterHoverUsesBothCoordinatesForUnorderedAndRepeatedXValues)
+{
+    if (QApplication::platformName() == "offscreen") GTEST_SKIP() << "Requires a native Quick scene";
+    PlotWidget plot(nullptr, true);
+    plot.resize(640, 400);
+    plot.setData({{8, 50}, {2, 80}, {2, 10}, {5, 40}}, "Area", "Mean");
+    plot.show(); renderPlot();
+    auto *quick = plot.findChild<QQuickWidget *>(); ASSERT_NE(quick, nullptr);
+    ASSERT_TRUE(plot.ready());
+    auto *series = plot.findChild<QScatterSeries *>(); ASSERT_NE(series, nullptr);
+    auto *graph = quick->rootObject();
+    auto *x = qobject_cast<QValueAxis *>(graph->property("axisX").value<QObject *>());
+    auto *y = qobject_cast<QValueAxis *>(graph->property("axisY").value<QObject *>());
+    ASSERT_NE(x, nullptr); ASSERT_NE(y, nullptr);
+    EXPECT_LT(x->min(), 2); EXPECT_GT(x->max(), 8);
+    auto *interpolation = graph->findChild<QQuickItem *>("plotInterpolation");
+    ASSERT_NE(interpolation, nullptr); EXPECT_FALSE(interpolation->isVisible());
+    for (double zoom : {1., 2.}) {
+        x->setZoom(zoom); renderPlot();
+        for (const auto &point : series->points()) {
+            if (point.x() < x->visualMin() || point.x() > x->visualMax()) continue;
+            const auto area = graph->property("plotArea").toRectF();
+            const QPointF position(area.left() + (point.x() - x->visualMin())
+                    / (x->visualMax() - x->visualMin()) * area.width(),
+                area.top() + (y->visualMax() - point.y())
+                    / (y->visualMax() - y->visualMin()) * area.height());
+            plotMouse(quick, QEvent::MouseMove, position + QPointF(2, 2), Qt::NoButton, {});
+            renderPlot();
+            EXPECT_EQ(graph->property("sample").toPointF(), point);
+            auto *cursor = graph->findChild<QQuickItem *>("plotCursor"); ASSERT_NE(cursor, nullptr);
+            EXPECT_TRUE(cursor->isVisible());
+            EXPECT_NEAR(cursor->x() + cursor->width() / 2, position.x(), 1);
+            EXPECT_NEAR(cursor->y() + cursor->height() / 2, position.y(), 1);
+        }
+    }
+    // Replacing values must refresh the hovered point even when ranges stay the same.
+    plot.setData({{8, 50}, {2, 80}, {2, 10}, {5, 45}}, "Area", "Mean");
+    renderPlot();
+    EXPECT_EQ(graph->property("sample").toPointF(), QPointF(5, 45));
+    // A point just inside the left edge must keep its ring even when the ring crosses the edge.
+    x->setRange(4.98, 8); renderPlot();
+    const auto area = graph->property("plotArea").toRectF();
+    const QPointF position(area.left() + (5 - x->visualMin()) / (x->visualMax() - x->visualMin()) * area.width(),
+        area.top() + (y->visualMax() - 45) / (y->visualMax() - y->visualMin()) * area.height());
+    plotMouse(quick, QEvent::MouseMove, position, Qt::NoButton, {}); renderPlot();
+    EXPECT_EQ(graph->property("sample").toPointF(), QPointF(5, 45));
+    auto *cursor = graph->findChild<QQuickItem *>("plotCursor"); ASSERT_NE(cursor, nullptr);
+    EXPECT_LT(cursor->x(), area.left());
+    EXPECT_TRUE(cursor->isVisible());
+    const auto capture = qEnvironmentVariable("IMAGECXX_PLOT_CAPTURE_PATH");
+    if (!capture.isEmpty()) EXPECT_TRUE(plot.grab().save(capture + "scatter-hover.png"));
+    plotMouse(quick, QEvent::MouseMove, {2, 2}, Qt::NoButton, {}); renderPlot();
+    EXPECT_FALSE(graph->findChild<QQuickItem *>("plotCursor")->isVisible());
 }
 
 TEST(Plots, CompactLayoutFitsLargeAndSmallValues)

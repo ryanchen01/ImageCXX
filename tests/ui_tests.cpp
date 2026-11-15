@@ -2,6 +2,7 @@
 #include "io/image_io.h"
 #include "core/memory.h"
 #include <QLineSeries>
+#include <QScatterSeries>
 #include <QQuickWidget>
 #include <QQuickItem>
 #include <QValueAxis>
@@ -854,6 +855,89 @@ TEST(Desktop, UnrepresentableLineProfileShowsAnErrorAndFinishesItsJob)
     EXPECT_TRUE(error.contains("too wide")) << error.toStdString();
     ASSERT_NE(window.panel("profile"), nullptr);
     EXPECT_FALSE(window.panel("profile")->isVisible());
+}
+
+TEST(Desktop, ScatterPlotsUseNumericMeasurementColumnsAndKeepASnapshot)
+{
+    MainWindow window;
+    auto *action = window.findChild<QAction *>("analyze.scatter");
+    ASSERT_NE(action, nullptr);
+    EXPECT_TRUE(action->isEnabled());
+    EXPECT_FALSE(window.commands().command("analyze.scatter").needsImage);
+    ImageMetadata metadata;
+    metadata.axes = {{"X", .5, 0, "um"}, {"Y", 1, 0, "um"}};
+    metadata.intensityScale = 2; metadata.intensityOffset = 3;
+    auto image = Image::allocate(PixelType::UInt16, {3, 1}, metadata);
+    for (std::size_t x = 0; x < 3; ++x)
+        image.setValue(std::array<std::size_t, 2>{x, 0}, 10 * (x + 1));
+    auto *doc = window.addDocument(image);
+    for (int width : {3, 1, 2}) {
+        Roi roi; roi.points = {{0, 0}, {double(width), 1}};
+        doc->setSelection(roi);
+        window.commands().execute("analyze.measure");
+        ASSERT_TRUE(finishJobs(window));
+    }
+    QTimer::singleShot(0, &window, [] {
+        auto *form = qobject_cast<QDialog *>(QApplication::activeModalWidget()); ASSERT_NE(form, nullptr);
+        auto *x = form->findChild<QComboBox *>("x"); ASSERT_NE(x, nullptr);
+        auto *y = form->findChild<QComboBox *>("y"); ASSERT_NE(y, nullptr);
+        EXPECT_EQ(x->currentText(), "Area");
+        EXPECT_EQ(y->currentText(), "Mean");
+        EXPECT_EQ(x->count(), 7);
+        EXPECT_EQ(x->findText("Image"), -1);
+        form->accept();
+    });
+    window.executeCommand("analyze.scatter");
+    auto *plot = window.findChild<QDialog *>("scatterPlotWindow"); ASSERT_NE(plot, nullptr);
+    auto *series = plot->findChild<QScatterSeries *>(); ASSERT_NE(series, nullptr);
+    const QList<QPointF> expected{{1.5, 43}, {.5, 23}, {1, 33}};
+    EXPECT_EQ(series->points(), expected);
+    const auto axes = plot->findChildren<QValueAxis *>(); ASSERT_EQ(axes.size(), 2);
+    EXPECT_EQ(axes[0]->titleText(), "Area"); EXPECT_EQ(axes[1]->titleText(), "Mean");
+    auto *table = window.panel("measurements")->findChild<QTableView *>(); ASSERT_NE(table, nullptr);
+    auto *model = table->model();
+    model->setData(model->index(0, 4), std::numeric_limits<double>::quiet_NaN());
+    EXPECT_EQ(series->points(), expected);
+    window.commands().execute("analyze.scatter", {{"x", "Pixels"}, {"y", "Mean"}});
+    const auto plots = window.findChildren<QDialog *>("scatterPlotWindow"); ASSERT_EQ(plots.size(), 2);
+    EXPECT_EQ(plots.back()->findChild<QScatterSeries *>()->points(), (QList<QPointF>{{1, 23}, {2, 33}}));
+    EXPECT_THROW(window.commands().execute("analyze.scatter", {{"x", "Image"}}), std::invalid_argument);
+    auto *menu = window.findChild<QMenu *>("windowMenu"); ASSERT_NE(menu, nullptr);
+    menu->aboutToShow(); plot->hide();
+    QAction *plotAction = nullptr;
+    for (auto *entry : menu->actions()) if (entry->text() == plot->windowTitle()) plotAction = entry;
+    ASSERT_NE(plotAction, nullptr); plotAction->trigger(); EXPECT_TRUE(plot->isVisible());
+    const auto capture = qEnvironmentVariable("IMAGECXX_PLOT_CAPTURE_PATH");
+    if (!capture.isEmpty()) {
+        EXPECT_TRUE(waitFor([plot] { return plot->isVisible(); }));
+        QElapsedTimer timer; timer.start();
+        while (timer.elapsed() < 200) { QCoreApplication::processEvents(); QThread::msleep(2); }
+        EXPECT_TRUE(plot->grab().save(capture + "measurement-scatter.png"));
+    }
+    EXPECT_FALSE(doc->modified);
+    EXPECT_DOUBLE_EQ(doc->image.sample(2, 0), 30);
+}
+
+TEST(Desktop, ScatterPlotsReportMissingMeasurementsAndFinitePairs)
+{
+    MainWindow window;
+    QString error;
+    QTimer dismiss;
+    QObject::connect(&dismiss, &QTimer::timeout, [&] {
+        if (auto *message = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+            error = message->text(); message->accept();
+        }
+    });
+    dismiss.start(1);
+    window.commands().execute("analyze.scatter");
+    EXPECT_EQ(error, "Measure an image or selection first.");
+    window.addDocument(Image::allocate(PixelType::UInt8, {1, 1}));
+    window.commands().execute("analyze.measure"); ASSERT_TRUE(finishJobs(window));
+    auto *model = window.panel("measurements")->findChild<QTableView *>()->model();
+    model->setData(model->index(0, 4), std::numeric_limits<double>::infinity());
+    window.commands().execute("analyze.scatter");
+    EXPECT_EQ(error, "The selected columns have no finite measurement pairs.");
+    EXPECT_EQ(window.findChild<QDialog *>("scatterPlotWindow"), nullptr);
 }
 
 TEST(Desktop, RoiMeasurementPlotsPreserveCalibrationScopeAndExportSnapshotStatistics)
