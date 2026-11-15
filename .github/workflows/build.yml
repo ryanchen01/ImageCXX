@@ -32,7 +32,6 @@ jobs:
           - os: macos-26
             triplet: arm64-osx
             qt-arch: clang_64
-            cache-prefix: vcpkg-macos14.4-v2
     env:
       VCPKG_ROOT: ${{ github.workspace }}/build/vcpkg
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/build/vcpkg-cache
@@ -98,10 +97,10 @@ jobs:
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: build/vcpkg-cache
-          key: ${{ matrix.cache-prefix || 'vcpkg' }}-${{ runner.os }}-${{ matrix.triplet }}-${{ steps.cache-image.outputs.image }}-${{ hashFiles('vcpkg.json', 'packaging/triplets/**') }}
+          key: vcpkg-release-v1-${{ runner.os }}-${{ matrix.triplet }}-${{ steps.cache-image.outputs.image }}-${{ hashFiles('vcpkg.json', 'packaging/triplets/**') }}
           restore-keys: |
-            ${{ matrix.cache-prefix || 'vcpkg' }}-${{ runner.os }}-${{ matrix.triplet }}-${{ steps.cache-image.outputs.image }}-
-            ${{ matrix.cache-prefix || 'vcpkg' }}-${{ runner.os }}-${{ matrix.triplet }}-
+            vcpkg-release-v1-${{ runner.os }}-${{ matrix.triplet }}-${{ steps.cache-image.outputs.image }}-
+            vcpkg-release-v1-${{ runner.os }}-${{ matrix.triplet }}-
 
       - name: Bootstrap vcpkg on Unix
         if: runner.os != 'Windows'
@@ -121,9 +120,9 @@ jobs:
       - name: Configure
         shell: bash
         run: |
-          args=(-DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DIMAGECXX_BUILD_BENCHMARKS=ON)
+          args=(-DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DVCPKG_OVERLAY_TRIPLETS="$GITHUB_WORKSPACE/packaging/triplets/ci" -DIMAGECXX_BUILD_BENCHMARKS=ON)
           if [[ "$RUNNER_OS" == macOS ]]; then
-            args+=(-DCMAKE_OSX_DEPLOYMENT_TARGET=14.4 -DVCPKG_OVERLAY_TRIPLETS="$GITHUB_WORKSPACE/packaging/triplets")
+            args+=(-DCMAKE_OSX_DEPLOYMENT_TARGET=14.4)
           fi
           cmake --preset release-vcpkg "${args[@]}" \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache

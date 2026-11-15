@@ -3,6 +3,13 @@ name: Release installers
 on:
   push:
     tags: ['*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version for installer validation (does not publish a release)'
+        required: true
+        default: '0.0.1'
+        type: string
 
 permissions:
   contents: read
@@ -30,7 +37,6 @@ jobs:
           - os: macos-26
             triplet: arm64-osx
             qt-arch: clang_64
-            cache-prefix: vcpkg-macos14.4-v2
     env:
       VCPKG_ROOT: ${{ github.workspace }}/build/vcpkg
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/build/vcpkg-cache
@@ -42,13 +48,15 @@ jobs:
       - name: Check out source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - name: Derive version from tag
+      - name: Determine installer version
         id: version
         shell: bash
+        env:
+          INSTALLER_VERSION: ${{ inputs.version || github.ref_name }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${INSTALLER_VERSION#v}"
           if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo 'Release tags must be vMAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH' >&2
+            echo 'Installer versions must be vMAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH' >&2
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -83,8 +91,38 @@ jobs:
           aqtsource: 'git+https://github.com/miurahr/aqtinstall.git@7e5a5c3d95cf962cfc2f36c86ffa0d2c07f1a0d4'
           arch: ${{ matrix.qt-arch }}
           modules: 'qtshadertools qtgraphs qtimageformats qtquick3d qtquicktimeline'
-          tools: ${{ runner.os == 'Windows' && 'tools_ifw' || '' }}
           cache: true
+
+      - name: Install Windows installer tools
+        if: runner.os == 'Windows'
+        uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125 # v4.4.1
+        with:
+          version: '6.12.0'
+          setup-python: false
+          aqtsource: 'git+https://github.com/miurahr/aqtinstall.git@7e5a5c3d95cf962cfc2f36c86ffa0d2c07f1a0d4'
+          # Keep this cache separate from the Qt SDK shared with build/test CI.
+          dir: '${{ github.workspace }}/build/qt-installer-tools'
+          no-qt-binaries: true
+          set-env: false
+          tools: 'tools_ifw,4.7.0,qt.tools.ifw.47'
+          cache: true
+
+      - name: Verify Windows Qt and installer tool paths
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $sdkBin = [IO.Path]::GetFullPath("$env:QT_ROOT_DIR/bin")
+          $toolsBin = [IO.Path]::GetFullPath("$env:GITHUB_WORKSPACE/build/qt-installer-tools/Qt/Tools/QtInstallerFramework/4.7/bin")
+          foreach ($name in @('qmake', 'windeployqt', 'binarycreator', 'repogen', 'archivegen')) {
+            $command = Get-Command "$name.exe" -ErrorAction Stop
+            $expected = if ($name -in @('qmake', 'windeployqt')) { $sdkBin } else { $toolsBin }
+            if ([IO.Path]::GetDirectoryName($command.Source) -ne $expected) {
+              throw "Unexpected path for ${name}: $($command.Source)"
+            }
+            Write-Host "$name -> $($command.Source)"
+          }
+          if ((qmake -query QT_VERSION) -ne '6.12.0') { throw 'Unexpected Qt SDK version' }
+          binarycreator --version
 
       - name: Check out pinned vcpkg
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -105,10 +143,10 @@ jobs:
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: build/vcpkg-cache
-          key: ${{ matrix.cache-prefix || 'vcpkg' }}-${{ runner.os }}-${{ matrix.triplet }}-${{ steps.cache-image.outputs.image }}-${{ hashFiles('vcpkg.json', 'packaging/triplets/**') }}
+          key: vcpkg-release-v1-${{ runner.os }}-${{ matrix.triplet }}-${{ steps.cache-image.outputs.image }}-${{ hashFiles('vcpkg.json', 'packaging/triplets/**') }}
           restore-keys: |
-            ${{ matrix.cache-prefix || 'vcpkg' }}-${{ runner.os }}-${{ matrix.triplet }}-${{ steps.cache-image.outputs.image }}-
-            ${{ matrix.cache-prefix || 'vcpkg' }}-${{ runner.os }}-${{ matrix.triplet }}-
+            vcpkg-release-v1-${{ runner.os }}-${{ matrix.triplet }}-${{ steps.cache-image.outputs.image }}-
+            vcpkg-release-v1-${{ runner.os }}-${{ matrix.triplet }}-
 
       - name: Bootstrap vcpkg on Unix
         if: runner.os != 'Windows'
@@ -135,9 +173,9 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          args=(-DIMAGECXX_VERSION="$VERSION" -DIMAGECXX_ENABLE_UPDATES=ON -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }})
+          args=(-DIMAGECXX_VERSION="$VERSION" -DIMAGECXX_ENABLE_UPDATES=ON -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DVCPKG_OVERLAY_TRIPLETS="$GITHUB_WORKSPACE/packaging/triplets/ci")
           if [[ "$RUNNER_OS" == macOS ]]; then
-            args+=(-DIMAGECXX_SPARKLE_ROOT="$GITHUB_WORKSPACE/build/tools" -DCMAKE_OSX_DEPLOYMENT_TARGET=14.4 -DVCPKG_OVERLAY_TRIPLETS="$GITHUB_WORKSPACE/packaging/triplets")
+            args+=(-DIMAGECXX_SPARKLE_ROOT="$GITHUB_WORKSPACE/build/tools" -DCMAKE_OSX_DEPLOYMENT_TARGET=14.4)
           fi
           cmake --preset release-vcpkg "${args[@]}" \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
@@ -216,6 +254,7 @@ jobs:
           if-no-files-found: ignore
 
   publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     needs: desktop
     runs-on: ubuntu-24.04
     permissions:
