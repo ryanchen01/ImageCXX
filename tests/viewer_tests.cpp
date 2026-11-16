@@ -2,6 +2,7 @@
 #include "ui/document_widget.h"
 
 #include <QApplication>
+#include <QContextMenuEvent>
 #include <QElapsedTimer>
 #include <QKeyEvent>
 #include <QMouseEvent>
@@ -944,6 +945,69 @@ TEST(Viewer, RoiClicksAndEscapeExitEditingBeforeClearingSelection)
     ASSERT_TRUE(document.selection);
     roiKey(viewer, Qt::Key_Escape);
     EXPECT_FALSE(document.selection);
+}
+
+TEST(Viewer, RoiContextMenuPicksVisibleOutlinesWithAnyToolAndIgnoresEmptySpace)
+{
+    DocumentWidget document(Image::allocate(PixelType::UInt8, {100, 100, 1, 2, 2}));
+    auto &viewer = *document.viewer;
+    viewer.resize(400, 400); viewer.setZoom(4);
+    Roi line; line.type = RoiType::Line; line.points = {{10, 20}, {40, 20}};
+    Roi hidden; hidden.points = {{10, 10}, {40, 40}}; hidden.visible = false;
+    Roi otherChannel; otherChannel.points = hidden.points; otherChannel.channel = 1;
+    Roi otherTime; otherTime.points = hidden.points; otherTime.time = 1;
+    document.rois = {line, hidden, otherChannel, otherTime}; document.refreshRois();
+    int requests = 0;
+    QPoint globalPosition;
+    QObject::connect(&viewer, &ImageViewer::roiContextMenuRequested, [&](const QPoint &position) {
+        ++requests; globalPosition = position;
+    });
+    for (auto tool : {ImageViewer::Tool::Pointer, ImageViewer::Tool::Rectangle, ImageViewer::Tool::Ellipse,
+                      ImageViewer::Tool::Line, ImageViewer::Tool::Polygon}) {
+        viewer.setTool(tool);
+        document.setSelection({});
+        const auto position = viewer.imageToWidget({25, 20.75}).toPoint();
+        QContextMenuEvent event(QContextMenuEvent::Mouse, position, viewer.mapToGlobal(position));
+        QApplication::sendEvent(&viewer, &event);
+        EXPECT_TRUE(event.isAccepted());
+        ASSERT_TRUE(document.selection); EXPECT_EQ(document.selection->id, line.id);
+        EXPECT_EQ(document.selection->points, line.points);
+        EXPECT_EQ(globalPosition, viewer.mapToGlobal(position));
+    }
+    EXPECT_EQ(requests, 5);
+    const auto empty = viewer.imageToWidget({80, 80}).toPoint();
+    QContextMenuEvent miss(QContextMenuEvent::Mouse, empty, viewer.mapToGlobal(empty));
+    QApplication::sendEvent(&viewer, &miss);
+    EXPECT_EQ(requests, 5);
+    ASSERT_TRUE(document.selection); EXPECT_EQ(document.selection->id, line.id);
+
+    document.setSelection({}); viewer.setComposite(true);
+    const auto position = viewer.imageToWidget({25, 20}).toPoint();
+    QContextMenuEvent composite(QContextMenuEvent::Mouse, position, viewer.mapToGlobal(position));
+    QApplication::sendEvent(&viewer, &composite);
+    EXPECT_EQ(requests, 6);
+    ASSERT_TRUE(document.selection); EXPECT_EQ(document.selection->id, otherChannel.id);
+}
+
+TEST(Viewer, RightClickCompletesADraftPolygonWithoutRequestingAnRoiMenu)
+{
+    DocumentWidget document(Image::allocate(PixelType::UInt8, {100, 100}));
+    auto &viewer = *document.viewer;
+    viewer.resize(400, 400); viewer.setZoom(4); viewer.setTool(ImageViewer::Tool::Polygon);
+    int requests = 0;
+    QObject::connect(&viewer, &ImageViewer::roiContextMenuRequested, [&] { ++requests; });
+    roiClick(viewer, {10, 10}); roiClick(viewer, {40, 10}); roiClick(viewer, {25, 40});
+    roiMouse(viewer, QEvent::MouseButtonPress, {25, 20}, {}, Qt::RightButton);
+    roiMouse(viewer, QEvent::MouseButtonRelease, {25, 20}, {}, Qt::RightButton);
+    const auto position = viewer.imageToWidget({25, 20}).toPoint();
+    QContextMenuEvent event(QContextMenuEvent::Mouse, position, viewer.mapToGlobal(position));
+    QApplication::sendEvent(&viewer, &event);
+    EXPECT_EQ(requests, 0);
+    ASSERT_TRUE(document.selection); EXPECT_EQ(document.selection->type, RoiType::Polygon);
+    EXPECT_EQ(document.selection->points, (std::vector<QPointF>{{10, 10}, {40, 10}, {25, 40}}));
+    QContextMenuEvent menu(QContextMenuEvent::Mouse, position, viewer.mapToGlobal(position));
+    QApplication::sendEvent(&viewer, &menu);
+    EXPECT_EQ(requests, 1);
 }
 
 TEST(Viewer, RoiHandlesResizeMoveAndUpdateManagedRois)

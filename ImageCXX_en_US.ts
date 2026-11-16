@@ -334,6 +334,16 @@
         <source>New image</source>
         <translation type="unfinished"></translation>
     </message>
+    <message>
+        <location filename="mainwindow.cpp" line="904"/>
+        <source>Index</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="mainwindow.cpp" line="905"/>
+        <source>Slice</source>
+        <translation type="unfinished"></translation>
+    </message>
 </context>
 <context>
     <name>CommandRegistry</name>
@@ -3382,6 +3392,64 @@ Close without saving them?</source>
     <message>
         <location filename="mainwindow.cpp" line="2819"/>
         <source>Cancel running jobs and close ImageCXX?</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="mainwindow.cpp" line="639"/>
+        <location filename="mainwindow.cpp" line="1899"/>
+        <source>Multi Measure...</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="mainwindow.cpp" line="651"/>
+        <source>Select one or more ROIs in the ROI manager first.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="mainwindow.cpp" line="657"/>
+        <location filename="mainwindow.cpp" line="686"/>
+        <location filename="mainwindow.cpp" line="1944"/>
+        <source>Multi Measure</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="mainwindow.cpp" line="659"/>
+        <source>Measure all %1 slices</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="mainwindow.cpp" line="661"/>
+        <source>Includes all channels and time frames.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="mainwindow.cpp" line="662"/>
+        <source>One row per slice</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="mainwindow.cpp" line="663"/>
+        <source>Put each selected ROI&apos;s measurements in separate columns on the same row.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="mainwindow.cpp" line="664"/>
+        <source>Append results</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="mainwindow.cpp" line="678"/>
+        <source>%1 [%2]</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="mainwindow.cpp" line="1895"/>
+        <source>Measure...</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="mainwindow.cpp" line="1944"/>
+        <source>Multi Measure - one row per slice</source>
         <translation type="unfinished"></translation>
     </message>
 </context>

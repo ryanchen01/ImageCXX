@@ -106,6 +106,12 @@ QString propertyClipboardText(QTreeWidget *tree, int column, const QTreeWidgetIt
     return lines.join('\n');
 }
 
+QList<QVariant> measurementValues(const Measurement &m)
+{
+    return {QVariant::fromValue<qulonglong>(m.count), m.area, m.mean, m.standardDeviation,
+        m.minimum, m.maximum, m.sum, m.areaUnit, m.intensityUnit};
+}
+
 Image imageFromRaster(QImage raster)
 {
     if (raster.isNull()) return {};
@@ -229,8 +235,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         QStatusBar QProgressBar::chunk { background: #2E69B8; border-radius: 3px; }
     )");
     results_ = new QStandardItemModel(0, 11, this);
-    results_->setHorizontalHeaderLabels({tr("Image"), tr("ROI / slice"), tr("Pixels"), tr("Area"),
-        tr("Mean"), tr("Std. dev."), tr("Min"), tr("Max"), tr("Sum"), tr("Area unit"), tr("Intensity unit")});
+    const QStringList measurementHeaders{tr("Pixels"), tr("Area"), tr("Mean"), tr("Std. dev."),
+        tr("Min"), tr("Max"), tr("Sum"), tr("Area unit"), tr("Intensity unit")};
+    results_->setHorizontalHeaderLabels(QStringList{tr("Image"), tr("ROI / slice")} + measurementHeaders);
 
     pixelStatus_ = new QLabel(tr("Ready"), this);
     jobStatus_ = new QLabel(this);
@@ -614,19 +621,120 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         const auto *doc = activeDocument(); if (!doc) return;
         const auto slice = doc->image.slice(doc->viewer->slice(), doc->viewer->channel(), doc->viewer->time());
         const auto roi = selectedRoi();
+        const auto sliceIndex = doc->viewer->slice() + 1;
         const QString location = roi ? roi->name : tr("Slice Z%1 C%2 T%3").arg(doc->viewer->slice() + 1).arg(doc->viewer->channel() + 1).arg(doc->viewer->time() + 1);
         auto output = std::make_shared<Measurement>();
         jobs_.submit(tr("Measuring"), [slice, roi, output](auto stop, auto) { *output = measure(slice, roi, true, stop); },
-            [this, output, location](auto error) {
+            [this, output, location, sliceIndex](auto error) {
                 if (showJobError(error)) return;
                 const auto &m = *output;
                 QList<QStandardItem *> row;
-                const QList<QVariant> values{m.imageName, location, QVariant::fromValue<qulonglong>(m.count), m.area, m.mean,
-                    m.standardDeviation, m.minimum, m.maximum, m.sum, m.areaUnit, m.intensityUnit};
+                const auto values = QList<QVariant>{m.imageName, location} + measurementValues(m);
                 for (const auto &value : values) { auto *item = new QStandardItem; item->setData(value, Qt::DisplayRole); row.append(item); }
+                row[1]->setData(QVariant::fromValue<qulonglong>(sliceIndex), Qt::UserRole);
                 ensurePanel("measurements");
                 results_->appendRow(row); showPanel("measurements");
             });
+    }});
+    commands_.add({"analyze.multiMeasure", tr("Multi Measure..."), QT_TRANSLATE_NOOP("CommandCategories", "Analyze"), {}, true, {},
+        [this, measurementHeaders](const QVariantMap &) {
+        const auto *doc = activeDocument(); if (!doc) return;
+        std::vector<Roi> rois;
+        if (rois_ && panel("rois")->isVisible()) for (int row = 0; row < rois_->count(); ++row) {
+            if (!rois_->item(row)->isSelected()) continue;
+            auto roi = doc->rois[std::size_t(row)];
+            if (roi.name.isEmpty()) roi.name = tr("ROI %1").arg(row + 1);
+            rois.push_back(std::move(roi));
+        }
+        if (rois.empty()) { showError(tr("Select one or more ROIs in the ROI manager first.")); return; }
+        const auto image = doc->image;
+        const auto planeCount = image.depth() * image.channels() * image.frames();
+        const auto currentPlane = doc->viewer->channel() + image.channels()
+            * (doc->viewer->slice() + image.depth() * doc->viewer->time());
+        QDialog dialog(this);
+        dialog.setObjectName("multiMeasureDialog"); dialog.setWindowTitle(tr("Multi Measure"));
+        auto *layout = new QVBoxLayout(&dialog);
+        auto *allSlices = new QCheckBox(tr("Measure all %1 slices").arg(planeCount), &dialog);
+        allSlices->setObjectName("measureAllSlices"); allSlices->setChecked(true); allSlices->setEnabled(planeCount > 1);
+        allSlices->setToolTip(tr("Includes all channels and time frames."));
+        auto *oneRow = new QCheckBox(tr("One row per slice"), &dialog); oneRow->setObjectName("oneRowPerSlice");
+        oneRow->setToolTip(tr("Put each selected ROI's measurements in separate columns on the same row."));
+        auto *append = new QCheckBox(tr("Append results"), &dialog); append->setObjectName("appendResults");
+        layout->addWidget(allSlices); layout->addWidget(oneRow); layout->addWidget(append);
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+        layout->addWidget(buttons);
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        if (dialog.exec() != QDialog::Accepted) return;
+        const bool wide = oneRow->isChecked(), appendResults = append->isChecked();
+        const auto count = allSlices->isChecked() ? planeCount : std::size_t(1);
+        const auto firstPlane = allSlices->isChecked() ? std::size_t(0) : currentPlane;
+        QStringList headers{tr("Image"), tr("Slice"), tr("Channel"), tr("Frame")};
+        QStringList keys{"image", "slice", "channel", "frame"};
+        if (wide) {
+            for (std::size_t i = 0; i < rois.size(); ++i) for (int field = 0; field < measurementHeaders.size(); ++field) {
+                headers.append(measurementHeaders[field]);
+                keys.append(rois[i].id + '/' + QString::number(field));
+            }
+        } else {
+            headers.insert(1, tr("ROI")); keys.insert(1, "roi"); headers += measurementHeaders;
+            for (int field = 0; field < measurementHeaders.size(); ++field) keys.append(QString::number(field));
+        }
+        auto output = std::make_shared<QList<QList<QVariant>>>();
+        jobs_.submit(tr("Multi Measure"), [image, rois, firstPlane, count, wide, output](auto stop, auto progress) {
+            for (std::size_t plane = firstPlane; plane < firstPlane + count; ++plane) {
+                const auto channel = plane % image.channels();
+                const auto z = (plane / image.channels()) % image.depth();
+                const auto time = plane / (image.channels() * image.depth());
+                const auto slice = image.slice(z, channel, time);
+                const QList<QVariant> position{image.metadata().name, QVariant::fromValue<qulonglong>(z + 1),
+                    QVariant::fromValue<qulonglong>(channel + 1), QVariant::fromValue<qulonglong>(time + 1)};
+                auto row = position;
+                for (std::size_t i = 0; i < rois.size(); ++i) {
+                    const auto m = measure(slice, rois[i], true, stop);
+                    if (wide) row += measurementValues(m);
+                    else {
+                        auto values = position; values.insert(1, rois[i].name);
+                        output->append(values + measurementValues(m));
+                    }
+                    progress((double(plane - firstPlane) + double(i + 1) / rois.size()) / count);
+                }
+                if (wide) output->append(std::move(row));
+            }
+        }, [this, output, wide, appendResults, headers, keys, rois, measurementHeaders](auto error) {
+            if (showJobError(error)) return;
+            const QString id = wide ? "multiMeasurementsPerSlice" : "multiMeasurements";
+            ensurePanel(id);
+            auto *window = panel(id);
+            auto *model = qobject_cast<QStandardItemModel *>(window->findChild<QTableView *>()->model());
+            if (!appendResults) { model->clear(); window->setProperty("exportedRows", 0); }
+            QHash<QString, int> columns;
+            for (int column = 0; column < model->columnCount(); ++column)
+                columns.insert(model->headerData(column, Qt::Horizontal, Qt::UserRole).toString(), column);
+            QList<int> destinations;
+            for (int column = 0; column < keys.size(); ++column) {
+                if (!columns.contains(keys[column])) {
+                    columns.insert(keys[column], model->columnCount());
+                    model->setColumnCount(model->columnCount() + 1);
+                }
+                const int destination = columns.value(keys[column]); destinations.append(destination);
+                auto heading = headers[column];
+                if (wide && column >= 4) {
+                    // Retained column groups give each ROI a stable number across appends.
+                    const auto number = (destination - 4) / measurementHeaders.size() + 1;
+                    const auto &roi = rois[std::size_t((column - 4) / measurementHeaders.size())];
+                    heading = tr("%1 [%2]").arg(heading, tr("%1: %2").arg(number).arg(roi.name));
+                }
+                model->setHeaderData(destination, Qt::Horizontal, heading);
+                model->setHeaderData(destination, Qt::Horizontal, keys[column], Qt::UserRole);
+            }
+            for (const auto &values : *output) {
+                const int row = model->rowCount(); model->insertRow(row);
+                for (int column = 0; column < values.size(); ++column)
+                    model->setData(model->index(row, destinations[column]), values[column]);
+            }
+            showPanel(id);
+        });
     }});
     commands_.add({"analyze.histogram", tr("Histogram"), QT_TRANSLATE_NOOP("CommandCategories", "Analyze"), QKeySequence("H"), true, {}, [this](const QVariantMap &) { showPlot(false); }});
     commands_.add({"analyze.profile", tr("Line profile"), QT_TRANSLATE_NOOP("CommandCategories", "Analyze"), QKeySequence("K"), true, {}, [this](const QVariantMap &) { showPlot(true); }});
@@ -798,7 +906,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
                 window->show(); window->raise(); window->activateWindow();
             });
     }});
-    const QStringList measurementColumns{QT_TRANSLATE_NOOP("CommandChoices", "Pixels"),
+    const QStringList measurementColumns{QT_TRANSLATE_NOOP("CommandChoices", "Index"),
+        QT_TRANSLATE_NOOP("CommandChoices", "Slice"), QT_TRANSLATE_NOOP("CommandChoices", "Pixels"),
         QT_TRANSLATE_NOOP("CommandChoices", "Area"), QT_TRANSLATE_NOOP("CommandChoices", "Mean"),
         QT_TRANSLATE_NOOP("CommandChoices", "StdDev"), QT_TRANSLATE_NOOP("CommandChoices", "Min"),
         QT_TRANSLATE_NOOP("CommandChoices", "Max"), QT_TRANSLATE_NOOP("CommandChoices", "Sum")};
@@ -807,18 +916,22 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
          {"y", tr("Y axis"), ParameterKind::Choice, "Mean", 0, 0, measurementColumns}},
         [this, measurementColumns](const QVariantMap &p) {
         if (results_->rowCount() == 0) { showError(tr("Measure an image or selection first.")); return; }
-        const int xColumn = measurementColumns.indexOf(p.value("x").toString()) + 2;
-        const int yColumn = measurementColumns.indexOf(p.value("y").toString()) + 2;
+        const int xColumn = measurementColumns.indexOf(p.value("x").toString());
+        const int yColumn = measurementColumns.indexOf(p.value("y").toString());
+        const auto value = [this](int row, int column) {
+            return column == 0 ? row + 1 : results_->data(results_->index(row, column),
+                column == 1 ? Qt::UserRole : Qt::DisplayRole).toDouble();
+        };
         std::vector<QPointF> points;
         points.reserve(results_->rowCount());
         for (int row = 0; row < results_->rowCount(); ++row) {
-            const double x = results_->data(results_->index(row, xColumn)).toDouble();
-            const double y = results_->data(results_->index(row, yColumn)).toDouble();
+            const double x = value(row, xColumn);
+            const double y = value(row, yColumn);
             if (std::isfinite(x) && std::isfinite(y)) points.emplace_back(x, y);
         }
         if (points.empty()) { showError(tr("The selected columns have no finite measurement pairs.")); return; }
-        const auto xTitle = results_->headerData(xColumn, Qt::Horizontal).toString();
-        const auto yTitle = results_->headerData(yColumn, Qt::Horizontal).toString();
+        const auto xTitle = QCoreApplication::translate("CommandChoices", qPrintable(measurementColumns[xColumn]));
+        const auto yTitle = QCoreApplication::translate("CommandChoices", qPrintable(measurementColumns[yColumn]));
         auto *window = new QDialog(this, Qt::Window);
         window->setAttribute(Qt::WA_DeleteOnClose);
         window->setObjectName("scatterPlotWindow");
@@ -850,23 +963,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             });
     }});
     commands_.add({"results.export", tr("Export measurements as CSV..."), QT_TRANSLATE_NOOP("CommandCategories", "Analyze"), {}, false, {}, [this](const QVariantMap &) {
-        const auto path = QFileDialog::getSaveFileName(this, tr("Export measurements"), "measurements.csv", tr("CSV (*.csv)"));
-        if (path.isEmpty()) return;
-        const int rowCount = results_->rowCount();
-        QByteArray bytes;
-        for (int row = -1; row < rowCount; ++row) {
-            for (int column = 0; column < results_->columnCount(); ++column) {
-                QString text = row < 0 ? results_->headerData(column, Qt::Horizontal).toString() : results_->data(results_->index(row, column)).toString();
-                if (column) bytes += ',';
-                bytes += detail::spreadsheetCsvCell(std::move(text)).toUtf8();
-            }
-            bytes += '\n';
-        }
-        QSaveFile file(path);
-        if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit()) {
-            showError(tr("Cannot write measurements.")); return;
-        }
-        exportedMeasurementRows_ = rowCount;
+        ensurePanel("measurements"); exportMeasurements(panel("measurements"));
     }});
     commands_.add({"process.batch", tr("Batch process files..."), QT_TRANSLATE_NOOP("CommandCategories", "Process"), {}, false, {}, [this](const QVariantMap &) {
         QStringList labels, ids;
@@ -1796,15 +1893,19 @@ void MainWindow::ensurePanel(const QString &id)
         roiLayout->setContentsMargins(8, 8, 8, 8);
         rois_ = new QListWidget(roiPanel);
         rois_->setObjectName("roiList");
-        rois_->setSelectionMode(QAbstractItemView::SingleSelection);
+        rois_->setSelectionMode(QAbstractItemView::ExtendedSelection);
         rois_->setToolTip(tr("Double-click a name to rename the ROI."));
         roiLayout->addWidget(rois_);
         auto *roiButtons = new QHBoxLayout;
-        auto *measureButton = new QPushButton(tr("Measure"), roiPanel);
+        auto *measureButton = new QPushButton(tr("Measure..."), roiPanel);
+        measureButton->setObjectName("roiMeasure");
+        auto *measureMenu = new QMenu(measureButton);
+        measureMenu->addAction(tr("Measure"), this, [this] { executeCommand("analyze.measure"); });
+        measureMenu->addAction(tr("Multi Measure..."), this, [this] { executeCommand("analyze.multiMeasure"); });
+        measureButton->setMenu(measureMenu);
         auto *removeRoi = new QPushButton(tr("Remove"), roiPanel);
         roiButtons->addWidget(measureButton); roiButtons->addWidget(removeRoi);
         roiLayout->addLayout(roiButtons);
-        connect(measureButton, &QPushButton::clicked, this, [this] { executeCommand("analyze.measure"); });
         connect(removeRoi, &QPushButton::clicked, this, [this] {
             auto *doc = activeDocument(); const int index = rois_->currentRow(); if (!doc || index < 0) return;
             doc->rois.erase(doc->rois.begin() + index);
@@ -1841,21 +1942,30 @@ void MainWindow::ensurePanel(const QString &id)
         history_ = new QListWidget(historyPanel);
         historyLayout->addWidget(history_);
     }
-    else if (id == "measurements") {
+    else if (id == "measurements" || id == "multiMeasurements" || id == "multiMeasurementsPerSlice") {
+        const bool multi = id != "measurements";
         auto *measurementsPanel = new QDialog(this, Qt::Window);
-        measurementsPanel->setWindowTitle(tr("Measurements"));
-        measurementsPanel->setObjectName("measurementsWindow");
+        measurementsPanel->setWindowTitle(multi ? (id == "multiMeasurementsPerSlice"
+            ? tr("Multi Measure - one row per slice") : tr("Multi Measure")) : tr("Measurements"));
+        measurementsPanel->setObjectName(id + "Window");
         measurementsPanel->resize(940, 300);
-        panels_.insert("measurements", measurementsPanel);
+        panels_.insert(id, measurementsPanel);
         auto *measurementsLayout = new QVBoxLayout(measurementsPanel);
         measurementsLayout->setContentsMargins(0, 0, 0, 0);
-        resultsView_ = new QTableView(measurementsPanel);
-        resultsView_->setObjectName("measurementTable");
-        resultsView_->setModel(results_);
-        resultsView_->setAlternatingRowColors(true);
-        resultsView_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-        resultsView_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-        measurementsLayout->addWidget(resultsView_);
+        auto *table = new QTableView(measurementsPanel);
+        table->setObjectName(multi ? "multiMeasurementTable" : "measurementTable");
+        table->setModel(multi ? new QStandardItemModel(table) : results_);
+        table->setAlternatingRowColors(true);
+        table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+        measurementsLayout->addWidget(table);
+        if (!multi) resultsView_ = table;
+        else {
+            auto *exportButton = new QPushButton(tr("Export CSV..."), measurementsPanel);
+            exportButton->setObjectName("exportMultiMeasurements");
+            measurementsLayout->addWidget(exportButton, 0, Qt::AlignRight);
+            connect(exportButton, &QPushButton::clicked, this, [this, measurementsPanel] { exportMeasurements(measurementsPanel); });
+        }
     }
     if (auto *window = panel(id); window && panelGeometries_.contains(id))
         window->restoreGeometry(panelGeometries_.value(id));
@@ -1925,6 +2035,20 @@ DocumentWidget *MainWindow::addDocument(Image image)
     const QPoint position = frameGeometry().bottomLeft() + QPoint(offset, 12 + offset);
     document->move(position);
     connect(document, &DocumentWidget::activated, this, [this, document] { setActiveDocument(document); });
+    connect(document->viewer, &ImageViewer::roiContextMenuRequested, this, [this, document](const QPoint &position) {
+        setActiveDocument(document);
+        QMenu menu(document->viewer);
+        menu.setObjectName("roiContextMenu");
+        for (const auto &id : {"analyze.measure", "selection.add", "analyze.histogram"})
+            menu.addAction(findChild<QAction *>(id));
+        const auto roi = document->selection;
+        if (roi && (roi->type == RoiType::Line || roi->type == RoiType::Rectangle))
+            menu.addAction(findChild<QAction *>("analyze.profile"));
+        menu.addSeparator();
+        menu.addAction(findChild<QAction *>("selection.properties"));
+        menu.addAction(findChild<QAction *>("selection.none"));
+        menu.exec(position);
+    });
     connect(document, &DocumentWidget::closing, this, [this, document] {
         documents_.removeAll(QPointer<DocumentWidget>(document));
         if (active_ == document) {
@@ -2292,7 +2416,9 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
             QTimer::singleShot(0, window, [window] { keepWindowOnScreen(window); });
         }
     }
-    if (event->type() == QEvent::Close && watched == panel("measurements") && !confirmDiscardMeasurements()) {
+    const bool measurementWindow = watched == panel("measurements") || watched == panel("multiMeasurements")
+        || watched == panel("multiMeasurementsPerSlice");
+    if (event->type() == QEvent::Close && measurementWindow && !confirmDiscardMeasurements(qobject_cast<QWidget *>(watched))) {
         event->ignore(); return true;
     }
     if (event->type() != QEvent::ShortcutOverride && event->type() != QEvent::KeyPress)
@@ -2313,7 +2439,8 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
             if (view->window() == top) imageDocument = document;
     if (top != this && !isAncestorOf(top) && !imageDocument) return false;
     if (imageDocument && event->type() == QEvent::KeyPress) setActiveDocument(imageDocument);
-    if (top == panel("measurements") && key->key() == Qt::Key_Escape && !QApplication::activeModalWidget()) {
+    if ((top == panel("measurements") || top == panel("multiMeasurements") || top == panel("multiMeasurementsPerSlice"))
+        && key->key() == Qt::Key_Escape && !QApplication::activeModalWidget()) {
         if (event->type() == QEvent::KeyPress) top->close();
         key->accept(); return true;
     }
@@ -2586,8 +2713,13 @@ void MainWindow::updatePanels()
     const bool showRois = rois_ && panel("rois")->isVisible();
     const bool showHistory = history_ && panel("history")->isVisible();
     const QString selectedId = rois_ && rois_->currentItem() ? rois_->currentItem()->data(Qt::UserRole).toString() : QString{};
+    QSet<QString> selectedIds;
+    if (rois_) for (auto *item : rois_->selectedItems()) selectedIds.insert(item->data(Qt::UserRole).toString());
     QSignalBlocker roiSignals(rois_);
-    if (showRois) rois_->clear();
+    bool sameRois = doc && rois_ && rois_->count() == int(doc->rois.size());
+    if (sameRois) for (int row = 0; row < rois_->count(); ++row)
+        if (rois_->item(row)->data(Qt::UserRole).toString() != doc->rois[std::size_t(row)].id) { sameRois = false; break; }
+    if (showRois && !sameRois) rois_->clear();
     if (showHistory) history_->clear();
     if (!doc && showProperties) {
         metadata_->clear();
@@ -2683,12 +2815,18 @@ void MainWindow::updatePanels()
             filterProperties();
         }
         if (showRois) {
-            for (const auto &roi : doc->rois) {
-                auto *item = new QListWidgetItem(roi.name, rois_); item->setData(Qt::UserRole, roi.id);
+            for (std::size_t row = 0; row < doc->rois.size(); ++row) {
+                const auto &roi = doc->rois[row];
+                auto *item = sameRois ? rois_->item(int(row)) : new QListWidgetItem(rois_);
+                item->setText(roi.name); item->setData(Qt::UserRole, roi.id);
                 item->setToolTip(tr("Z %1 C %2 T %3").arg(roi.z + 1).arg(roi.channel + 1).arg(roi.time + 1));
-                if (!doc->selectionCleared && roi.id == selectedId) rois_->setCurrentItem(item);
+                if (!sameRois && !doc->selectionCleared) {
+                    if (roi.id == selectedId) rois_->setCurrentItem(item, QItemSelectionModel::NoUpdate);
+                    item->setSelected(selectedIds.contains(roi.id));
+                }
             }
             if (!doc->selectionCleared && rois_->currentRow() < 0 && rois_->count()) rois_->setCurrentRow(rois_->count() - 1);
+            if (doc->selectionCleared) { rois_->clearSelection(); rois_->setCurrentRow(-1); }
         }
         if (showHistory) {
             history_->addItems(doc->history.labels());
@@ -2727,6 +2865,10 @@ void MainWindow::updateWindowMenu()
                 showPlot(id == "profile");
             else showPanel(id);
         });
+    }
+    for (const auto &id : {"multiMeasurements", "multiMeasurementsPerSlice"}) if (auto *window = panel(id)) {
+        auto *action = windowMenu_->addAction(window->windowTitle());
+        connect(action, &QAction::triggered, this, [this, id] { showPanel(id); });
     }
     if (!documents().isEmpty()) windowMenu_->addSeparator();
     for (auto *document : documents()) {
@@ -2828,15 +2970,42 @@ void MainWindow::showError(const QString &message)
     QMessageBox::warning(this, tr("ImageCXX"), message);
 }
 
-bool MainWindow::confirmDiscardMeasurements()
+void MainWindow::exportMeasurements(QWidget *window)
 {
-    auto *window = panel("measurements");
-    if (!window || !window->isVisible() || results_->rowCount() <= exportedMeasurementRows_) return true;
+    const auto path = QFileDialog::getSaveFileName(window, tr("Export measurements"), "measurements.csv", tr("CSV (*.csv)"));
+    if (path.isEmpty()) return;
+    const auto *model = window->findChild<QTableView *>()->model();
+    QByteArray bytes;
+    for (int row = -1; row < model->rowCount(); ++row) {
+        for (int column = 0; column < model->columnCount(); ++column) {
+            QString text = row < 0 ? model->headerData(column, Qt::Horizontal).toString() : model->data(model->index(row, column)).toString();
+            if (column) bytes += ',';
+            bytes += detail::spreadsheetCsvCell(std::move(text)).toUtf8();
+        }
+        bytes += '\n';
+    }
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit()) {
+        showError(tr("Cannot write measurements.")); return;
+    }
+    window->setProperty("exportedRows", model->rowCount());
+}
+
+bool MainWindow::confirmDiscardMeasurements(QWidget *window)
+{
+    if (!window) {
+        for (const auto &id : {"measurements", "multiMeasurements", "multiMeasurementsPerSlice"})
+            if (auto *measurements = panel(id); measurements && !confirmDiscardMeasurements(measurements)) return false;
+        return true;
+    }
+    const auto *model = window->findChild<QTableView *>()->model();
+    const auto exportedRows = window->property("exportedRows").toInt();
+    if (!window->isVisible() || model->rowCount() <= exportedRows) return true;
     QStringList unsavedMeasurements;
-    for (int row = exportedMeasurementRows_; row < results_->rowCount(); ++row) {
-        auto name = results_->data(results_->index(row, 0)).toString();
+    for (int row = exportedRows; row < model->rowCount(); ++row) {
+        auto name = model->data(model->index(row, 0)).toString();
         if (name.isEmpty()) name = tr("Untitled");
-        unsavedMeasurements.append(tr("%1: %2").arg(name, results_->data(results_->index(row, 1)).toString()));
+        unsavedMeasurements.append(tr("%1: %2").arg(name, model->data(model->index(row, 1)).toString()));
     }
     unsavedMeasurements.removeDuplicates();
     QMessageBox prompt(QMessageBox::Question, tr("Unsaved measurements"),

@@ -1,6 +1,7 @@
 #include "viewer/image_viewer.h"
 
 #include <QCoreApplication>
+#include <QContextMenuEvent>
 #include <QFile>
 #include <QKeyEvent>
 #include <QMatrix4x4>
@@ -1273,6 +1274,39 @@ void ImageViewer::wheelEvent(QWheelEvent *event)
     }
     event->accept();
 }
+std::optional<Roi> ImageViewer::roiAt(QPointF position) const
+{
+    const auto point = widgetToImage(position);
+    const auto origin = imageToWidget({0, 0});
+    const QTransform transform(d->zoom, 0, 0, d->zoom * d->pixelAspect, origin.x(), origin.y());
+    QPainterPathStroker stroker;
+    stroker.setWidth(12);
+    const auto hit = [&](const Roi &roi) {
+        return roi.visible && roi.time == d->time && (d->composite || roi.channel == d->channel)
+            && (roi.contains(point) || stroker.createStroke(transform.map(roi.path())).contains(position));
+    };
+    if (d->selection && hit(*d->selection)) return d->selection;
+    for (auto it = d->rois.rbegin(); it != d->rois.rend(); ++it)
+        if (hit(*it)) return *it;
+    return {};
+}
+
+void ImageViewer::contextMenuEvent(QContextMenuEvent *event)
+{
+    if (d->image.empty()) { event->ignore(); return; }
+    if (d->draft) {
+        if (d->tool == Tool::Polygon) completeRoi();
+        event->accept();
+        return;
+    }
+    const auto roi = roiAt(event->pos());
+    if (!roi) { event->ignore(); return; }
+    setSelection(roi);
+    Q_EMIT roiSelected(*roi);
+    event->accept();
+    Q_EMIT roiContextMenuRequested(event->globalPos());
+}
+
 void ImageViewer::mousePressEvent(QMouseEvent *event)
 {
     setFocus(Qt::MouseFocusReason);
@@ -1284,7 +1318,6 @@ void ImageViewer::mousePressEvent(QMouseEvent *event)
         setCursor(Qt::ClosedHandCursor);
         return;
     }
-    if (event->button() == Qt::RightButton && d->tool == Tool::Polygon) { completeRoi(); return; }
     if (event->button() != Qt::LeftButton) return;
     const QPointF point = widgetToImage(event->position());
     const bool onImage = point.x() >= 0 && point.y() >= 0
@@ -1337,18 +1370,7 @@ void ImageViewer::mousePressEvent(QMouseEvent *event)
             d->combineOriginal = d->selection;
             d->subtract = event->modifiers().testFlag(Qt::AltModifier);
         }
-        const auto hit = [this, event, point, &selectable](const Roi &roi) {
-            if (!selectable(roi)) return false;
-            const auto origin = imageToWidget({0, 0});
-            const QTransform transform(d->zoom, 0, 0, d->zoom * d->pixelAspect, origin.x(), origin.y());
-            QPainterPathStroker stroker;
-            stroker.setWidth(12);
-            return roi.contains(point) || stroker.createStroke(transform.map(roi.path())).contains(event->position());
-        };
-        std::optional<Roi> picked;
-        if (!combine && d->selection && hit(*d->selection)) picked = d->selection;
-        else if (!combine) for (auto it = d->rois.rbegin(); it != d->rois.rend(); ++it)
-            if (hit(*it)) { picked = *it; break; }
+        const auto picked = combine ? std::optional<Roi>{} : roiAt(event->position());
         if (picked) {
             d->selection = picked;
             d->editing = true;

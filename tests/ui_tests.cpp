@@ -105,6 +105,22 @@ bool finishJobs(MainWindow &window)
     return !window.jobs().busy();
 }
 
+bool runMultiMeasure(MainWindow &window, bool allSlices, bool oneRowPerSlice, bool append = false, bool accept = true)
+{
+    QTimer::singleShot(0, &window, [=] {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget()); ASSERT_NE(dialog, nullptr);
+        EXPECT_EQ(dialog->objectName(), "multiMeasureDialog");
+        auto *all = dialog->findChild<QCheckBox *>("measureAllSlices"); ASSERT_NE(all, nullptr);
+        auto *oneRow = dialog->findChild<QCheckBox *>("oneRowPerSlice"); ASSERT_NE(oneRow, nullptr);
+        auto *appendResults = dialog->findChild<QCheckBox *>("appendResults"); ASSERT_NE(appendResults, nullptr);
+        EXPECT_TRUE(all->isChecked()); EXPECT_FALSE(oneRow->isChecked()); EXPECT_FALSE(appendResults->isChecked());
+        all->setChecked(allSlices); oneRow->setChecked(oneRowPerSlice); appendResults->setChecked(append);
+        if (accept) dialog->accept(); else dialog->reject();
+    });
+    window.commands().execute("analyze.multiMeasure");
+    return finishJobs(window);
+}
+
 void chooseDrawingColor(MainWindow &window, QColor color, bool accept = true)
 {
     QTimer::singleShot(0, &window, [color, accept] {
@@ -857,6 +873,326 @@ TEST(Desktop, UnrepresentableLineProfileShowsAnErrorAndFinishesItsJob)
     EXPECT_FALSE(window.panel("profile")->isVisible());
 }
 
+TEST(Desktop, RoiManagerMeasureMenuKeepsSingleMeasureAndOpensMultiMeasureOptions)
+{
+    MainWindow window;
+    auto *doc = window.addDocument(Image::allocate(PixelType::UInt8, {4, 2, 3}));
+    Roi first; first.name = "First"; first.points = {{0, 0}, {1, 1}};
+    Roi second; second.name = "Second"; second.points = {{1, 0}, {3, 1}};
+    doc->rois = {first, second}; doc->setSelection(first); window.showPanel("rois");
+    auto *list = window.panel("rois")->findChild<QListWidget *>("roiList"); ASSERT_NE(list, nullptr);
+    EXPECT_EQ(list->selectionMode(), QAbstractItemView::ExtendedSelection);
+    list->setCurrentRow(0);
+    auto *button = window.panel("rois")->findChild<QPushButton *>("roiMeasure"); ASSERT_NE(button, nullptr);
+    EXPECT_EQ(button->text(), "Measure...");
+    auto *menu = button->menu(); ASSERT_NE(menu, nullptr); ASSERT_EQ(menu->actions().size(), 2);
+    EXPECT_EQ(menu->actions()[0]->text(), "Measure"); EXPECT_EQ(menu->actions()[1]->text(), "Multi Measure...");
+    menu->actions()[0]->trigger(); ASSERT_TRUE(finishJobs(window));
+    auto *model = window.panel("measurements")->findChild<QTableView *>()->model();
+    EXPECT_EQ(model->rowCount(), 1);
+    EXPECT_EQ(model->data(model->index(0, 1)).toString(), "First");
+    EXPECT_EQ(model->data(model->index(0, 2)).toInt(), 1);
+    bool prompted = false;
+    QTimer::singleShot(0, &window, [&] {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget()); ASSERT_NE(dialog, nullptr);
+        EXPECT_EQ(dialog->windowTitle(), "Multi Measure");
+        auto *all = dialog->findChild<QCheckBox *>("measureAllSlices"); ASSERT_NE(all, nullptr);
+        EXPECT_EQ(all->text(), "Measure all 3 slices"); EXPECT_TRUE(all->isChecked());
+        EXPECT_EQ(dialog->findChildren<QCheckBox *>().size(), 3);
+        prompted = true; dialog->reject();
+    });
+    menu->actions()[1]->trigger(); EXPECT_TRUE(prompted); EXPECT_FALSE(window.jobs().busy());
+    EXPECT_EQ(window.panel("multiMeasurements"), nullptr); EXPECT_EQ(model->rowCount(), 1);
+}
+
+TEST(Desktop, MultiMeasureUsesOnlySelectedRoisAndSupportsBothLayoutsAndSliceScopes)
+{
+    for (bool all : {false, true}) for (bool wide : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << "all=" << all << " wide=" << wide);
+        MainWindow window;
+        ImageMetadata metadata;
+        metadata.name = "Stack"; metadata.intensityScale = 2; metadata.intensityOffset = 3; metadata.intensityUnit = "HU";
+        metadata.axes = {{"X", .5, 0, "um"}, {"Y", 2, 0, "um"}};
+        auto image = Image::allocate(PixelType::UInt16, {4, 2, 3, 2, 2}, metadata);
+        for (std::size_t t = 0; t < 2; ++t) for (std::size_t c = 0; c < 2; ++c)
+            for (std::size_t z = 0; z < 3; ++z) for (std::size_t x = 0; x < 4; ++x)
+                image.setValue(std::array<std::size_t, 5>{x, 0, z, c, t}, 100 * t + 20 * z + 10 * c + x);
+        auto *doc = window.addDocument(image);
+        for (int x = 0; x < 3; ++x) {
+            Roi roi; roi.name = QString("ROI %1").arg(x + 1); roi.points = {{double(x), 0}, {double(x + 1), 1}};
+            doc->rois.push_back(roi);
+        }
+        doc->refreshRois(); window.showPanel("rois");
+        auto *list = window.panel("rois")->findChild<QListWidget *>("roiList"); ASSERT_NE(list, nullptr);
+        list->setCurrentRow(0); list->item(2)->setSelected(true);
+        doc->viewer->setSlice(1, 1, 1); doc->changed();
+        ASSERT_EQ(list->selectedItems().size(), 2);
+        ASSERT_TRUE(runMultiMeasure(window, all, wide));
+        auto *panel = window.panel(wide ? "multiMeasurementsPerSlice" : "multiMeasurements"); ASSERT_NE(panel, nullptr);
+        auto *model = panel->findChild<QTableView *>()->model();
+        const int planes = all ? 12 : 1;
+        EXPECT_EQ(model->rowCount(), wide ? planes : planes * 2);
+        EXPECT_EQ(model->columnCount(), wide ? 22 : 14);
+        for (int p = 0; p < planes; ++p) for (int roi = 0; roi < 2; ++roi) {
+            const int plane = all ? p : 9;
+            const int c = plane % 2, z = plane / 2 % 3, t = plane / 6;
+            const int row = wide ? p : p * 2 + roi, stats = wide ? 4 + roi * 9 : 5;
+            const int position = wide ? 1 : 2;
+            EXPECT_EQ(model->data(model->index(row, 0)).toString(), "Stack");
+            EXPECT_EQ(model->data(model->index(row, position)).toInt(), z + 1);
+            EXPECT_EQ(model->data(model->index(row, position + 1)).toInt(), c + 1);
+            EXPECT_EQ(model->data(model->index(row, position + 2)).toInt(), t + 1);
+            EXPECT_EQ(model->data(model->index(row, stats)).toInt(), 1);
+            EXPECT_DOUBLE_EQ(model->data(model->index(row, stats + 1)).toDouble(), 1);
+            EXPECT_DOUBLE_EQ(model->data(model->index(row, stats + 2)).toDouble(), 2 * (100 * t + 20 * z + 10 * c + 2 * roi) + 3);
+            EXPECT_DOUBLE_EQ(model->data(model->index(row, stats + 3)).toDouble(), 0);
+            EXPECT_EQ(model->data(model->index(row, stats + 7)).toString(), QString::fromUtf8("um²"));
+            EXPECT_EQ(model->data(model->index(row, stats + 8)).toString(), "HU");
+            if (!wide) EXPECT_EQ(model->data(model->index(row, 1)).toString(), QString("ROI %1").arg(roi * 2 + 1));
+        }
+        if (wide) {
+            EXPECT_EQ(model->headerData(6, Qt::Horizontal).toString(), "Mean [1: ROI 1]");
+            EXPECT_EQ(model->headerData(15, Qt::Horizontal).toString(), "Mean [2: ROI 3]");
+        }
+        EXPECT_EQ(doc->viewer->slice(), 1u); EXPECT_EQ(doc->viewer->channel(), 1u); EXPECT_EQ(doc->viewer->time(), 1u);
+        EXPECT_EQ(list->selectedItems().size(), 2); EXPECT_FALSE(doc->modified);
+    }
+}
+
+TEST(Desktop, MultiMeasureAppendsWithoutMixingRoisOrLayoutsAndCanReplaceOrCancel)
+{
+    MainWindow window;
+    auto image = Image::allocate(PixelType::UInt8, {4, 2, 2});
+    std::fill_n(image.mutableData(), image.byteCount(), std::byte{7});
+    auto *doc = window.addDocument(image);
+    for (int x = 0; x < 2; ++x) {
+        Roi roi; roi.name = "Same name"; roi.points = {{double(x), 0}, {double(x + 1), 1}}; doc->rois.push_back(roi);
+    }
+    doc->setSelection(doc->rois[0]); window.showPanel("rois");
+    auto *list = window.panel("rois")->findChild<QListWidget *>("roiList"); list->setCurrentRow(0);
+    window.commands().execute("analyze.measure"); ASSERT_TRUE(finishJobs(window));
+    ASSERT_TRUE(runMultiMeasure(window, true, true));
+    auto *model = window.panel("multiMeasurementsPerSlice")->findChild<QTableView *>()->model();
+    ASSERT_EQ(model->rowCount(), 2); ASSERT_EQ(model->columnCount(), 13);
+    list->setCurrentRow(1);
+    ASSERT_TRUE(runMultiMeasure(window, false, true, true));
+    ASSERT_EQ(model->rowCount(), 3); ASSERT_EQ(model->columnCount(), 22);
+    EXPECT_EQ(model->headerData(6, Qt::Horizontal).toString(), "Mean [1: Same name]");
+    EXPECT_EQ(model->headerData(15, Qt::Horizontal).toString(), "Mean [2: Same name]");
+    EXPECT_DOUBLE_EQ(model->data(model->index(0, 6)).toDouble(), 7);
+    EXPECT_FALSE(model->data(model->index(0, 15)).isValid());
+    EXPECT_FALSE(model->data(model->index(2, 6)).isValid());
+    EXPECT_DOUBLE_EQ(model->data(model->index(2, 15)).toDouble(), 7);
+    ASSERT_TRUE(runMultiMeasure(window, true, false, true));
+    auto *longModel = window.panel("multiMeasurements")->findChild<QTableView *>()->model();
+    EXPECT_EQ(longModel->rowCount(), 2); EXPECT_EQ(model->rowCount(), 3);
+    ASSERT_TRUE(runMultiMeasure(window, false, false, true)); EXPECT_EQ(longModel->rowCount(), 3);
+    ASSERT_TRUE(runMultiMeasure(window, false, true, false, false)); EXPECT_EQ(model->rowCount(), 3);
+    ASSERT_TRUE(runMultiMeasure(window, false, true));
+    EXPECT_EQ(model->rowCount(), 1); EXPECT_EQ(model->columnCount(), 13);
+    EXPECT_EQ(model->headerData(6, Qt::Horizontal).toString(), "Mean [1: Same name]");
+    EXPECT_EQ(window.panel("measurements")->findChild<QTableView *>()->model()->rowCount(), 1);
+}
+
+TEST(Desktop, MultiMeasureKeepsColumnLabelsUniqueWhenRoisAreRemovedAndReplaced)
+{
+    MainWindow window;
+    auto image = Image::allocate(PixelType::UInt8, {3, 1});
+    for (std::size_t x = 0; x < 3; ++x) image.setValue(std::array<std::size_t, 2>{x, 0}, 2 << x);
+    auto *doc = window.addDocument(image);
+    for (int x = 0; x < 2; ++x) {
+        Roi roi; roi.name = "Same name"; roi.points = {{double(x), 0}, {double(x + 1), 1}};
+        doc->rois.push_back(roi);
+    }
+    doc->setSelection(doc->rois[0]); window.showPanel("rois");
+    auto *list = window.panel("rois")->findChild<QListWidget *>("roiList"); ASSERT_NE(list, nullptr);
+    list->setCurrentRow(0);
+    ASSERT_TRUE(runMultiMeasure(window, false, true));
+    auto *model = window.panel("multiMeasurementsPerSlice")->findChild<QTableView *>()->model();
+    list->setCurrentRow(1);
+    ASSERT_TRUE(runMultiMeasure(window, false, true, true));
+    ASSERT_EQ(model->columnCount(), 22);
+    EXPECT_EQ(model->headerData(6, Qt::Horizontal).toString(), "Mean [1: Same name]");
+    EXPECT_EQ(model->headerData(15, Qt::Horizontal).toString(), "Mean [2: Same name]");
+    list->setCurrentRow(0);
+    for (auto *button : window.panel("rois")->findChildren<QPushButton *>())
+        if (button->text() == "Remove") button->click();
+    ASSERT_EQ(doc->rois.size(), 1u);
+    list->setCurrentRow(0, QItemSelectionModel::ClearAndSelect);
+    ASSERT_TRUE(runMultiMeasure(window, false, true, true));
+    EXPECT_EQ(model->headerData(6, Qt::Horizontal).toString(), "Mean [1: Same name]");
+    EXPECT_EQ(model->headerData(15, Qt::Horizontal).toString(), "Mean [2: Same name]");
+    EXPECT_FALSE(model->data(model->index(2, 6)).isValid());
+    EXPECT_DOUBLE_EQ(model->data(model->index(2, 15)).toDouble(), 4);
+
+    Roi replacement; replacement.name = "Same name"; replacement.points = {{2, 0}, {3, 1}};
+    doc->rois = {replacement}; doc->setSelection(replacement);
+    list->setCurrentRow(0, QItemSelectionModel::ClearAndSelect);
+    ASSERT_TRUE(runMultiMeasure(window, false, true, true));
+    ASSERT_EQ(model->columnCount(), 31); ASSERT_EQ(model->rowCount(), 4);
+    EXPECT_EQ(model->headerData(24, Qt::Horizontal).toString(), "Mean [3: Same name]");
+    EXPECT_DOUBLE_EQ(model->data(model->index(0, 6)).toDouble(), 2);
+    EXPECT_DOUBLE_EQ(model->data(model->index(1, 15)).toDouble(), 4);
+    EXPECT_DOUBLE_EQ(model->data(model->index(3, 24)).toDouble(), 8);
+    QSet<QString> headings;
+    for (int column = 0; column < model->columnCount(); ++column) {
+        const auto heading = model->headerData(column, Qt::Horizontal).toString();
+        EXPECT_FALSE(headings.contains(heading)); headings.insert(heading);
+    }
+}
+
+TEST(Desktop, MultiMeasureRequiresSelectedEntriesAndKeepsResultsWhenMeasurementFails)
+{
+    MainWindow window;
+    auto *doc = window.addDocument(Image::allocate(PixelType::UInt8, {4, 2}));
+    Roi roi; roi.points = {{0, 0}, {2, 1}}; doc->rois = {roi}; doc->setSelection(roi); window.showPanel("rois");
+    auto *list = window.panel("rois")->findChild<QListWidget *>("roiList"); list->setCurrentRow(0);
+    ASSERT_TRUE(runMultiMeasure(window, true, false));
+    auto *model = window.panel("multiMeasurements")->findChild<QTableView *>()->model();
+    EXPECT_EQ(model->rowCount(), 1);
+    QString error;
+    QTimer dismiss;
+    QObject::connect(&dismiss, &QTimer::timeout, [&] {
+        if (auto *message = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+            error = message->text(); message->accept();
+        }
+    });
+    dismiss.start(1);
+    list->clearSelection(); window.commands().execute("analyze.multiMeasure");
+    EXPECT_EQ(error, "Select one or more ROIs in the ROI manager first.");
+    list->setCurrentRow(0, QItemSelectionModel::ClearAndSelect);
+    doc->rois[0].type = RoiType::Line; doc->refreshRois();
+    ASSERT_TRUE(runMultiMeasure(window, true, false));
+    EXPECT_EQ(error, "Use a line profile for line ROIs"); EXPECT_EQ(model->rowCount(), 1);
+}
+
+TEST(Desktop, RoiManagerKeepsMultipleSelectionsThroughClicksAndPanelRefreshes)
+{
+    MainWindow window;
+    auto *doc = window.addDocument(Image::allocate(PixelType::UInt8, {4, 2, 3}));
+    for (int z = 0; z < 3; ++z) {
+        Roi roi; roi.name = QString::number(z); roi.z = z; roi.points = {{0, 0}, {1, 1}};
+        doc->rois.push_back(roi);
+    }
+    doc->setSelection(doc->rois[0]); window.showPanel("rois");
+    auto *list = window.panel("rois")->findChild<QListWidget *>("roiList"); ASSERT_NE(list, nullptr);
+    QCoreApplication::processEvents();
+    for (int row : {0, 2}) {
+        const auto position = list->visualItemRect(list->item(row)).center();
+        for (auto type : {QEvent::MouseButtonPress, QEvent::MouseButtonRelease}) {
+            QMouseEvent event(type, position, list->viewport()->mapToGlobal(position), Qt::LeftButton,
+                type == QEvent::MouseButtonPress ? Qt::LeftButton : Qt::NoButton, row ? Qt::ControlModifier : Qt::NoModifier);
+            QApplication::sendEvent(list->viewport(), &event);
+        }
+    }
+    ASSERT_EQ(list->selectedItems().size(), 2);
+    EXPECT_TRUE(list->item(0)->isSelected()); EXPECT_TRUE(list->item(2)->isSelected());
+    EXPECT_EQ(doc->viewer->slice(), 2u);
+    doc->changed(); window.showPanel("rois");
+    EXPECT_EQ(list->selectedItems().size(), 2); EXPECT_EQ(list->currentRow(), 2);
+    ASSERT_TRUE(runMultiMeasure(window, false, false));
+    EXPECT_EQ(window.panel("multiMeasurements")->findChild<QTableView *>()->model()->rowCount(), 2);
+}
+
+TEST(Desktop, MultiMeasureExportsBothLayoutsAndWarnsAboutUnsavedAndReplacedResults)
+{
+    for (bool wide : {false, true}) {
+        MainWindow window;
+        auto image = Image::allocate(PixelType::UInt8, {4, 2, 2}); image.metadata().name = "=Stack";
+        std::fill_n(image.mutableData(), image.byteCount(), std::byte{7});
+        auto *doc = window.addDocument(image);
+        Roi roi; roi.name = "A,\"B\""; roi.points = {{0, 0}, {2, 1}};
+        doc->rois = {roi}; doc->setSelection(roi); window.showPanel("rois");
+        auto *list = window.panel("rois")->findChild<QListWidget *>("roiList"); list->setCurrentRow(0);
+        ASSERT_TRUE(runMultiMeasure(window, true, wide));
+        auto *panel = window.panel(wide ? "multiMeasurementsPerSlice" : "multiMeasurements"); ASSERT_NE(panel, nullptr);
+        auto *model = panel->findChild<QTableView *>()->model();
+        const auto closePanel = [&](bool expectPrompt) {
+            bool prompted = false;
+            QTimer::singleShot(0, &window, [&] {
+                if (auto *message = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+                    prompted = true; EXPECT_TRUE(message->text().contains("unsaved measurements"));
+                    message->done(QMessageBox::Cancel);
+                }
+            });
+            QCloseEvent close; QApplication::sendEvent(panel, &close); QCoreApplication::processEvents();
+            EXPECT_EQ(prompted, expectPrompt); EXPECT_EQ(close.isAccepted(), !expectPrompt);
+        };
+        closePanel(true);
+        QTemporaryDir directory;
+        const auto path = directory.filePath("multi.csv");
+        QTimer::singleShot(0, &window, [path] {
+            auto *dialog = qobject_cast<QFileDialog *>(QApplication::activeModalWidget()); ASSERT_NE(dialog, nullptr);
+            dialog->setDirectory(QFileInfo(path).absolutePath()); dialog->selectFile(QFileInfo(path).fileName());
+            if (auto *name = dialog->findChild<QLineEdit *>("fileNameEdit")) name->setText(QFileInfo(path).fileName());
+            QMetaObject::invokeMethod(dialog, "accept", Qt::QueuedConnection);
+        });
+        panel->findChild<QPushButton *>("exportMultiMeasurements")->click();
+        QFile file(path); ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+        const auto csv = file.readAll(); EXPECT_TRUE(csv.contains("\"Text: =Stack\""));
+        EXPECT_TRUE(csv.contains(wide ? "Mean [1: A,\"\"B\"\"]" : "\"A,\"\"B\"\"\""));
+        EXPECT_EQ(csv.trimmed().split('\n').size(), 3);
+        EXPECT_EQ(panel->property("exportedRows").toInt(), 2); closePanel(false);
+        ASSERT_TRUE(runMultiMeasure(window, true, wide)); EXPECT_EQ(model->rowCount(), 2);
+        EXPECT_EQ(panel->property("exportedRows").toInt(), 0); closePanel(true);
+        ASSERT_TRUE(runMultiMeasure(window, false, wide, true)); EXPECT_EQ(model->rowCount(), 3);
+    }
+}
+
+TEST(Desktop, RoiContextMenuActionsUseTheClickedRoiAndDocument)
+{
+    MainWindow window;
+    auto image = Image::allocate(PixelType::UInt8, {10, 10});
+    std::memset(image.mutableData(), 10, image.byteCount());
+    auto *document = window.addDocument(image);
+    Roi first; first.name = "First"; first.points = {{1, 1}, {4, 3}};
+    Roi second; second.name = "Second"; second.points = {{6, 6}, {9, 9}};
+    document->rois = {first, second}; document->setSelection(second);
+    auto *other = window.addDocument(Image::allocate(PixelType::UInt8, {10, 10}));
+    auto *viewer = document->viewer;
+    viewer->resize(400, 400); viewer->setZoom(10); viewer->setTool(ImageViewer::Tool::Pointer);
+    const auto contextAction = [&](const Roi &roi, const char *command) {
+        QEvent activate(QEvent::WindowActivate); QApplication::sendEvent(other, &activate);
+        QTimer::singleShot(0, viewer, [&] {
+            auto *menu = viewer->findChild<QMenu *>("roiContextMenu");
+            EXPECT_NE(menu, nullptr);
+            if (!menu) return;
+            EXPECT_EQ(window.activeDocument(), document);
+            EXPECT_TRUE(document->selection);
+            if (document->selection) EXPECT_EQ(document->selection->id, roi.id);
+            for (const auto &id : {"analyze.measure", "selection.add", "analyze.histogram",
+                                   "selection.properties", "selection.none"})
+                EXPECT_TRUE(menu->actions().contains(window.findChild<QAction *>(id)));
+            EXPECT_EQ(menu->actions().contains(window.findChild<QAction *>("analyze.profile")),
+                roi.type == RoiType::Line || roi.type == RoiType::Rectangle);
+            menu->setActiveAction(window.findChild<QAction *>(command));
+            sendKey(menu, Qt::Key_Return);
+        });
+        const auto position = viewer->imageToWidget(roi.bounds().center()).toPoint();
+        QContextMenuEvent event(QContextMenuEvent::Mouse, position, viewer->mapToGlobal(position));
+        QApplication::sendEvent(viewer, &event);
+    };
+    contextAction(first, "analyze.measure");
+    ASSERT_TRUE(finishJobs(window));
+    auto *table = window.panel("measurements")->findChild<QTableView *>(); ASSERT_NE(table, nullptr);
+    EXPECT_EQ(table->model()->rowCount(), 1);
+    EXPECT_EQ(table->model()->data(table->model()->index(0, 1)).toString(), "First");
+    EXPECT_EQ(table->model()->data(table->model()->index(0, 2)).toInt(), 6);
+    EXPECT_DOUBLE_EQ(table->model()->data(table->model()->index(0, 4)).toDouble(), 10);
+    Roi unsaved; unsaved.points = {{2, 1}, {5, 4}};
+    document->setSelection(unsaved);
+    contextAction(unsaved, "selection.add");
+    ASSERT_EQ(document->rois.size(), 3u); EXPECT_EQ(document->rois.back().id, unsaved.id);
+    EXPECT_TRUE(window.panel("rois")->isVisible());
+    Roi ellipse; ellipse.type = RoiType::Ellipse; ellipse.points = {{1, 1}, {4, 3}};
+    document->setSelection(ellipse);
+    contextAction(ellipse, "selection.none");
+    EXPECT_FALSE(document->selection);
+    ASSERT_TRUE(document->previousSelection); EXPECT_EQ(document->previousSelection->id, ellipse.id);
+    EXPECT_TRUE(other->rois.empty()); EXPECT_FALSE(other->selection);
+    EXPECT_FALSE(document->modified); EXPECT_FALSE(other->modified);
+}
+
 TEST(Desktop, ScatterPlotsUseNumericMeasurementColumnsAndKeepASnapshot)
 {
     MainWindow window;
@@ -883,7 +1219,11 @@ TEST(Desktop, ScatterPlotsUseNumericMeasurementColumnsAndKeepASnapshot)
         auto *y = form->findChild<QComboBox *>("y"); ASSERT_NE(y, nullptr);
         EXPECT_EQ(x->currentText(), "Area");
         EXPECT_EQ(y->currentText(), "Mean");
-        EXPECT_EQ(x->count(), 7);
+        EXPECT_EQ(x->count(), 9);
+        for (auto *axis : {x, y}) {
+            EXPECT_GE(axis->findText("Slice"), 0);
+            EXPECT_GE(axis->findText("Index"), 0);
+        }
         EXPECT_EQ(x->findText("Image"), -1);
         form->accept();
     });
@@ -916,6 +1256,42 @@ TEST(Desktop, ScatterPlotsUseNumericMeasurementColumnsAndKeepASnapshot)
     }
     EXPECT_FALSE(doc->modified);
     EXPECT_DOUBLE_EQ(doc->image.sample(2, 0), 30);
+}
+
+TEST(Desktop, ScatterPlotsUseRecordedSlicesAndMeasurementRowIndicesOnEitherAxis)
+{
+    MainWindow window;
+    auto image = Image::allocate(PixelType::UInt8, {1, 1, 4});
+    for (std::size_t z = 0; z < 4; ++z)
+        image.setValue(std::array<std::size_t, 3>{0, 0, z}, 10 * (z + 1));
+    auto *doc = window.addDocument(image);
+    for (int z : {2, 0, 2, 3}) {
+        doc->viewer->setSlice(z);
+        if (z != 3) {
+            Roi roi; roi.name = "Repeated ROI"; roi.z = z; roi.points = {{0, 0}, {1, 1}};
+            doc->setSelection(roi);
+        } else doc->setSelection(std::nullopt);
+        window.commands().execute("analyze.measure");
+        doc->viewer->setSlice((z + 1) % 4);
+        ASSERT_TRUE(finishJobs(window));
+    }
+    window.commands().execute("analyze.scatter", {{"x", "Slice"}, {"y", "Index"}});
+    auto *plot = window.findChild<QDialog *>("scatterPlotWindow"); ASSERT_NE(plot, nullptr);
+    auto *series = plot->findChild<QScatterSeries *>(); ASSERT_NE(series, nullptr);
+    const QList<QPointF> expected{{3, 1}, {1, 2}, {3, 3}, {4, 4}};
+    EXPECT_EQ(series->points(), expected);
+    const auto axes = plot->findChildren<QValueAxis *>(); ASSERT_EQ(axes.size(), 2);
+    EXPECT_EQ(axes[0]->titleText(), "Slice"); EXPECT_EQ(axes[1]->titleText(), "Index");
+
+    auto *model = window.panel("measurements")->findChild<QTableView *>()->model();
+    model->setData(model->index(1, 4), std::numeric_limits<double>::quiet_NaN());
+    window.commands().execute("analyze.scatter", {{"x", "Index"}, {"y", "Mean"}});
+    auto plots = window.findChildren<QDialog *>("scatterPlotWindow"); ASSERT_EQ(plots.size(), 2);
+    EXPECT_EQ(plots.back()->findChild<QScatterSeries *>()->points(), (QList<QPointF>{{1, 30}, {3, 30}, {4, 40}}));
+    window.commands().execute("analyze.scatter", {{"x", "Mean"}, {"y", "Slice"}});
+    plots = window.findChildren<QDialog *>("scatterPlotWindow"); ASSERT_EQ(plots.size(), 3);
+    EXPECT_EQ(plots.back()->findChild<QScatterSeries *>()->points(), (QList<QPointF>{{30, 3}, {30, 3}, {40, 4}}));
+    EXPECT_EQ(series->points(), expected);
 }
 
 TEST(Desktop, ScatterPlotsReportMissingMeasurementsAndFinitePairs)
