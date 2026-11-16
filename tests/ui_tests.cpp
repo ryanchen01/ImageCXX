@@ -1193,6 +1193,64 @@ TEST(Desktop, RoiContextMenuActionsUseTheClickedRoiAndDocument)
     EXPECT_FALSE(document->modified); EXPECT_FALSE(other->modified);
 }
 
+TEST(Desktop, CompositeRoiContextMenuActionsUseTheClickedChannelAndRegion)
+{
+    MainWindow window;
+    auto image = Image::allocate(PixelType::UInt16, {4, 2, 3, 2, 2});
+    for (std::size_t t = 0; t < 2; ++t) for (std::size_t c = 0; c < 2; ++c)
+        for (std::size_t z = 0; z < 3; ++z) for (std::size_t y = 0; y < 2; ++y)
+            for (std::size_t x = 0; x < 4; ++x)
+                image.setValue(std::array<std::size_t, 5>{x, y, z, c, t}, 1000 * t + 100 * z + 10 * c + 4 * y + x);
+    auto *doc = window.addDocument(image);
+    Roi roi; roi.name = "Channel 2 ROI"; roi.channel = 1; roi.time = 1; roi.points = {{1, 0}, {3, 1}};
+    doc->rois = {roi}; doc->refreshRois();
+    auto *viewer = doc->viewer;
+    viewer->resize(400, 400); viewer->setZoom(20); viewer->setComposite(true);
+    const auto contextAction = [&](const char *command) {
+        doc->setSelection({}); viewer->setSlice(2, 0, 1);
+        QTimer::singleShot(0, viewer, [&] {
+            auto *menu = viewer->findChild<QMenu *>("roiContextMenu"); ASSERT_NE(menu, nullptr);
+            ASSERT_TRUE(doc->selection); EXPECT_EQ(doc->selection->id, roi.id);
+            EXPECT_EQ(viewer->channel(), 1u); EXPECT_EQ(viewer->slice(), 2u); EXPECT_EQ(viewer->time(), 1u);
+            EXPECT_TRUE(viewer->composite());
+            menu->setActiveAction(window.findChild<QAction *>(command)); sendKey(menu, Qt::Key_Return);
+        });
+        const auto position = viewer->imageToWidget(roi.bounds().center()).toPoint();
+        QContextMenuEvent event(QContextMenuEvent::Mouse, position, viewer->mapToGlobal(position));
+        QApplication::sendEvent(viewer, &event);
+    };
+    contextAction("analyze.measure"); ASSERT_TRUE(finishJobs(window));
+    auto *model = window.panel("measurements")->findChild<QTableView *>()->model();
+    ASSERT_EQ(model->rowCount(), 1);
+    EXPECT_EQ(model->data(model->index(0, 1)).toString(), roi.name);
+    EXPECT_EQ(model->data(model->index(0, 2)).toInt(), 2);
+    EXPECT_DOUBLE_EQ(model->data(model->index(0, 4)).toDouble(), 1211.5);
+    contextAction("analyze.histogram"); ASSERT_TRUE(finishJobs(window));
+    auto *series = window.panel("histogram")->findChild<QLineSeries *>(); ASSERT_NE(series, nullptr);
+    double samples = 0;
+    for (const auto &point : series->points()) samples += point.y();
+    EXPECT_DOUBLE_EQ(samples, 2);
+    ASSERT_FALSE(series->points().isEmpty());
+    EXPECT_GT(series->points().front().x(), 1211); EXPECT_LT(series->points().back().x(), 1212);
+    QTimer dismiss;
+    bool propertiesOpened = false;
+    QString error;
+    QObject::connect(&dismiss, &QTimer::timeout, [&] {
+        if (auto *message = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+            error = message->text(); message->accept();
+        } else if (auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+                   dialog && dialog->objectName() == "selectionPropertiesDialog") {
+            propertiesOpened = true;
+            EXPECT_EQ(dialog->findChild<QLineEdit *>("roiName")->text(), roi.name); dialog->reject();
+        }
+    });
+    dismiss.start(1);
+    contextAction("selection.properties");
+    EXPECT_TRUE(propertiesOpened); EXPECT_TRUE(error.isEmpty()) << error.toStdString();
+    EXPECT_EQ(doc->rois.front().channel, 1u); EXPECT_EQ(doc->rois.front().z, 0u);
+    EXPECT_FALSE(doc->modified);
+}
+
 TEST(Desktop, ScatterPlotsUseNumericMeasurementColumnsAndKeepASnapshot)
 {
     MainWindow window;

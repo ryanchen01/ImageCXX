@@ -2037,11 +2037,12 @@ DocumentWidget *MainWindow::addDocument(Image image)
     connect(document, &DocumentWidget::activated, this, [this, document] { setActiveDocument(document); });
     connect(document->viewer, &ImageViewer::roiContextMenuRequested, this, [this, document](const QPoint &position) {
         setActiveDocument(document);
+        const auto roi = document->selection;
+        if (roi) document->viewer->setSlice(document->viewer->slice(), roi->channel, document->viewer->time());
         QMenu menu(document->viewer);
         menu.setObjectName("roiContextMenu");
         for (const auto &id : {"analyze.measure", "selection.add", "analyze.histogram"})
             menu.addAction(findChild<QAction *>(id));
-        const auto roi = document->selection;
         if (roi && (roi->type == RoiType::Line || roi->type == RoiType::Rectangle))
             menu.addAction(findChild<QAction *>("analyze.profile"));
         menu.addSeparator();
