@@ -55,6 +55,22 @@ GraphsView {
 
     property int dataRevision: 0
     property bool scatter: false
+    Component {
+        id: scatterMarker
+        Rectangle {
+            width: 10
+            height: 10
+            radius: 5
+            color: "#2E69B8"
+            border.width: 1.5
+            border.color: "#FDFBF7"
+        }
+    }
+    Binding {
+        target: graph.scatter ? graph.seriesList[0] : null
+        property: "pointDelegate"
+        value: scatterMarker
+    }
     Connections {
         target: graph.seriesList[0]
         function onPointsReplaced() { graph.dataRevision++ }
@@ -112,23 +128,24 @@ GraphsView {
     }
 
     Rectangle {
+        id: cursor
         parent: graph
         objectName: "plotCursor"
         z: 1
+        readonly property real sampleY: graph.plotArea.y + (graph.yValues.visualMax - graph.sample.y)
+            / (graph.yValues.visualMax - graph.yValues.visualMin) * graph.plotArea.height
         visible: graph.inspecting && isFinite(graph.sample.x)
                  && (graph.scatter || (x >= graph.plotArea.x && x <= graph.plotArea.x + graph.plotArea.width))
         x: graph.plotArea.x + (graph.sample.x - graph.xValues.visualMin)
            / (graph.xValues.visualMax - graph.xValues.visualMin) * graph.plotArea.width
            - (graph.scatter ? width / 2 : 0)
-        y: graph.scatter ? graph.plotArea.y + (graph.yValues.visualMax - graph.sample.y)
-           / (graph.yValues.visualMax - graph.yValues.visualMin) * graph.plotArea.height - height / 2
-           : graph.plotArea.y
-        width: graph.scatter ? 12 : 1
-        height: graph.scatter ? 12 : graph.plotArea.height
-        radius: graph.scatter ? 6 : 0
-        color: graph.scatter ? "transparent" : "#80766A"
+        y: graph.scatter ? sampleY - height / 2 : graph.plotArea.y
+        width: graph.scatter ? 16 : 1
+        height: graph.scatter ? 16 : graph.plotArea.height
+        radius: graph.scatter ? 8 : 0
+        color: graph.scatter ? "transparent" : "#6E675C"
         border.width: graph.scatter ? 2 : 0
-        border.color: "#3874CB"
+        border.color: "#2E69B8"
     }
 
     Rectangle {
@@ -136,19 +153,32 @@ GraphsView {
         objectName: "plotReadout"
         z: 2
         visible: graph.inspecting && isFinite(graph.sample.x)
-        x: Math.max(graph.plotArea.x, Math.min(pointer.point.position.x + 12,
-                     graph.plotArea.x + graph.plotArea.width - width))
-        y: graph.plotArea.y + 6
-        width: readout.implicitWidth + 16
+        readonly property real sampleX: cursor.x + (graph.scatter ? cursor.width / 2 : 0)
+        readonly property bool placeLeft: sampleX + 12 + width > graph.plotArea.x + graph.plotArea.width
+                                          && sampleX - 12 - width >= graph.plotArea.x
+        x: Math.max(graph.plotArea.x, Math.min(
+               placeLeft ? Math.min(pointer.point.position.x, sampleX) - 12 - width
+                         : Math.max(pointer.point.position.x, sampleX) + 12,
+               graph.plotArea.x + graph.plotArea.width - width))
+        y: {
+            const topY = graph.plotArea.y + 6
+            const pad = graph.scatter ? cursor.height / 2 + 6 : 8
+            const overlapsX = sampleX + pad >= x && sampleX - pad <= x + width
+            const overlapsTopY = cursor.sampleY - pad <= topY + height && cursor.sampleY + pad >= topY
+            if (overlapsX && overlapsTopY)
+                return Math.min(graph.plotArea.y + graph.plotArea.height - height - 6, cursor.sampleY + pad)
+            return topY
+        }
+        width: readout.implicitWidth + 18
         height: readout.implicitHeight + 12
-        color: "#FAF7F2"
-        border.color: "#D8D2C9"
-        radius: 4
+        color: "#FDFBF7"
+        border.color: "#CFC7BA"
+        radius: 5
         Text {
             id: readout
             objectName: "plotReadoutText"
             anchors.centerIn: parent
-            color: "#1A1C1F"
+            color: "#18191B"
             font.pointSize: 11
             text: graph.xValues.titleText + ": " + Number(graph.sample.x.toPrecision(8))
                   + "\n" + graph.yValues.titleText + ": " + Number(graph.sample.y.toPrecision(8))
@@ -180,7 +210,7 @@ GraphsView {
                / (graph.yValues.visualMax - graph.yValues.visualMin) * parent.height
             width: Math.hypot(endX - x, endY - y)
             height: 2
-            color: "#3874CB"
+            color: "#2E69B8"
             transformOrigin: Item.TopLeft
             rotation: Math.atan2(endY - y, endX - x) * 180 / Math.PI
         }
@@ -194,8 +224,9 @@ GraphsView {
                 y: (graph.yValues.visualMax - modelData.y)
                    / (graph.yValues.visualMax - graph.yValues.visualMin) * parent.height - height
                 text: modelData.text
-                color: "#3874CB"
+                color: "#2E69B8"
                 font.pointSize: 11
+                font.weight: Font.DemiBold
             }
         }
     }
@@ -219,19 +250,20 @@ GraphsView {
             anchors.verticalCenter: parent.verticalCenter
             width: 15
             height: 15
-            radius: 3
-            color: interpolation.checked ? "#1A1C1F" : "#FAF7F2"
-            border.color: interpolation.activeFocus ? "#3874CB" : "#80766A"
+            radius: 4
+            color: interpolation.checked ? "#2E69B8" : "#FDFBF7"
+            border.color: interpolation.activeFocus || interpolation.checked ? "#2E69B8" : "#9A9184"
             Text {
                 anchors.centerIn: parent
                 text: interpolation.checked ? "✓" : ""
-                color: "#FAF7F2"
-                font.pixelSize: 12
+                color: "#FDFBF7"
+                font.pixelSize: 11
+                font.bold: true
             }
         }
         contentItem: Text {
             text: interpolation.text
-            color: "#1A1C1F"
+            color: "#18191B"
             font.pointSize: 11
             verticalAlignment: Text.AlignVCenter
         }
@@ -245,22 +277,23 @@ GraphsView {
         anchors.right: parent.right
         anchors.margins: 4
         text: qsTr("Reset")
-        implicitWidth: 52
+        implicitWidth: 54
         implicitHeight: 24
         enabled: graph.xValues && graph.yValues
                  && (graph.xValues.zoom !== 1 || graph.yValues.zoom !== 1
                      || graph.xValues.pan !== 0 || graph.yValues.pan !== 0)
         contentItem: Text {
             text: reset.text
-            color: reset.enabled ? "#1A1C1F" : "#80766A"
+            color: reset.enabled ? "#18191B" : "#8A857E"
             font.pointSize: 11
+            font.weight: Font.Medium
             horizontalAlignment: Text.AlignHCenter
             verticalAlignment: Text.AlignVCenter
         }
         background: Rectangle {
-            color: reset.down ? "#E8E2D9" : "#FAF7F2"
-            border.color: reset.activeFocus ? "#3874CB" : "#D8D2C9"
-            radius: 4
+            color: !reset.enabled ? "#F2EEE6" : reset.down ? "#D9D1C3" : reset.hovered ? "#E5DFD3" : "#EFEAE0"
+            border.color: reset.activeFocus ? "#2E69B8" : !reset.enabled ? "#E0DAD0" : "#CFC7BA"
+            radius: 5
         }
         onClicked: {
             graph.xValues.zoom = 1

@@ -22,12 +22,12 @@ PlotWidget::PlotWidget(QWidget *parent, bool scatter) : QWidget(parent), quick_(
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->addWidget(quick_);
-    series_->setColor(QColor("#1A1C1F"));
-    if (auto *line = qobject_cast<QLineSeries *>(series_)) line->setWidth(1);
+    series_->setColor(QColor("#18191B"));
+    if (auto *line = qobject_cast<QLineSeries *>(series_)) line->setWidth(1.5);
     auto *theme = new QGraphsTheme(this);
     theme->setColorScheme(QGraphsTheme::ColorScheme::Light);
-    theme->setBackgroundColor(QColor("#FAF7F2"));
-    theme->setPlotAreaBackgroundColor(QColor("#FAF7F2"));
+    theme->setBackgroundColor(QColor("#F7F4EE"));
+    theme->setPlotAreaBackgroundColor(QColor("#FDFBF7"));
     auto labelFont = font();
     labelFont.setPointSizeF(11);
     theme->setAxisXLabelFont(labelFont);
@@ -35,12 +35,12 @@ PlotWidget::PlotWidget(QWidget *parent, bool scatter) : QWidget(parent), quick_(
     axisX_->setTitleFont(labelFont);
     axisY_->setTitleFont(labelFont);
     auto grid = theme->grid();
-    grid.setMainColor(QColor("#D8D2C9")); grid.setSubColor(QColor("#E8E2D9"));
+    grid.setMainColor(QColor("#D8D1C5")); grid.setSubColor(QColor("#ECE6DC"));
     grid.setMainWidth(1); grid.setSubWidth(.5); theme->setGrid(grid);
-    auto axis = theme->axisX(); axis.setMainColor(QColor("#1A1C1F")); axis.setLabelTextColor(QColor("#1A1C1F"));
+    auto axis = theme->axisX(); axis.setMainColor(QColor("#3D3B37")); axis.setLabelTextColor(QColor("#18191B"));
     theme->setAxisX(axis); theme->setAxisY(axis);
     quick_->setResizeMode(QQuickWidget::SizeRootObjectToView);
-    quick_->setClearColor(QColor("#FAF7F2"));
+    quick_->setClearColor(QColor("#F7F4EE"));
     quick_->setMouseTracking(true);
     quick_->setToolTip(tr("Drag to pan. Scroll or pinch to zoom. Move the pointer over the plot for values."));
     quick_->setInitialProperties({{"theme", QVariant::fromValue(theme)}, {"scatter", scatter},
