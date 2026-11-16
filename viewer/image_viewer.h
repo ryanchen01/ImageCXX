@@ -92,6 +92,7 @@ Q_SIGNALS:
     void roiCreated(const imagecxx::Roi &roi);
     void roiSelected(const imagecxx::Roi &roi);
     void roiEdited(const imagecxx::Roi &roi);
+    void roiContextMenuRequested(const QPoint &globalPosition);
     void selectionCleared();
     void displayRangeChanged(double minimum, double maximum);
     void zoomChanged(double scale);
@@ -109,6 +110,7 @@ protected:
     bool event(QEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
+    void contextMenuEvent(QContextMenuEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
@@ -125,6 +127,7 @@ private:
     void updateCanvas();
     void zoomAt(double scale, QPointF position);
     void completeRoi();
+    std::optional<Roi> roiAt(QPointF position) const;
     Qt::CursorShape toolCursor() const;
     void updateRoiDrag(QPointF point, Qt::KeyboardModifiers modifiers);
 };

@@ -54,7 +54,6 @@ private:
     QListWidget *history_ = nullptr;
     QTableView *resultsView_ = nullptr;
     QStandardItemModel *results_ = nullptr;
-    int exportedMeasurementRows_ = 0;
     QDoubleSpinBox *minimum_ = nullptr;
     QDoubleSpinBox *maximum_ = nullptr;
     QDoubleSpinBox *gamma_ = nullptr;
@@ -109,7 +108,8 @@ private:
     void restorePanelLayout(const QByteArray &layout);
     void showError(const QString &message);
     bool showJobError(std::exception_ptr error);
-    bool confirmDiscardMeasurements();
+    void exportMeasurements(QWidget *window);
+    bool confirmDiscardMeasurements(QWidget *window = nullptr);
     std::optional<QVariantMap> parameterForm(const imagecxx::Command &command, bool batch = false);
     std::optional<imagecxx::Roi> selectedRoi() const;
     void showPlot(bool profile, const QVariantMap &options = {});
