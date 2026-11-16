@@ -163,7 +163,7 @@ protected:
             active = {{frame, QTransform(imageRect.width(), 0, 0, imageRect.height(), imageRect.x(), imageRect.y()),
                 metadata, minimum, maximum, gamma, 1, lut, inverted, linear, mask, maskSize}};
         }
-        const QColor background = overlayMode ? QColor(Qt::black) : QColor("#FAF7F2");
+        const QColor background = overlayMode ? QColor(Qt::black) : QColor("#F7F4EE");
         std::size_t bytes = 0;
         const auto sizeLimit = rhi()->resourceLimit(QRhi::TextureSizeMax);
         for (const auto &layer : active) {
@@ -638,7 +638,7 @@ ImageViewer::ImageViewer(QWidget *parent) : QWidget(parent), d(std::make_unique<
 void ImageViewer::paintOverlays(QPainter &painter, bool printing)
 {
     if (d->image.empty()) {
-        painter.setPen(QColor("#1A1C1F"));
+        painter.setPen(QColor("#545049"));
         painter.drawText(rect(), Qt::AlignCenter, tr("Open an image to begin"));
         return;
     }
@@ -732,10 +732,14 @@ void ImageViewer::paintOverlays(QPainter &painter, bool printing)
         }
     }
     if (!d->viewLabel.isEmpty()) {
-        const QRect label(8, 8, painter.fontMetrics().horizontalAdvance(d->viewLabel) + 20, 28);
-        painter.fillRect(label, QColor(12, 18, 26, 210));
-        painter.setPen(QColor(230, 237, 246));
+        const QRectF label(10, 10, painter.fontMetrics().horizontalAdvance(d->viewLabel) + 20, 26);
+        painter.save();
+        painter.setPen(QPen(QColor(255, 255, 255, 38), 1));
+        painter.setBrush(QColor(18, 22, 28, 215));
+        painter.drawRoundedRect(label, 5, 5);
+        painter.setPen(QColor(238, 242, 248));
         painter.drawText(label, Qt::AlignCenter, d->viewLabel);
+        painter.restore();
     }
 }
 

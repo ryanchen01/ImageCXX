@@ -25,14 +25,30 @@ OverlayWindow::OverlayWindow(DocumentWidget *document, QWidget *parent)
     viewer->setImage(document->image);
     viewer->setSlice(document->viewer->slice(), document->viewer->channel(), document->viewer->time());
     viewer->setToolTip(tr("Wheel to browse. Pinch or Ctrl+wheel to zoom. Middle-button or Space + drag to pan."));
+    setStyleSheet(R"(
+        QWidget { background: #F7F4EE; color: #18191B; font-size: 12px; }
+        QLabel#sliceAxisLabel { font-weight: 600; color: #4A4640; padding: 1px 6px; background: #EAE4D9; border-radius: 4px; }
+        QLabel#slicePosition { color: #545049; font-weight: 500; min-width: 36px; }
+        QSlider::groove:horizontal { height: 4px; background: #DED8CD; border-radius: 2px; }
+        QSlider::sub-page:horizontal { background: #2E69B8; border-radius: 2px; }
+        QSlider::sub-page:horizontal:disabled { background: #B8B1A6; }
+        QSlider::handle:horizontal { width: 14px; height: 14px; margin: -5px 0; border-radius: 7px;
+            background: #FDFBF7; border: 1px solid #8A8275; }
+        QSlider::handle:horizontal:hover { background: #FFFFFF; border-color: #2E69B8; }
+        QSlider::handle:horizontal:disabled { background: #EFEAE0; border-color: #C5BEB2; }
+    )");
     auto *bar = new QHBoxLayout;
-    bar->setContentsMargins(14, 10, 14, 10);
+    bar->setContentsMargins(14, 9, 14, 9);
+    bar->setSpacing(10);
     auto *label = new QLabel(tr("Z"), this);
+    label->setObjectName("sliceAxisLabel");
     slice_ = new QSlider(Qt::Horizontal, this);
     slice_->setObjectName("sliceSlider");
     slice_->setAccessibleName(tr("Z slice"));
     label->setBuddy(slice_);
     position_ = new QLabel(this);
+    position_->setObjectName("slicePosition");
+    position_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     bar->addWidget(label);
     bar->addWidget(slice_, 1);
     bar->addWidget(position_);

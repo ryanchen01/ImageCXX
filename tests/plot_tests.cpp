@@ -242,9 +242,13 @@ TEST(Plots, ScatterHoverUsesBothCoordinatesForUnorderedAndRepeatedXValues)
             renderPlot();
             EXPECT_EQ(graph->property("sample").toPointF(), point);
             auto *cursor = graph->findChild<QQuickItem *>("plotCursor"); ASSERT_NE(cursor, nullptr);
+            auto *readoutBox = graph->findChild<QQuickItem *>("plotReadout"); ASSERT_NE(readoutBox, nullptr);
             EXPECT_TRUE(cursor->isVisible());
             EXPECT_NEAR(cursor->x() + cursor->width() / 2, position.x(), 1);
             EXPECT_NEAR(cursor->y() + cursor->height() / 2, position.y(), 1);
+            const QRectF cursorRect(cursor->x(), cursor->y(), cursor->width(), cursor->height());
+            const QRectF readoutRect(readoutBox->x(), readoutBox->y(), readoutBox->width(), readoutBox->height());
+            EXPECT_FALSE(readoutRect.intersects(cursorRect));
         }
     }
     // Replacing values must refresh the hovered point even when ranges stay the same.
