@@ -367,6 +367,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     commands_.add({"stacks.reslice", tr("Reslice..."), QT_TRANSLATE_NOOP("CommandCategories", "Stacks"), {}, true, {}, [this](const QVariantMap &) {
         const auto *document = activeDocument(); if (!document) return;
         const Image input = document->image;
+        const auto lut = document->viewer->lut();
+        const bool inverted = document->viewer->isInverted();
         QSettings settings; settings.beginGroup("reslice/v1");
         ResliceOptions options;
         options.outputSpacing = settings.value("outputSpacing", input.metadata().axes.size() > 2 ? input.metadata().axes[2].spacing : 1).toDouble();
@@ -454,14 +456,16 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         auto output = std::make_shared<Image>();
         jobs_.submit(tr("Reslice"), [input, options, output](auto stop, auto progress) {
             *output = reslice(input, options, stop, progress);
-        }, [this, output](auto error) {
+        }, [this, output, lut, inverted](auto error) {
             if (showJobError(error)) return;
-            addDocument(*output)->modified = true; updatePanels();
+            addDocument(*output, lut, inverted)->modified = true; updatePanels();
         });
     }});
     commands_.add({"stacks.project3d", tr("3D Project..."), QT_TRANSLATE_NOOP("CommandCategories", "Stacks"), {}, true, {}, [this](const QVariantMap &) {
         const auto *document = activeDocument(); if (!document) return;
         const Image input = document->image;
+        const auto lut = document->viewer->lut();
+        const bool inverted = document->viewer->isInverted();
         QSettings settings; settings.beginGroup("projection3d/v1");
         settings.remove("lower"); settings.remove("upper");
         ProjectionOptions options;
@@ -612,9 +616,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         auto output = std::make_shared<Image>();
         jobs_.submit(tr("3D Project"), [input, options, output](auto stop, auto progress) {
             *output = project3D(input, options, stop, progress);
-        }, [this, output](auto error) {
+        }, [this, output, lut, inverted](auto error) {
             if (showJobError(error)) return;
-            addDocument(*output)->modified = true; updatePanels();
+            addDocument(*output, lut, inverted)->modified = true; updatePanels();
         });
     }});
     commands_.add({"analyze.measure", tr("Measure selection"), QT_TRANSLATE_NOOP("CommandCategories", "Analyze"), QKeySequence("M"), true, {}, [this](const QVariantMap &) {
@@ -2023,9 +2027,11 @@ void MainWindow::clearDocuments()
     }
 }
 
-DocumentWidget *MainWindow::addDocument(Image image)
+DocumentWidget *MainWindow::addDocument(Image image, const QString &lut, std::optional<bool> inverted)
 {
     auto *document = new DocumentWidget(std::move(image), this);
+    if (!lut.isEmpty()) document->viewer->setLut(lut);
+    if (inverted.has_value()) document->viewer->setInverted(*inverted);
     connect(document, &DocumentWidget::pathsDropped, this, &MainWindow::openPaths);
     document->setAttribute(Qt::WA_DeleteOnClose);
     documents_.append(document);

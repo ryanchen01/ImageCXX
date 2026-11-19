@@ -6,6 +6,7 @@
 #include <QColor>
 #include <QMap>
 #include <QPointer>
+#include <optional>
 class QMenu;
 class QActionGroup;
 class QTreeWidget;
@@ -30,7 +31,8 @@ public:
     void openPaths(const QStringList &paths);
     imagecxx::DocumentWidget *activeDocument() const;
     QList<imagecxx::DocumentWidget *> documents() const;
-    imagecxx::DocumentWidget *addDocument(imagecxx::Image image);
+    imagecxx::DocumentWidget *addDocument(imagecxx::Image image, const QString &lut = {},
+                                          std::optional<bool> inverted = std::nullopt);
     QWidget *panel(const QString &id) const;
     void showPanel(const QString &id);
     const imagecxx::CommandRegistry &commands() const { return commands_; }

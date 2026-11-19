@@ -3250,6 +3250,8 @@ TEST(Desktop, ProjectionOpensNewWindowAndRemembersAcceptedOptionsAcrossWindowsAn
         EXPECT_FALSE(action->isEnabled());
         window.addDocument(Image::allocate(PixelType::UInt8, {2, 2})); EXPECT_FALSE(action->isEnabled());
         auto *source = window.addDocument(image); source->move(30, 180); source->resize(420, 360);
+        source->viewer->setLut("viridis");
+        source->viewer->setInverted(true);
         EXPECT_TRUE(action->isEnabled());
         EXPECT_TRUE(window.findChild<QMenu *>("stacksMenu")->actions().contains(action));
         bool prompted = false;
@@ -3285,6 +3287,8 @@ TEST(Desktop, ProjectionOpensNewWindowAndRemembersAcceptedOptionsAcrossWindowsAn
         EXPECT_EQ(source->image.sample(12, 12, 4), image.sample(12, 12, 4));
         if (attempt == 0) {
             auto *output = window.activeDocument(); ASSERT_NE(output, source);
+            EXPECT_EQ(output->viewer->lut(), "viridis");
+            EXPECT_TRUE(output->viewer->isInverted());
             EXPECT_TRUE(output->modified); EXPECT_TRUE(output->image.metadata().sourcePath.isEmpty());
             EXPECT_EQ(output->image.depth(), 5u); EXPECT_EQ(output->image.metadata().axes[2].origin, 30);
             if (!capture.isEmpty()) {
@@ -3398,6 +3402,9 @@ TEST(Desktop, ResliceRemembersAllAcceptedOptionsAndKeepsInterpolationSpacingAfte
     for (int attempt = 0; attempt < 3; ++attempt) {
         MainWindow window;
         auto *source = window.addDocument(Image::allocate(PixelType::UInt8, {8, 6, 4}));
+        source->viewer->setLut("hot");
+        source->viewer->setInverted(true);
+        if (attempt == 0) window.executeCommand("view.overlay");
         bool prompted = false;
         QTimer::singleShot(0, &window, [&] {
             auto *dialog = window.findChild<QDialog *>("resliceDialog"); EXPECT_NE(dialog, nullptr);
@@ -3422,6 +3429,15 @@ TEST(Desktop, ResliceRemembersAllAcceptedOptionsAndKeepsInterpolationSpacingAfte
         });
         window.executeCommand("stacks.reslice"); EXPECT_TRUE(prompted); ASSERT_TRUE(finishJobs(window));
         EXPECT_EQ(window.documents().size(), attempt == 0 ? 2 : 1); EXPECT_FALSE(source->modified);
+        if (attempt == 0) {
+            auto *output = window.activeDocument(); ASSERT_NE(output, source);
+            EXPECT_EQ(output->viewer->lut(), "hot");
+            EXPECT_TRUE(output->viewer->isInverted());
+            auto *layers = window.findChild<QTreeWidget *>("overlayImages");
+            ASSERT_NE(layers, nullptr);
+            ASSERT_EQ(layers->topLevelItemCount(), 2);
+            EXPECT_EQ(layers->topLevelItem(0)->data(0, Qt::UserRole + 1).toString(), "hot");
+        }
     }
     settings.remove("reslice");
 }
