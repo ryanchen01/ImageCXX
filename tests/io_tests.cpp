@@ -885,6 +885,124 @@ TEST(ImageIo, DicomSeriesRejectsMixedPhotometricInterpretationAndIntensityUnits)
     }
 }
 
+TEST(ImageIo, DicomSeriesRescalesPerSliceCalibrationAndReadsPetUnits)
+{
+    QTemporaryDir directory;
+    const std::array<double, 3> slopes{10.5, 1.0, 42.75};
+    const std::array<double, 3> intercepts{-12.0, 0.0, 18.5};
+    std::vector<Image> sources(3);
+    for (int z : {2, 0, 1}) {
+        auto slice = fixture(PixelType::Int16, {5, 3, 1});
+        slice.metadata().axes[2].origin = 7.0 + 2.79 * z;
+        slice.metadata().intensityScale = slopes[static_cast<std::size_t>(z)];
+        slice.metadata().intensityOffset = intercepts[static_cast<std::size_t>(z)];
+        slice.metadata().intensityUnit.clear();
+        slice.metadata().attributes.insert("DICOM.0020,000d", "1.2.826.0.1.3680043.10.543.10");
+        slice.metadata().attributes.insert("DICOM.0020,000e", "1.2.826.0.1.3680043.10.543.2");
+        slice.metadata().attributes.insert("DICOM.0054,1001", "BQML");
+        slice.setValue(std::array<std::size_t, 3>{0, 0, 0}, z * 100 - 50);
+        writeDicom(slice, directory.filePath(QString("pet-%1.dcm").arg(z)));
+        sources[static_cast<std::size_t>(z)] = std::move(slice);
+    }
+    const auto implicitSlopePath = directory.filePath("pet-1.dcm");
+    DcmFileFormat implicitSlope;
+    ASSERT_TRUE(implicitSlope.loadFile(QFile::encodeName(implicitSlopePath).constData()).good());
+    ASSERT_TRUE(implicitSlope.getDataset()->findAndDeleteElement(DCM_RescaleSlope).good());
+    ASSERT_TRUE(implicitSlope.saveFile(QFile::encodeName(implicitSlopePath).constData(), EXS_LittleEndianExplicit).good());
+
+    const auto plan = discoverImageImports({directory.path()});
+    ASSERT_TRUE(plan.errors.isEmpty());
+    ASSERT_EQ(plan.images.size(), 1);
+    ASSERT_EQ(plan.images.front().paths.size(), 3);
+    EXPECT_EQ(plan.images.front().dicomBytes, 5u * 3u * 3u * sizeof(float));
+
+    const auto volume = readDicomSeries(plan.images.front().paths);
+    EXPECT_EQ(volume.pixelType(), PixelType::Float32);
+    EXPECT_EQ(volume.shape(), (std::vector<std::size_t>{5, 3, 3}));
+    EXPECT_DOUBLE_EQ(volume.metadata().intensityScale, 1.0);
+    EXPECT_DOUBLE_EQ(volume.metadata().intensityOffset, 0.0);
+    EXPECT_EQ(volume.metadata().intensityUnit, "BQML");
+    EXPECT_FALSE(volume.metadata().attributes.contains("DICOM.0028,1052"));
+    EXPECT_FALSE(volume.metadata().attributes.contains("DICOM.0028,1053"));
+    for (std::size_t z = 0; z < 3; ++z) {
+        for (std::size_t y = 0; y < 3; ++y) {
+            for (std::size_t x = 0; x < 5; ++x) {
+                const float expected = static_cast<float>(
+                    sources[z].sample(x, y) * slopes[z] + intercepts[z]);
+                EXPECT_FLOAT_EQ(static_cast<float>(volume.sample(x, y, z)), expected);
+            }
+        }
+    }
+
+    auto rescaleTypeOverrides = sources[0].clone();
+    rescaleTypeOverrides.metadata().intensityUnit = "HU";
+    const auto overridePath = directory.filePath("override.dcm");
+    writeDicom(rescaleTypeOverrides, overridePath);
+    EXPECT_EQ(readDicom(overridePath).metadata().intensityUnit, "HU");
+
+    auto identity = sources[1].clone();
+    identity.metadata().axes[2].origin += 2.79;
+    const auto explicitSlopePath = directory.filePath("pet-identity.dcm");
+    writeDicom(identity, explicitSlopePath);
+    const auto identityPlan = discoverImageImports({implicitSlopePath, explicitSlopePath});
+    ASSERT_TRUE(identityPlan.errors.isEmpty());
+    ASSERT_EQ(identityPlan.images.size(), 1);
+    EXPECT_EQ(identityPlan.images.front().dicomBytes, 2 * identity.byteCount());
+    EXPECT_EQ(readDicomSeries(identityPlan.images.front().paths).pixelType(), PixelType::Int16);
+
+    auto mismatchedUnit = sources[1].clone();
+    mismatchedUnit.metadata().attributes.insert("DICOM.0054,1001", "CNTS");
+    const auto mismatchPath = directory.filePath("pet-mismatch.dcm");
+    writeDicom(mismatchedUnit, mismatchPath);
+    EXPECT_THROW(readDicomSeries({directory.filePath("pet-0.dcm"), mismatchPath}), std::runtime_error);
+}
+
+TEST(ImageIo, DicomSeriesToleratesFloat32RoundedSlicePositionsAndRejectsTiltOrGaps)
+{
+    QTemporaryDir directory;
+    QStringList paths;
+    for (int i = 0; i < 120; ++i) {
+        auto slice = fixture(PixelType::Int16, {2, 2, 1});
+        slice.metadata().axes[2].origin = static_cast<double>(static_cast<float>(-754.51 + 2.79 * i));
+        slice.metadata().intensityScale = 1.0;
+        slice.metadata().intensityOffset = 0.0;
+        slice.metadata().attributes.insert("DICOM.0020,000d", "1.2.826.0.1.3680043.10.543.10");
+        slice.metadata().attributes.insert("DICOM.0020,000e", "1.2.826.0.1.3680043.10.543.3");
+        const auto path = directory.filePath(QString("slice-%1.dcm").arg(i, 3, 10, QLatin1Char('0')));
+        writeDicom(slice, path);
+        paths.append(path);
+    }
+
+    const auto volume = readDicomSeries(paths);
+    EXPECT_EQ(volume.depth(), 120u);
+    EXPECT_NEAR(volume.metadata().axes[2].spacing, 2.79, 1e-5);
+
+    auto makeSmallSeriesSlice = [&](const QString &name, double xOrigin, double zOrigin) {
+        auto slice = fixture(PixelType::UInt16, {2, 2, 1});
+        slice.metadata().axes[0].origin = xOrigin;
+        slice.metadata().axes[2].origin = zOrigin;
+        slice.metadata().attributes.insert("DICOM.0020,000d", "1.2.826.0.1.3680043.10.543.10");
+        slice.metadata().attributes.insert("DICOM.0020,000e", "1.2.826.0.1.3680043.10.543.4");
+        const auto path = directory.filePath(name);
+        writeDicom(slice, path);
+        return path;
+    };
+
+    const auto p0 = makeSmallSeriesSlice("p0.dcm", 10.0, 0.0);
+    const auto p1 = makeSmallSeriesSlice("p1.dcm", 10.0, 1.5);
+    const auto p2 = makeSmallSeriesSlice("p2.dcm", 10.0, 3.0);
+    const auto p3Gap = makeSmallSeriesSlice("p3-gap.dcm", 10.0, 4.5);
+    const auto p1Shifted = makeSmallSeriesSlice("p1-shifted.dcm", 10.05, 1.5);
+    const auto p2Shifted = makeSmallSeriesSlice("p2-shifted.dcm", 10.10, 3.0);
+    const auto p0Dup = makeSmallSeriesSlice("p0-dup.dcm", 10.0, 0.0);
+    const auto p2Dup = makeSmallSeriesSlice("p2-dup.dcm", 10.0, 3.0);
+
+    EXPECT_THROW(readDicomSeries({p0, p1Shifted, p2Shifted}), std::runtime_error);
+    EXPECT_THROW(readDicomSeries({p0, p1, p3Gap}), std::runtime_error);
+    EXPECT_THROW(readDicomSeries({p0, p0Dup, p2}), std::runtime_error);
+    EXPECT_THROW(readDicomSeries({p0, p2, p2Dup}), std::runtime_error);
+}
+
 TEST(ImageIo, CompressedDicomPreservesPixelsWithMemoryAdmission)
 {
     QTemporaryDir directory;
