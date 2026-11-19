@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <numeric>
 #include <limits>
@@ -172,7 +173,10 @@ Image readDicom(const QString &path, std::stop_token stop, IoProgress progress)
     if (!std::isfinite(metadata.intensityScale) || !std::isfinite(metadata.intensityOffset) || metadata.intensityScale == 0)
         throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM intensity calibration is invalid").toStdString());
     OFString unit;
-    if (dataset->findAndGetOFString(DCM_RescaleType, unit).good()) metadata.intensityUnit = QString::fromUtf8(unit.c_str());
+    if (dataset->findAndGetOFString(DCM_RescaleType, unit).good())
+        metadata.intensityUnit = QString::fromUtf8(unit.c_str()).trimmed();
+    if (metadata.intensityUnit.isEmpty() && dataset->findAndGetOFString(DCM_Units, unit).good())
+        metadata.intensityUnit = QString::fromUtf8(unit.c_str()).trimmed();
     const auto attributes = dicomAttributes(*dataset, stop);
     for (auto it = attributes.begin(); it != attributes.end(); ++it) {
         if (it.value().isArray()) metadata.dicomSequences.insert(it.key(), it.value());
@@ -279,6 +283,7 @@ Image readDicomSeries(const QStringList &paths, std::stop_token stop, IoProgress
         throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM series requires a Series Instance UID").toStdString());
     const std::array<double, 3> normal{direction[2], direction[5], direction[8]};
     std::vector<double> positions;
+    bool varyingRescale = false;
     for (const auto &slice : slices) {
         const auto &current = slice.metadata();
         if (slice.width() != reference.width() || slice.height() != reference.height() || slice.pixelType() != reference.pixelType() ||
@@ -286,9 +291,10 @@ Image readDicomSeries(const QStringList &paths, std::stop_token stop, IoProgress
             current.attributes.value("DICOM.0020,000d") != metadata.attributes.value("DICOM.0020,000d") ||
             current.attributes.value("DICOM.0020,0052") != metadata.attributes.value("DICOM.0020,0052") ||
             current.attributes.value("DICOM.0028,0004") != metadata.attributes.value("DICOM.0028,0004") ||
-            current.intensityUnit != metadata.intensityUnit ||
-            current.intensityScale != metadata.intensityScale || current.intensityOffset != metadata.intensityOffset)
+            current.intensityUnit != metadata.intensityUnit)
             throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM files have inconsistent series or pixel encoding").toStdString());
+        if (current.intensityScale != metadata.intensityScale || current.intensityOffset != metadata.intensityOffset)
+            varyingRescale = true;
         if (!current.attributes.contains("DICOM.0020,0032") || !current.attributes.contains("DICOM.0020,0037"))
             throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM series requires patient position and orientation on every slice").toStdString());
         for (std::size_t i = 0; i < 9; ++i)
@@ -307,11 +313,14 @@ Image readDicomSeries(const QStringList &paths, std::stop_token stop, IoProgress
     // A multi-file series cannot be reloaded from a single slice's path.
     if (paths.size() > 1) outputMetadata.sourcePath.clear();
     if (slices.size() > 1) {
-        const auto spacing = positions[order[1]] - positions[order[0]];
-        if (spacing < 1e-6) throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM series contains duplicate slice positions").toStdString());
+        for (std::size_t i = 1; i < order.size(); ++i)
+            if (positions[order[i]] - positions[order[i - 1]] < 1e-6)
+                throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM series contains duplicate slice positions").toStdString());
+        const auto spacing = (positions[order.back()] - positions[order.front()]) / static_cast<double>(order.size() - 1);
         outputMetadata.axes[2].spacing = spacing;
+        const auto spacingTolerance = std::max(1e-4, spacing * 1e-3);
         for (std::size_t i = 1; i < order.size(); ++i) {
-            if (std::abs(positions[order[i]] - positions[order[i - 1]] - spacing) > std::max(1e-4, spacing * 1e-3))
+            if (std::abs(positions[order[i]] - positions[order[i - 1]] - spacing) > spacingTolerance)
                 throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM series has nonuniform slice spacing").toStdString());
             // Reject gantry tilt rather than silently assigning incorrect orthogonal geometry.
             for (std::size_t axis = 0; axis < 3; ++axis)
@@ -319,14 +328,50 @@ Image readDicomSeries(const QStringList &paths, std::stop_token stop, IoProgress
                     throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM series has a shifted slice grid").toStdString());
         }
     }
-    if (slices.size() > std::numeric_limits<std::size_t>::max() / reference.byteCount())
+    const auto outputType = varyingRescale ? PixelType::Float32 : reference.pixelType();
+    if (varyingRescale) {
+        outputMetadata.intensityScale = 1;
+        outputMetadata.intensityOffset = 0;
+        outputMetadata.attributes.remove("DICOM.0028,1052");
+        outputMetadata.attributes.remove("DICOM.0028,1053");
+    }
+    const auto pixelCount = reference.pixelCount();
+    const auto pixelBytes = bytesPerPixel(outputType);
+    if (pixelCount > std::numeric_limits<std::size_t>::max() / pixelBytes)
         throw std::length_error(QCoreApplication::translate("DicomIo", "DICOM series exceeds the addressable size").toStdString());
-    detail::checkMemoryBudget(reference.byteCount() * slices.size(), detail::availableMemoryBytes());
-    auto image = Image::allocate(reference.pixelType(), {reference.width(), reference.height(), slices.size()}, outputMetadata);
+    const auto outputSliceBytes = pixelCount * pixelBytes;
+    if (slices.size() > std::numeric_limits<std::size_t>::max() / outputSliceBytes)
+        throw std::length_error(QCoreApplication::translate("DicomIo", "DICOM series exceeds the addressable size").toStdString());
+    detail::checkMemoryBudget(outputSliceBytes * slices.size(), detail::availableMemoryBytes());
+    auto image = Image::allocate(outputType, {reference.width(), reference.height(), slices.size()}, outputMetadata);
     auto *destination = image.mutableData();
     for (std::size_t i = 0; i < order.size(); ++i) {
         detail::checkIo(stop, progress, 0.8 + 0.2 * i / order.size());
-        std::memcpy(destination + i * reference.byteCount(), slices[order[i]].data(), reference.byteCount());
+        const auto &slice = slices[order[i]];
+        if (!varyingRescale) {
+            std::memcpy(destination + i * outputSliceBytes, slice.data(), outputSliceBytes);
+            continue;
+        }
+        const auto *source = slice.data();
+        const double scale = slice.metadata().intensityScale;
+        const double offset = slice.metadata().intensityOffset;
+        auto *output = destination + i * outputSliceBytes;
+        const auto rescale = [&]<typename T>() {
+            for (std::size_t pixel = 0; pixel < pixelCount; ++pixel) {
+                T raw{};
+                std::memcpy(&raw, source + pixel * sizeof(T), sizeof(T));
+                const float value = static_cast<float>(static_cast<double>(raw) * scale + offset);
+                if (!std::isfinite(value))
+                    throw std::runtime_error(QCoreApplication::translate("DicomIo", "DICOM intensity calibration is invalid").toStdString());
+                std::memcpy(output + pixel * sizeof(float), &value, sizeof(float));
+            }
+        };
+        switch (reference.pixelType()) {
+        case PixelType::UInt8: rescale.template operator()<std::uint8_t>(); break;
+        case PixelType::UInt16: rescale.template operator()<std::uint16_t>(); break;
+        case PixelType::Int16: rescale.template operator()<std::int16_t>(); break;
+        default: throw std::runtime_error(QCoreApplication::translate("DicomIo", "Unsupported DICOM pixel type").toStdString());
+        }
     }
     detail::checkIo(stop, progress, 1);
     return image;

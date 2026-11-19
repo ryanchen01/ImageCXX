@@ -16,7 +16,7 @@ The adapters return project-owned `Image` buffers. Reads and writes accept cance
 
 - **Folder imports:** Folders are scanned recursively and deduplicated. Selecting an `.mhd` header and its payload together opens only the header. Unrecognized files in folders are skipped, while explicitly selected unsupported files report an error.
 - **Raw binary files:** Opening `.raw` or `.bin` files (or using **File > Import raw binary...**) opens an import dialog for pixel type, dimensions, image count, header offset, and byte order unless an adjacent `.json` sidecar is present. Folder scans skip raw files without a `.json` sidecar so detached payloads are not imported twice.
-- **DICOM series:** Folder and multi-file imports group single-frame scalar DICOM files by Study Instance UID and Series Instance UID, ordering slices by patient coordinates. Series with mismatched geometry, spacing, calibration, or units are rejected together rather than silently split.
+- **DICOM series:** Folder and multi-file imports group single-frame scalar DICOM files by Study Instance UID and Series Instance UID, ordering slices by patient coordinates. Series with per-slice rescale slope or intercept (such as PET) are calibrated into `Float32` pixels, while series with mismatched geometry, spacing, photometric interpretation, or units are rejected together rather than silently split.
 
 ## Format behavior and limits
 

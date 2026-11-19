@@ -47,7 +47,15 @@ ImageImportPlan discoverImageImports(const QStringList &paths, std::stop_token s
     QSet<QString> imageSuffixes{"tif", "tiff", "mhd", "mha", "nii", "gz", "nrrd", "nhdr", "raw", "bin"};
     for (const auto &format : QImageReader::supportedImageFormats())
         imageSuffixes.insert(QString::fromLatin1(format).toLower());
-    QMap<QPair<QString, QString>, qsizetype> series;
+    struct SeriesGroup {
+        qsizetype index = 0;
+        double slope = 1;
+        double intercept = 0;
+        bool varyingRescale = false;
+        std::size_t rawBytes = 0;
+        std::size_t floatBytes = 0;
+    };
+    QMap<QPair<QString, QString>, SeriesGroup> series;
     for (qsizetype i = 0; i < candidates.size(); ++i) {
         detail::checkIo(stop, progress, double(i) / candidates.size());
         const auto &candidate = candidates[i];
@@ -101,16 +109,33 @@ ImageImportPlan discoverImageImports(const QStringList &paths, std::stop_token s
             plan.images.append({{path}, bytes});
             continue;
         }
+        double slope = 1.0, intercept = 0.0;
+        if (dataset->findAndGetFloat64(DCM_RescaleSlope, slope).bad()) slope = 1.0;
+        dataset->findAndGetFloat64(DCM_RescaleIntercept, intercept);
+        Uint16 bits = 0;
+        dataset->findAndGetUint16(DCM_BitsAllocated, bits);
+        std::size_t floatBytes = 0;
+        if (bytes && (bits == 8 || bits == 16)) {
+            const auto pixelCount = bytes / (bits / 8);
+            if (pixelCount > std::numeric_limits<std::size_t>::max() / sizeof(float))
+                throw std::length_error(QCoreApplication::translate("ImageImport", "DICOM series exceeds the addressable size").toStdString());
+            floatBytes = pixelCount * sizeof(float);
+        }
         const auto key = qMakePair(QString::fromLatin1(studyUid.c_str()), QString::fromLatin1(seriesUid.c_str()));
         auto group = series.find(key);
         if (group == series.end()) {
-            series.insert(key, plan.images.size());
+            series.insert(key, {plan.images.size(), slope, intercept, false, bytes, floatBytes});
             plan.images.append({{path}, bytes});
         } else {
-            if (bytes > std::numeric_limits<std::size_t>::max() - plan.images[*group].dicomBytes)
+            if (bytes > std::numeric_limits<std::size_t>::max() - group->rawBytes ||
+                floatBytes > std::numeric_limits<std::size_t>::max() - group->floatBytes)
                 throw std::length_error(QCoreApplication::translate("ImageImport", "DICOM series exceeds the addressable size").toStdString());
-            plan.images[*group].paths.append(path);
-            plan.images[*group].dicomBytes += bytes;
+            group->rawBytes += bytes;
+            group->floatBytes += floatBytes;
+            if (slope != group->slope || intercept != group->intercept)
+                group->varyingRescale = true;
+            plan.images[group->index].paths.append(path);
+            plan.images[group->index].dicomBytes = group->varyingRescale ? group->floatBytes : group->rawBytes;
         }
     }
     if (plan.images.isEmpty() && plan.errors.isEmpty() && !paths.isEmpty())
