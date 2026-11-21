@@ -1817,7 +1817,7 @@ TEST(Desktop, PointerStartsSelectedBeforeSelectionToolsAndAppliesToEveryPlane)
     EXPECT_FALSE((*pointer)->icon().pixmap(24, 24).isNull());
     auto *document = window.addDocument(Image::allocate(PixelType::UInt8, {20, 16, 8}));
     EXPECT_EQ(document->viewer->tool(), ImageViewer::Tool::Pointer);
-    document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    document->setOrthogonalViews(true);
     (*rectangle)->trigger();
     EXPECT_EQ(document->viewer->tool(), ImageViewer::Tool::Rectangle);
     for (auto *view : document->views()) if (view != document->viewer)
@@ -1863,24 +1863,27 @@ TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
     auto *document = window.addDocument(image);
     EXPECT_TRUE(window.findChild<QAction *>("view.orthogonal")->isEnabled());
     orthogonal->trigger();
-    EXPECT_EQ(document->viewMode(), DocumentWidget::ViewMode::Orthogonal);
+    EXPECT_TRUE(document->orthogonalViews());
     EXPECT_TRUE(window.findChild<QAction *>("view.orthogonal")->isChecked());
     for (auto *view : document->views())
         EXPECT_TRUE(view->window()->findChildren<QComboBox *>(QString{}, Qt::FindDirectChildrenOnly).isEmpty());
     EXPECT_EQ(window.documents().size(), 2);
-    EXPECT_EQ(other->viewMode(), DocumentWidget::ViewMode::Single);
+    EXPECT_FALSE(other->orthogonalViews());
+    EXPECT_FALSE(other->isLinked());
     QPointer<QWidget> previousXzWindow(document->views()[1]->window());
     QPointer<QWidget> previousYzWindow(document->views()[2]->window());
     window.findChild<QAction *>("view.single")->trigger();
-    EXPECT_EQ(document->viewMode(), DocumentWidget::ViewMode::Single);
+    EXPECT_FALSE(document->orthogonalViews());
+    EXPECT_FALSE(document->isLinked());
     EXPECT_FALSE(orthogonal->isChecked());
     EXPECT_TRUE(window.findChild<QAction *>("view.single")->isChecked());
     ASSERT_EQ(document->views().size(), 1);
     EXPECT_TRUE(previousXzWindow.isNull()); EXPECT_TRUE(previousYzWindow.isNull());
     EXPECT_EQ(window.documents().size(), 2);
-    EXPECT_EQ(other->viewMode(), DocumentWidget::ViewMode::Single);
+    EXPECT_FALSE(other->orthogonalViews());
+    EXPECT_FALSE(other->isLinked());
     orthogonal->trigger();
-    EXPECT_EQ(document->viewMode(), DocumentWidget::ViewMode::Orthogonal);
+    EXPECT_TRUE(document->orthogonalViews());
     EXPECT_TRUE(orthogonal->isChecked());
     EXPECT_FALSE(window.findChild<QAction *>("view.single")->isChecked());
     ASSERT_EQ(document->views().size(), 3);
@@ -1967,8 +1970,12 @@ TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
         images->item(0)->setCheckState(Qt::Checked); picker->accept();
     });
     window.commands().execute("view.linked"); settle();
-    EXPECT_EQ(document->views().size(), 1);
-    EXPECT_EQ(other->viewMode(), DocumentWidget::ViewMode::Linked);
+    EXPECT_EQ(document->views().size(), 3);
+    EXPECT_TRUE(document->orthogonalViews());
+    EXPECT_TRUE(document->isLinked());
+    EXPECT_TRUE(other->isLinked());
+    EXPECT_TRUE(window.findChild<QAction *>("view.linked")->isChecked());
+    EXPECT_TRUE(window.findChild<QAction *>("view.orthogonal")->isChecked());
     EXPECT_EQ(window.documents().size(), 2);
     document->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly)->setValue(28);
     window.showPanel("display");
@@ -1981,8 +1988,9 @@ TEST(Desktop, SynchronizedWindowsUseOneDocumentAndKeepOtherWindowsIndependent)
     EXPECT_EQ(document->views().size(), 1);
     auto *flat = window.addDocument(Image::allocate(PixelType::UInt8, {8, 8}));
     EXPECT_FALSE(window.findChild<QAction *>("view.orthogonal")->isEnabled());
-    EXPECT_EQ(flat->viewMode(), DocumentWidget::ViewMode::Single);
-    document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    EXPECT_FALSE(flat->orthogonalViews());
+    EXPECT_FALSE(flat->isLinked());
+    document->setOrthogonalViews(true);
     QPointer<QWidget> retiredWindow(document->views()[1]->window());
     document->close();
     QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
@@ -1998,13 +2006,13 @@ TEST(Desktop, SynchronizedWindowsUseNormalImageSizingForTheirCalibratedPlanes)
     metadata.axes = {{"X", .5, 0, "mm"}, {"Y", 1, 0, "mm"}, {"Z", 2, 0, "mm"}};
     auto *document = window.addDocument(Image::allocate(PixelType::UInt8, {400, 280, 80}, metadata));
     document->resize(640, 600);
-    document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    document->setOrthogonalViews(true);
     ASSERT_EQ(document->views().size(), 3);
     EXPECT_EQ(document->views()[1]->window()->size(), xzSize);
     EXPECT_EQ(document->views()[2]->window()->size(), yzSize);
     for (auto *view : document->views())
         EXPECT_EQ(view->window()->minimumSize(), document->minimumSize());
-    document->setViewMode(DocumentWidget::ViewMode::Single);
+    document->setOrthogonalViews(false);
     EXPECT_EQ(document->size(), QSize(640, 600));
 }
 
@@ -2025,7 +2033,7 @@ TEST(Desktop, LinkedViewChecklistReopensWithTheGroupAndCanAddOrRemoveImages)
         ASSERT_NE(picker, nullptr); picker->reject();
     });
     window.commands().execute("view.linked");
-    EXPECT_EQ(third->viewMode(), DocumentWidget::ViewMode::Single);
+    EXPECT_FALSE(third->isLinked());
     QTimer::singleShot(0, &window, [] {
         auto *picker = qobject_cast<QDialog *>(QApplication::activeModalWidget());
         ASSERT_NE(picker, nullptr);
@@ -2035,9 +2043,9 @@ TEST(Desktop, LinkedViewChecklistReopensWithTheGroupAndCanAddOrRemoveImages)
         images->item(1)->setCheckState(Qt::Checked); picker->accept();
     });
     window.commands().execute("view.linked");
-    EXPECT_EQ(first->viewMode(), DocumentWidget::ViewMode::Single);
-    EXPECT_EQ(second->viewMode(), DocumentWidget::ViewMode::Linked);
-    EXPECT_EQ(third->viewMode(), DocumentWidget::ViewMode::Linked);
+    EXPECT_FALSE(first->isLinked());
+    EXPECT_TRUE(second->isLinked());
+    EXPECT_TRUE(third->isLinked());
     QEvent activated(QEvent::WindowActivate); QCoreApplication::sendEvent(third, &activated);
     QTimer::singleShot(0, &window, [] {
         auto *picker = qobject_cast<QDialog *>(QApplication::activeModalWidget());
@@ -2063,7 +2071,7 @@ TEST(Desktop, LinkedViewChecklistReopensWithTheGroupAndCanAddOrRemoveImages)
         images->item(1)->setCheckState(Qt::Unchecked); picker->accept();
     });
     window.commands().execute("view.linked");
-    EXPECT_EQ(third->viewMode(), DocumentWidget::ViewMode::Single);
+    EXPECT_FALSE(third->isLinked());
     first->viewer->setSlice(2);
     EXPECT_EQ(second->viewer->slice(), 2u); EXPECT_EQ(third->viewer->slice(), 4u);
     QCoreApplication::sendEvent(first, &activated);
@@ -2075,8 +2083,75 @@ TEST(Desktop, LinkedViewChecklistReopensWithTheGroupAndCanAddOrRemoveImages)
         images->item(0)->setCheckState(Qt::Unchecked); picker->accept();
     });
     window.commands().execute("view.linked");
-    EXPECT_EQ(first->viewMode(), DocumentWidget::ViewMode::Single);
-    EXPECT_EQ(second->viewMode(), DocumentWidget::ViewMode::Single);
+    EXPECT_FALSE(first->isLinked());
+    EXPECT_FALSE(second->isLinked());
+}
+
+TEST(Desktop, OrthogonalViewsWorkIndependentlyWithLinkedViews)
+{
+    MainWindow window;
+    auto *singleAction = window.findChild<QAction *>("view.single");
+    auto *linkedAction = window.findChild<QAction *>("view.linked");
+    auto *orthogonalAction = window.findChild<QAction *>("view.orthogonal");
+    ASSERT_NE(singleAction, nullptr);
+    ASSERT_NE(linkedAction, nullptr);
+    ASSERT_NE(orthogonalAction, nullptr);
+
+    ImageMetadata flatMeta, coarseMeta, fineMeta;
+    flatMeta.axes = {{"X", 2, 0, "mm"}, {"Y", 2, 0, "mm"}};
+    coarseMeta.axes = {{"X", 2, 0, "mm"}, {"Y", 2, 0, "mm"}, {"Z", 2, 0, "mm"}};
+    fineMeta.axes = {{"X", 1, 0, "mm"}, {"Y", 1, 0, "mm"}, {"Z", 1, 0, "mm"}};
+    auto *flat = window.addDocument(Image::allocate(PixelType::UInt8, {10, 8}, flatMeta));
+    auto *first = window.addDocument(Image::allocate(PixelType::UInt8, {10, 8, 6}, coarseMeta));
+    auto *second = window.addDocument(Image::allocate(PixelType::UInt8, {40, 32, 12}, fineMeta));
+    ASSERT_TRUE(waitFor([&] { return flat->isVisible() && first->isVisible() && second->isVisible(); }));
+    first->linkTo({second, flat});
+    QEvent activated(QEvent::WindowActivate);
+    QCoreApplication::sendEvent(first, &activated);
+    EXPECT_TRUE(linkedAction->isChecked());
+    EXPECT_FALSE(orthogonalAction->isChecked());
+    EXPECT_FALSE(singleAction->isChecked());
+
+    // Opening orthogonal views on a linked group opens them for every 3D member and keeps them linked.
+    orthogonalAction->trigger();
+    EXPECT_TRUE(first->isLinked());
+    EXPECT_TRUE(second->isLinked());
+    EXPECT_TRUE(flat->isLinked());
+    EXPECT_TRUE(first->orthogonalViews());
+    EXPECT_TRUE(second->orthogonalViews());
+    EXPECT_FALSE(flat->orthogonalViews());
+    ASSERT_EQ(first->views().size(), 3);
+    ASSERT_EQ(second->views().size(), 3);
+    EXPECT_EQ(flat->views().size(), 1);
+    EXPECT_TRUE(linkedAction->isChecked());
+    EXPECT_TRUE(orthogonalAction->isChecked());
+    EXPECT_FALSE(singleAction->isChecked());
+
+    // Navigating in first's XZ updates second's orthogonal views.
+    first->views()[1]->positionPicked({4.5, 3.5});
+    EXPECT_EQ(second->spatialPosition()[0], 8u);
+    EXPECT_EQ(second->spatialPosition()[2], 6u);
+    EXPECT_EQ(second->views()[0]->slice(), 6u);
+    EXPECT_EQ(second->views()[2]->slice(), 8u);
+
+    // Toggling orthogonal views from a 2D member of a mixed linked group works on the group's 3D members.
+    QCoreApplication::sendEvent(flat, &activated);
+    EXPECT_TRUE(orthogonalAction->isEnabled());
+    EXPECT_TRUE(orthogonalAction->isChecked());
+
+    // Toggling orthogonal views off closes XZ/YZ while keeping the linked group intact and physically synchronized.
+    ASSERT_TRUE(waitFor([&] {
+        return first->views()[1]->window()->isVisible() && second->views()[1]->window()->isVisible();
+    }));
+    orthogonalAction->trigger();
+    EXPECT_FALSE(first->orthogonalViews());
+    EXPECT_FALSE(second->orthogonalViews());
+    EXPECT_TRUE(first->isLinked());
+    EXPECT_TRUE(second->isLinked());
+    EXPECT_TRUE(linkedAction->isChecked());
+    EXPECT_FALSE(orthogonalAction->isChecked());
+    EXPECT_TRUE(orthogonalAction->isEnabled());
+    EXPECT_NEAR(first->viewer->zoom(), second->viewer->zoom() * 2.0, 1e-12);
 }
 
 TEST(Desktop, ShowingWindowsKeepsTheirFramesAndTitleBarsOnScreen)
@@ -2095,7 +2170,7 @@ TEST(Desktop, ShowingWindowsKeepsTheirFramesAndTitleBarsOnScreen)
     document->move(0, -5000); document->resize(5000, 5000); document->show();
     QCoreApplication::processEvents();
     EXPECT_TRUE(document->screen()->availableGeometry().contains(document->frameGeometry()));
-    document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    document->setOrthogonalViews(true);
     for (auto *view : document->views()) {
         auto *imageWindow = view->window();
         imageWindow->hide(); imageWindow->move(5000, -5000); imageWindow->show();
@@ -2113,7 +2188,7 @@ TEST(Desktop, DisplayChannelTimeSelectorsSynchronizeViewsAndFollowTheActiveDocum
 {
     MainWindow window;
     auto *document = window.addDocument(Image::allocate(PixelType::UInt16, {10, 8, 6, 2, 4}));
-    document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    document->setOrthogonalViews(true);
     window.showPanel("display");
     auto *channel = window.panel("display")->findChild<QSpinBox *>("displayChannel");
     auto *time = window.panel("display")->findChild<QSpinBox *>("displayTime");
@@ -2184,7 +2259,7 @@ TEST(Desktop, IntersectionNavigationPreservesDocumentPanels)
 {
     MainWindow window;
     auto *document = window.addDocument(Image::allocate(PixelType::UInt16, {10, 8, 6, 2, 3}));
-    document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    document->setOrthogonalViews(true);
     Roi roi; roi.name = "Saved selection"; roi.points = {{1, 1}, {4, 4}};
     document->rois.push_back(roi); document->setSelection(roi);
     window.showPanel("properties");
@@ -3703,7 +3778,7 @@ TEST(Desktop, SavingPixelsWithRoisClearsModifiedState)
     auto *document = window.addDocument(image);
     Roi roi; roi.points = {{1, 1}, {5, 5}}; document->rois.push_back(roi);
     document->modified = true;
-    document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    document->setOrthogonalViews(true);
     for (auto *view : document->views()) EXPECT_TRUE(view->window()->windowTitle().contains("original.tif *"));
     const auto output = directory.filePath("saved.tif");
     QTimer::singleShot(0, &window, [output] {

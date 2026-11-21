@@ -7,6 +7,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QLabel>
+#include <QMenu>
 #include <QSlider>
 #include <QSpinBox>
 #include <QThread>
@@ -139,8 +140,10 @@ TEST(Overlay, ClosingRestoresSingleViewAndStopsSynchronizingSourceImages)
     overlay->close();
     EXPECT_TRUE(singleAction->isChecked());
     EXPECT_FALSE(overlayAction->isChecked());
-    EXPECT_EQ(current->viewMode(), DocumentWidget::ViewMode::Single);
-    EXPECT_EQ(other->viewMode(), DocumentWidget::ViewMode::Single);
+    EXPECT_FALSE(current->isLinked());
+    EXPECT_FALSE(current->orthogonalViews());
+    EXPECT_FALSE(other->isLinked());
+    EXPECT_FALSE(other->orthogonalViews());
     other->viewer->setSlice(4);
     EXPECT_EQ(current->viewer->slice(), 2u);
     current->viewer->setSlice(1);
@@ -289,4 +292,242 @@ TEST(Overlay, GpuAlignsCalibratedPixelsAndPreservesNativeAlpha)
     EXPECT_EQ(overlayColor(overlay->viewer, {3.5, 3.5}), QColor(Qt::black));
     EXPECT_NEAR(overlayColor(overlay->viewer, {2.5, 2.5}).red(), 128, 3);
     EXPECT_EQ(overlayColor(overlay->viewer, {1.5, 1.5}).green(), 0);
+}
+
+TEST(Overlay, OrthogonalViewsSynchronizePlanesSourcesMenuStateAndLifecycle)
+{
+    MainWindow window;
+    ImageMetadata metadata;
+    metadata.axes = {{"X", 1, 0, "mm"}, {"Y", 1, 0, "mm"}, {"Z", 1, 0, "mm"}};
+    auto *other = window.addDocument(Image::allocate(PixelType::UInt8, {12, 10, 10}, metadata));
+    metadata.axes[2].spacing = 2;
+    auto *current = window.addDocument(Image::allocate(PixelType::UInt8, {12, 10, 5}, metadata));
+    auto *singleAction = window.findChild<QAction *>("view.single");
+    auto *overlayAction = window.findChild<QAction *>("view.overlay");
+    auto *orthogonalAction = window.findChild<QAction *>("view.orthogonal");
+    ASSERT_NE(singleAction, nullptr);
+    ASSERT_NE(overlayAction, nullptr);
+    ASSERT_NE(orthogonalAction, nullptr);
+
+    window.commands().execute("view.overlay");
+    auto *overlay = window.findChild<OverlayWindow *>();
+    auto *editor = window.findChild<QDialog *>("overlayEditor");
+    ASSERT_NE(overlay, nullptr); ASSERT_NE(editor, nullptr);
+    editor->findChild<QTreeWidget *>("overlayImages")->topLevelItem(0)->setCheckState(0, Qt::Checked);
+    EXPECT_TRUE(overlayAction->isChecked());
+    EXPECT_FALSE(orthogonalAction->isChecked());
+    EXPECT_TRUE(orthogonalAction->isEnabled());
+
+    // Open orthogonal views for the active overlay view.
+    orthogonalAction->trigger();
+    EXPECT_TRUE(overlay->orthogonalViews());
+    EXPECT_FALSE(current->orthogonalViews());
+    ASSERT_EQ(overlay->views().size(), 3);
+    EXPECT_TRUE(overlayAction->isChecked());
+    EXPECT_TRUE(orthogonalAction->isChecked());
+    EXPECT_FALSE(singleAction->isChecked());
+
+    const std::array<QString, 3> axes{"Z", "Y", "X"};
+    const std::array<int, 3> maxima{4, 9, 11};
+    for (int i = 0; i < 3; ++i) {
+        auto *viewWindow = overlay->views()[i]->window();
+        auto *slider = viewWindow->findChild<QSlider *>("sliceSlider", Qt::FindDirectChildrenOnly);
+        ASSERT_NE(slider, nullptr);
+        EXPECT_EQ(slider->maximum(), maxima[i]);
+        EXPECT_EQ(slider->accessibleName(), axes[i] + " slice");
+        EXPECT_EQ(viewWindow->findChild<QLabel *>("sliceAxisLabel", Qt::FindDirectChildrenOnly)->text(), axes[i]);
+    }
+
+    // Navigating in overlay XZ updates all three overlay planes and both source documents.
+    overlay->views()[1]->positionPicked({4.5, 3.5});
+    EXPECT_EQ(overlay->spatialPosition(), (std::array<std::size_t, 3>{4, 5, 3}));
+    EXPECT_EQ(overlay->views()[0]->slice(), 3u);
+    EXPECT_EQ(overlay->views()[1]->slice(), 5u);
+    EXPECT_EQ(overlay->views()[2]->slice(), 4u);
+    EXPECT_EQ(current->spatialPosition(), (std::array<std::size_t, 3>{4, 5, 3}));
+    EXPECT_EQ(other->spatialPosition(), (std::array<std::size_t, 3>{4, 5, 6}));
+
+    // Zooming overlay XZ synchronizes physical scale across all three overlay views, and a live reference edit with changed Z spacing keeps manual XZ/YZ transforms.
+    overlay->views()[1]->setViewTransform(3.0, {5.5, 1.25});
+    EXPECT_DOUBLE_EQ(overlay->views()[0]->zoom(), 3.0);
+    EXPECT_DOUBLE_EQ(overlay->views()[2]->zoom(), 3.0);
+    auto editedMeta = metadata;
+    editedMeta.axes[2].spacing = 3;
+    current->replaceImage(Image::allocate(PixelType::UInt8, {12, 10, 5}, editedMeta), "Live edit");
+    EXPECT_DOUBLE_EQ(overlay->views()[1]->zoom(), 3.0);
+    EXPECT_NEAR(overlay->views()[1]->viewCenter().y(), 1.25, 1e-12);
+    overlay->views()[0]->setViewTransform(3.0, {6.5, 4.5});
+    EXPECT_NEAR(overlay->views()[1]->viewCenter().y(), 1.25, 1e-12);
+    EXPECT_NEAR(overlay->views()[2]->viewCenter().y(), 1.25, 1e-12);
+    current->modified = false;
+
+    // Activating the source document switches menu state back to the document; activating overlay XZ restores overlay state.
+    QEvent activated(QEvent::WindowActivate);
+    QCoreApplication::sendEvent(current, &activated);
+    EXPECT_FALSE(overlayAction->isChecked());
+    EXPECT_FALSE(orthogonalAction->isChecked());
+    EXPECT_TRUE(singleAction->isChecked());
+    QCoreApplication::sendEvent(overlay->views()[1]->window(), &activated);
+    EXPECT_TRUE(overlayAction->isChecked());
+    EXPECT_TRUE(orthogonalAction->isChecked());
+
+    // Closing one orthogonal pane lets Orthogonal views re-show it; triggering again when all are visible toggles orthogonal off.
+    auto *xzWindow = overlay->views()[1]->window();
+    xzWindow->close();
+    EXPECT_FALSE(xzWindow->isVisible());
+    orthogonalAction->trigger();
+    EXPECT_TRUE(overlay->orthogonalViews());
+    EXPECT_TRUE(xzWindow->isVisible());
+    orthogonalAction->trigger();
+    EXPECT_FALSE(overlay->orthogonalViews());
+    EXPECT_EQ(overlay->views().size(), 1);
+    EXPECT_TRUE(overlay->isVisible());
+    EXPECT_TRUE(overlayAction->isChecked());
+    EXPECT_FALSE(orthogonalAction->isChecked());
+
+    // Re-enable orthogonal views, then verify closing/reopening via Window menu and flattening to 2D.
+    orthogonalAction->trigger();
+    ASSERT_EQ(overlay->views().size(), 3);
+    QPointer<QWidget> overlayXz(overlay->views()[1]->window());
+    overlay->close();
+    EXPECT_FALSE(overlayXz->isVisible());
+    auto *windowMenu = window.findChild<QMenu *>("windowMenu");
+    ASSERT_NE(windowMenu, nullptr);
+    QMetaObject::invokeMethod(windowMenu, "aboutToShow");
+    QAction *xzMenuAction = nullptr;
+    for (auto *action : windowMenu->actions())
+        if (action->text() == overlayXz->windowTitle()) xzMenuAction = action;
+    ASSERT_NE(xzMenuAction, nullptr);
+    xzMenuAction->trigger();
+    EXPECT_TRUE(overlay->isVisible());
+    EXPECT_TRUE(overlayXz->isVisible());
+    EXPECT_TRUE(orthogonalAction->isChecked());
+
+    current->replaceImage(Image::allocate(PixelType::UInt8, {12, 10}), "Flatten");
+    EXPECT_FALSE(overlay->orthogonalViews());
+    EXPECT_EQ(overlay->views().size(), 1);
+    EXPECT_TRUE(overlayXz.isNull());
+    EXPECT_FALSE(orthogonalAction->isEnabled());
+    current->modified = false;
+
+    // Linked overlay layers with coarser spacing do not bounce rounded Z slices back into the reference or peer layers.
+    ImageMetadata fineMeta, coarseMeta;
+    fineMeta.axes = {{"X", 1, 0, "mm"}, {"Y", 1, 0, "mm"}, {"Z", 1, 0, "mm"}};
+    coarseMeta.axes = {{"X", 1, 0, "mm"}, {"Y", 1, 0, "mm"}, {"Z", 2, 0, "mm"}};
+    auto *coarse = window.addDocument(Image::allocate(PixelType::UInt8, {8, 8, 5}, coarseMeta));
+    auto *peer = window.addDocument(Image::allocate(PixelType::UInt8, {8, 8, 10}, fineMeta));
+    auto *fine = window.addDocument(Image::allocate(PixelType::UInt8, {8, 8, 10}, fineMeta));
+    ASSERT_TRUE(waitForOverlay([&] { return coarse->isVisible() && peer->isVisible() && fine->isVisible(); }));
+    coarse->linkTo({peer});
+    QCoreApplication::sendEvent(fine, &activated);
+    window.commands().execute("view.overlay");
+    OverlayWindow *linkedOverlay = nullptr;
+    for (auto *candidate : window.findChildren<OverlayWindow *>(QString{}, Qt::FindDirectChildrenOnly))
+        if (candidate->document() == fine) linkedOverlay = candidate;
+    ASSERT_NE(linkedOverlay, nullptr);
+    auto *linkedEditor = window.findChildren<QDialog *>("overlayEditor").back();
+    auto *linkedImages = linkedEditor->findChild<QTreeWidget *>("overlayImages");
+    for (int row = 0; row < linkedImages->topLevelItemCount(); ++row)
+        linkedImages->topLevelItem(row)->setCheckState(0, Qt::Checked);
+    linkedOverlay->viewer->setSlice(1);
+    EXPECT_EQ(fine->viewer->slice(), 1u);
+    EXPECT_EQ(coarse->viewer->slice(), 1u);
+    EXPECT_EQ(peer->viewer->slice(), 1u);
+
+    // Unchecking peer still allows checked coarse to drive its unchecked linked peer.
+    for (int row = 0; row < linkedImages->topLevelItemCount(); ++row)
+        if (linkedImages->topLevelItem(row)->data(0, Qt::UserRole).value<DocumentWidget *>() == peer)
+            linkedImages->topLevelItem(row)->setCheckState(0, Qt::Unchecked);
+    linkedOverlay->viewer->setSlice(4);
+    EXPECT_EQ(fine->viewer->slice(), 4u);
+    EXPECT_EQ(coarse->viewer->slice(), 2u);
+    EXPECT_EQ(peer->viewer->slice(), 4u);
+}
+
+TEST(Overlay, GpuOrthogonalViewsCompositeCalibratedLayersAndLiveEdits)
+{
+    if (QApplication::platformName() == "offscreen" || QApplication::platformName() == "minimal")
+        GTEST_SKIP() << "Qt RHI requires a graphics-capable platform plugin";
+    MainWindow window;
+    ImageMetadata metadata;
+    metadata.axes = {{"X", 1, 0, "mm"}, {"Y", 1, 0, "mm"}, {"Z", 1, 0, "mm"}};
+    auto background = Image::allocate(PixelType::UInt8, {6, 6, 6}, metadata);
+    auto foreground = Image::allocate(PixelType::UInt8, {6, 6, 6}, metadata);
+    for (std::size_t z = 0; z < 6; ++z)
+        for (std::size_t y = 0; y < 6; ++y)
+            for (std::size_t x = 0; x < 6; ++x) {
+                background.setValue(std::array<std::size_t, 3>{x, y, z}, 100);
+                foreground.setValue(std::array<std::size_t, 3>{x, y, z}, z >= 3 ? 20 : 80);
+            }
+    bool otherReady = false, currentReady = false;
+    auto *other = window.addDocument(foreground);
+    QObject::connect(other->viewer, &ImageViewer::sliceReady, &window, [&] { otherReady = true; });
+    auto *current = window.addDocument(background);
+    QObject::connect(current->viewer, &ImageViewer::sliceReady, &window, [&] { currentReady = true; });
+    ASSERT_TRUE(waitForOverlay([&] { return otherReady && currentReady; }));
+    other->viewer->setWindow(0, 100);
+    current->viewer->setWindow(0, 100);
+
+    window.commands().execute("view.overlay");
+    auto *overlay = window.findChild<OverlayWindow *>();
+    auto *editor = window.findChild<QDialog *>("overlayEditor");
+    ASSERT_NE(overlay, nullptr); ASSERT_NE(editor, nullptr);
+    auto *images = editor->findChild<QTreeWidget *>("overlayImages");
+    auto *lut = editor->findChild<QComboBox *>("overlayLut");
+    auto *otherItem = images->topLevelItem(0);
+    images->setCurrentItem(otherItem);
+    lut->setCurrentText("hot");
+    otherItem->setCheckState(0, Qt::Checked);
+
+    window.commands().execute("view.orthogonal");
+    ASSERT_EQ(overlay->views().size(), 3);
+    for (auto *view : overlay->views()) {
+        view->setNavigationCrosshair({});
+        view->setViewLabel({});
+    }
+    // In XZ (x, z) and YZ (y, z): z=4 has foreground=20 (hot: R=0.6,G=0,B=0) over background=100 (white) at 50% -> (204, 128, 128).
+    // z=1 has foreground=80 (hot: R=1,G=1,B=0.4) over background=100 (white) at 50% -> (255, 255, 179).
+    ASSERT_TRUE(waitForOverlay([&] {
+        const auto xzLow = overlayColor(overlay->views()[1], {2.5, 4.5});
+        const auto xzHigh = overlayColor(overlay->views()[1], {2.5, 1.5});
+        const auto yzLow = overlayColor(overlay->views()[2], {2.5, 4.5});
+        return std::abs(xzLow.red() - 204) < 5 && std::abs(xzLow.green() - 128) < 5 && std::abs(xzLow.blue() - 128) < 5
+            && std::abs(xzHigh.red() - 255) < 5 && std::abs(xzHigh.green() - 255) < 5 && std::abs(xzHigh.blue() - 179) < 5
+            && std::abs(yzLow.red() - 204) < 5 && std::abs(yzLow.green() - 128) < 5 && std::abs(yzLow.blue() - 128) < 5;
+    }));
+
+    // Live edits to source pixels and display window propagate to overlay XZ and YZ.
+    auto replacement = foreground.clone();
+    for (std::size_t z = 0; z < 6; ++z)
+        for (std::size_t y = 0; y < 6; ++y)
+            for (std::size_t x = 0; x < 6; ++x)
+                replacement.setValue(std::array<std::size_t, 3>{x, y, z}, 20);
+    other->replaceImage(replacement, "Edit 3D pixels");
+    other->viewer->setWindow(0, 100);
+    ASSERT_TRUE(waitForOverlay([&] {
+        const auto xzUpdated = overlayColor(overlay->views()[1], {2.5, 1.5});
+        const auto yzUpdated = overlayColor(overlay->views()[2], {2.5, 1.5});
+        return std::abs(xzUpdated.red() - 204) < 5 && std::abs(xzUpdated.green() - 128) < 5 && std::abs(xzUpdated.blue() - 128) < 5
+            && std::abs(yzUpdated.red() - 204) < 5 && std::abs(yzUpdated.green() - 128) < 5 && std::abs(yzUpdated.blue() - 128) < 5;
+    }));
+
+    // Orthogonal XY and XZ skip a layer whose calibrated extent does not cover the selected plane.
+    auto partialMeta = metadata;
+    partialMeta.axes[2].origin = 4;
+    auto partial = Image::allocate(PixelType::UInt8, {6, 2, 2}, partialMeta);
+    for (std::size_t z = 0; z < 2; ++z)
+        for (std::size_t y = 0; y < 2; ++y)
+            for (std::size_t x = 0; x < 6; ++x)
+                partial.setValue(std::array<std::size_t, 3>{x, y, z}, 20);
+    other->replaceImage(partial, "Shrink Y and Z extent");
+    other->viewer->setWindow(0, 100);
+    overlay->setPosition(2, 4, 0);
+    for (auto *view : overlay->views()) { view->setNavigationCrosshair({}); view->setViewLabel({}); }
+    ASSERT_TRUE(waitForOverlay([&] {
+        const auto xyOutside = overlayColor(overlay->views()[0], {2.5, 0.5});
+        const auto xzOutside = overlayColor(overlay->views()[1], {2.5, 4.5});
+        return xyOutside.red() > 250 && xyOutside.green() > 250 && xyOutside.blue() > 250
+            && xzOutside.red() > 250 && xzOutside.green() > 250 && xzOutside.blue() > 250;
+    }));
+    other->modified = false;
 }

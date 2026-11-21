@@ -7,19 +7,14 @@
 #include <QList>
 #include <QPointer>
 #include <array>
-class QSlider;
 class QCloseEvent;
 class QEvent;
-class QLabel;
-class QVBoxLayout;
 namespace imagecxx {
 std::optional<std::array<double, 3>> mapImagePosition(const Image &source, const Image &target,
                                                    std::array<double, 3> position);
 class DocumentWidget : public ImageWindow {
     Q_OBJECT
 public:
-    enum class ViewMode { Single, Linked, Orthogonal };
-    Q_ENUM(ViewMode)
     explicit DocumentWidget(Image image, QWidget *parent = nullptr);
     ~DocumentWidget() override;
     Image image;
@@ -36,15 +31,17 @@ public:
     void editRoi(Roi roi);
     void refreshRois();
     ImageHistory history;
-    ViewMode viewMode() const { return viewMode_; }
-    void setViewMode(ViewMode mode);
+    bool orthogonalViews() const { return orthogonal_; }
+    void setOrthogonalViews(bool enabled);
+    bool isLinked() const { return !linkedDocuments_.isEmpty(); }
     void linkTo(QList<DocumentWidget *> documents);
+    void unlink();
     const QList<QPointer<DocumentWidget>> &linkedDocuments() const { return linkedDocuments_; }
     void showViews();
     const QList<ImageViewer *> &views() const { return views_; }
     std::array<std::size_t, 3> spatialPosition() const { return spatial_; }
     void setPosition(std::size_t x, std::size_t y, std::size_t z,
-                     std::size_t channel = 0, std::size_t time = 0);
+                     std::size_t channel = 0, std::size_t time = 0, bool propagate = true);
     quint64 revision = 0;
     bool modified = false;
     QString title() const;
@@ -59,6 +56,7 @@ signals:
     void pixelHovered(std::size_t x, std::size_t y, std::size_t z, double value);
     void viewError(const QString &message);
     void displayChanged();
+    void positionChanged();
 protected:
     bool event(QEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -66,22 +64,15 @@ protected:
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dropEvent(QDropEvent *event) override;
 private:
-    ViewMode viewMode_ = ViewMode::Single;
+    bool orthogonal_ = false;
     QList<QPointer<DocumentWidget>> linkedDocuments_;
     QList<ImageViewer *> views_;
-    struct NavigationControls {
-        QSlider *slice;
-        QLabel *axis;
-        QLabel *position;
-    };
-    QList<NavigationControls> navigation_;
+    QList<SliceControls> navigation_;
     std::array<std::size_t, 3> spatial_{};
     std::array<double, 3> center_{};
     bool synchronizing_ = false;
-    void unlink();
-    std::array<std::size_t, 3> viewAxes(int index) const;
     void connectViewer(ImageViewer *view, int index);
-    void addNavigationControls(ImageViewer *view, int index, QVBoxLayout *layout);
+    void addNavigationControls(ImageWindow *window, int index);
     void updateNavigation(std::size_t channel, std::size_t time);
     void synchronizeDisplay(ImageViewer *source);
     void synchronizeTransform(ImageViewer *source, int index);

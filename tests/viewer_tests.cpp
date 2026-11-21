@@ -107,8 +107,8 @@ TEST(Viewer, LinkedImagesSynchronizeNavigationAndTransformsButKeepTheirOwnPixels
     auto *primary = document.viewer, *linked = other.viewer;
     document.linkTo({&other});
     EXPECT_EQ(document.views().size(), 1); EXPECT_EQ(other.views().size(), 1);
-    EXPECT_EQ(document.viewMode(), DocumentWidget::ViewMode::Linked);
-    EXPECT_EQ(other.viewMode(), DocumentWidget::ViewMode::Linked);
+    EXPECT_TRUE(document.isLinked());
+    EXPECT_TRUE(other.isLinked());
     EXPECT_NE(linked->image().data(), document.image.data());
     linked->setSlice(3, 1, 2);
     EXPECT_EQ(primary->slice(), 3u); EXPECT_EQ(primary->channel(), 1u); EXPECT_EQ(primary->time(), 2u);
@@ -131,12 +131,14 @@ TEST(Viewer, LinkedImagesSynchronizeNavigationAndTransformsButKeepTheirOwnPixels
     other.replaceImage(Image::allocate(PixelType::UInt8, {40, 30, 5, 2, 3}), "Replace");
     EXPECT_EQ(document.image.pixelType(), PixelType::UInt16);
     EXPECT_EQ(document.history.labels().size(), 0);
-    document.setViewMode(DocumentWidget::ViewMode::Single);
-    EXPECT_EQ(other.viewMode(), DocumentWidget::ViewMode::Single);
+    document.unlink();
+    EXPECT_FALSE(other.isLinked());
     linked->setSlice(4); EXPECT_EQ(primary->slice(), 2u);
     document.linkTo({&other});
-    document.setViewMode(DocumentWidget::ViewMode::Orthogonal);
-    EXPECT_EQ(other.viewMode(), DocumentWidget::ViewMode::Single);
+    document.setOrthogonalViews(true);
+    EXPECT_TRUE(document.isLinked());
+    EXPECT_TRUE(document.orthogonalViews());
+    EXPECT_TRUE(other.isLinked());
 }
 
 TEST(Viewer, LinkedImagesMapOriginsSpacingUnitsAndDirectionsWithoutClampingTheSource)
@@ -168,16 +170,16 @@ TEST(Viewer, LinkedImagesMapOriginsSpacingUnitsAndDirectionsWithoutClampingTheSo
     source.linkTo({&rotated});
     source.setPosition(3, 4, 2);
     EXPECT_EQ(rotated.spatialPosition(), (std::array<std::size_t, 3>{16, 7, 6}));
-    EXPECT_EQ(target.viewMode(), DocumentWidget::ViewMode::Single);
+    EXPECT_FALSE(target.isLinked());
     rotated.close();
-    EXPECT_EQ(source.viewMode(), DocumentWidget::ViewMode::Single);
+    EXPECT_FALSE(source.isLinked());
     auto temporary = std::make_unique<DocumentWidget>(Image::allocate(PixelType::UInt8, {4, 4, 2}, sourceMetadata));
     source.linkTo({temporary.get()}); temporary.reset();
-    EXPECT_EQ(source.viewMode(), DocumentWidget::ViewMode::Single);
+    EXPECT_FALSE(source.isLinked());
     targetMetadata.axes[0].unit = "px";
     DocumentWidget incompatible(Image::allocate(PixelType::UInt8, {4, 4, 2}, targetMetadata));
     source.linkTo({&incompatible});
-    EXPECT_EQ(source.viewMode(), DocumentWidget::ViewMode::Single);
+    EXPECT_FALSE(source.isLinked());
 }
 
 TEST(Viewer, LinkedGroupsApplyCalibrationFromTheSenderWithoutFeedbackFromClippedImages)
@@ -200,12 +202,12 @@ TEST(Viewer, LinkedGroupsApplyCalibrationFromTheSenderWithoutFeedbackFromClipped
     EXPECT_DOUBLE_EQ(shortStack.viewer->zoom(), 4); EXPECT_DOUBLE_EQ(fineStack.viewer->zoom(), 2);
     EXPECT_EQ(fineStack.viewer->viewCenter(), QPointF(10.5, 12.5));
     source.linkTo({&shortStack});
-    EXPECT_EQ(fineStack.viewMode(), DocumentWidget::ViewMode::Single);
+    EXPECT_FALSE(fineStack.isLinked());
     source.viewer->setSlice(5);
     EXPECT_EQ(shortStack.viewer->slice(), 2u); EXPECT_EQ(fineStack.viewer->slice(), 12u);
     source.linkTo({});
-    EXPECT_EQ(source.viewMode(), DocumentWidget::ViewMode::Single);
-    EXPECT_EQ(shortStack.viewMode(), DocumentWidget::ViewMode::Single);
+    EXPECT_FALSE(source.isLinked());
+    EXPECT_FALSE(shortStack.isLinked());
 }
 
 TEST(Viewer, LinkedRotatedImagesKeepTheSamePhysicalZoomWithUnequalPixelSpacing)
@@ -268,13 +270,83 @@ TEST(Viewer, LinkedRotatedStacksTrackTheViewportCenterWhenPanningAndBrowsingSlic
     EXPECT_EQ(target.viewer->slice(), 44u);
 }
 
+TEST(Viewer, LinkedOrthogonalViewsSynchronizeNavigationAndTransformsAcrossAllPlanes)
+{
+    ImageMetadata sourceMetadata, targetMetadata;
+    sourceMetadata.axes = {{"X", 1, 0, "mm"}, {"Y", 2, 0, "mm"}, {"Z", 4, 0, "mm"}};
+    targetMetadata.axes = {{"X", .5, 0, "mm"}, {"Y", 1, 0, "mm"}, {"Z", 2, 0, "mm"}};
+    DocumentWidget source(Image::allocate(PixelType::UInt8, {40, 30, 12}, sourceMetadata));
+    DocumentWidget target(Image::allocate(PixelType::UInt8, {80, 60, 24}, targetMetadata));
+    source.linkTo({&target});
+    source.setOrthogonalViews(true);
+    target.setOrthogonalViews(true);
+    ASSERT_TRUE(source.isLinked());
+    ASSERT_TRUE(target.isLinked());
+    ASSERT_EQ(source.views().size(), 3);
+    ASSERT_EQ(target.views().size(), 3);
+
+    // Moving the intersection in XZ or YZ updates all three orthogonal planes of the linked stack.
+    source.views()[1]->positionPicked({6.5, 4.5});
+    EXPECT_EQ(source.spatialPosition(), (std::array<std::size_t, 3>{6, 15, 4}));
+    EXPECT_EQ(target.spatialPosition(), (std::array<std::size_t, 3>{12, 30, 8}));
+    EXPECT_EQ(target.views()[0]->slice(), 8u);
+    EXPECT_EQ(target.views()[1]->slice(), 30u);
+    EXPECT_EQ(target.views()[2]->slice(), 12u);
+
+    target.views()[2]->positionPicked({20.5, 10.5});
+    EXPECT_EQ(target.spatialPosition(), (std::array<std::size_t, 3>{12, 20, 10}));
+    EXPECT_EQ(source.spatialPosition(), (std::array<std::size_t, 3>{6, 10, 5}));
+    EXPECT_EQ(source.views()[0]->slice(), 5u);
+    EXPECT_EQ(source.views()[1]->slice(), 10u);
+    EXPECT_EQ(source.views()[2]->slice(), 6u);
+
+    // Zooming and panning XZ synchronizes physical zoom and 3D viewport center without moving the intersection.
+    source.views()[1]->setViewTransform(4, {10.5, 3.5});
+    EXPECT_NEAR(target.views()[0]->zoom(), 2.0, 1e-12);
+    EXPECT_NEAR(target.views()[1]->zoom(), 2.0, 1e-12);
+    EXPECT_NEAR(target.views()[2]->zoom(), 4.0, 1e-12);
+    EXPECT_NEAR(target.views()[1]->viewCenter().x(), 20.5, 1e-12);
+    EXPECT_NEAR(target.views()[1]->viewCenter().y(), 6.5, 1e-12);
+    EXPECT_EQ(target.spatialPosition(), (std::array<std::size_t, 3>{12, 20, 10}));
+
+    // Fit to window recenters stored 3D center so linked orthogonal peers do not keep a stale Z pan.
+    source.views()[0]->fitToWindow();
+    EXPECT_NEAR(target.views()[1]->viewCenter().y(), 11.5, 1e-11);
+    EXPECT_NEAR(target.views()[2]->viewCenter().y(), 11.5, 1e-11);
+
+    // Unlinking preserves orthogonal views; disabling orthogonal views preserves links.
+    source.unlink();
+    EXPECT_FALSE(source.isLinked());
+    EXPECT_FALSE(target.isLinked());
+    EXPECT_TRUE(source.orthogonalViews());
+    EXPECT_TRUE(target.orthogonalViews());
+    source.linkTo({&target});
+    EXPECT_TRUE(source.orthogonalViews());
+    EXPECT_TRUE(target.orthogonalViews());
+    source.setOrthogonalViews(false);
+    EXPECT_FALSE(source.orthogonalViews());
+    EXPECT_TRUE(source.isLinked());
+    EXPECT_TRUE(target.isLinked());
+    EXPECT_TRUE(target.orthogonalViews());
+
+    // Linking an orthogonal volume to a single-plane XY peer keeps the peer on the navigated slice, not viewport-center Z.
+    DocumentWidget ortho(Image::allocate(PixelType::UInt8, {10, 8, 6}));
+    DocumentWidget xyPeer(Image::allocate(PixelType::UInt8, {10, 8, 6}));
+    ortho.setOrthogonalViews(true);
+    ortho.setPosition(5, 4, 0);
+    ortho.linkTo({&xyPeer});
+    EXPECT_EQ(xyPeer.viewer->slice(), 0u);
+    ortho.views()[0]->setViewTransform(2.0, {3.5, 2.5});
+    EXPECT_EQ(xyPeer.viewer->slice(), 0u);
+}
+
 TEST(Viewer, OrthogonalViewsNavigateTheSameVoxelAndKeepOriginalModelAndXYSelections)
 {
     auto image = Image::allocate(PixelType::Float64, {10, 8, 6, 2, 3});
     image.setValue(std::array<std::size_t, 5>{7, 3, 4, 1, 2}, -1234.000000000003);
     DocumentWidget document(image);
     document.setPosition(7, 3, 4, 1, 2);
-    document.setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    document.setOrthogonalViews(true);
     document.show(); QApplication::processEvents();
     ASSERT_EQ(document.views().size(), 3);
     auto *xy = document.viewer, *xz = document.views()[1], *yz = document.views()[2];
@@ -323,7 +395,7 @@ TEST(Viewer, PointerMovesOnlyTheOrthogonalIntersectionWhilePanPreservesIt)
     EXPECT_EQ(document.selection->points, roi.points);
     EXPECT_TRUE(document.rois.empty());
 
-    document.setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    document.setOrthogonalViews(true);
     const std::array<std::array<int, 2>, 3> axes{{{0, 1}, {0, 2}, {1, 2}}};
     for (int i = 0; i < document.views().size(); ++i) {
         auto *view = document.views()[i];
@@ -356,7 +428,7 @@ TEST(Viewer, PointerMovesOnlyTheOrthogonalIntersectionWhilePanPreservesIt)
 TEST(Viewer, EachWindowHasExactlyOneSliderForItsPlane)
 {
     DocumentWidget document(Image::allocate(PixelType::UInt16, {10, 8, 6, 2, 3}));
-    document.setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    document.setOrthogonalViews(true);
     std::array<QSlider *, 3> slices{};
     const std::array<QString, 3> axes{"Z", "Y", "X"};
     const std::array<int, 3> maxima{5, 7, 9};
@@ -390,7 +462,8 @@ TEST(Viewer, EachWindowHasExactlyOneSliderForItsPlane)
     EXPECT_EQ(linkedSlice->accessibleName(), "Z slice");
     linkedSlice->setValue(0);
     EXPECT_EQ(document.viewer->slice(), 0u); EXPECT_EQ(slices[0]->value(), 0);
-    document.setViewMode(DocumentWidget::ViewMode::Single);
+    document.unlink();
+    document.setOrthogonalViews(false);
     slices[0]->setValue(1);
     EXPECT_EQ(document.viewer->slice(), 1u);
     document.replaceImage(Image::allocate(PixelType::UInt16, {3, 2}), "Flatten");
@@ -403,7 +476,7 @@ TEST(Viewer, OrthogonalViewsRespectVoxelSpacingAndRefreshAfterEditsAndShapeChang
     metadata.axes = {{"X", .5, 0, "mm"}, {"Y", 1, 0, "mm"}, {"Z", 2, 0, "mm"}};
     auto image = Image::allocate(PixelType::UInt16, {10, 8, 6}, metadata);
     DocumentWidget document(image);
-    document.setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    document.setOrthogonalViews(true);
     document.setPosition(7, 3, 4);
     auto *xz = document.views()[1], *yz = document.views()[2];
     xz->setViewTransform(3, {4, 2});
@@ -424,10 +497,10 @@ TEST(Viewer, OrthogonalViewsRespectVoxelSpacingAndRefreshAfterEditsAndShapeChang
     EXPECT_EQ(document.spatialPosition(), (std::array<std::size_t, 3>{2, 1, 1}));
     EXPECT_EQ(document.views()[1]->slice(), 1u); EXPECT_EQ(document.views()[2]->slice(), 2u);
     document.replaceImage(Image::allocate(PixelType::UInt8, {3, 2}), "Flatten");
-    EXPECT_EQ(document.viewMode(), DocumentWidget::ViewMode::Single);
+    EXPECT_FALSE(document.orthogonalViews());
     EXPECT_EQ(document.views().size(), 1);
-    document.setViewMode(DocumentWidget::ViewMode::Orthogonal);
-    EXPECT_EQ(document.viewMode(), DocumentWidget::ViewMode::Single);
+    document.setOrthogonalViews(true);
+    EXPECT_FALSE(document.orthogonalViews());
 }
 
 TEST(Viewer, OrthogonalZoomLimitsKeepPhysicalScaleAcrossViews)
@@ -436,7 +509,7 @@ TEST(Viewer, OrthogonalZoomLimitsKeepPhysicalScaleAcrossViews)
         ImageMetadata metadata;
         metadata.axes = {{"X", 1, 0, "mm"}, {"Y", ySpacing, 0, "mm"}, {"Z", 3, 0, "mm"}};
         DocumentWidget document(Image::allocate(PixelType::UInt16, {10, 8, 6}, metadata));
-        document.setViewMode(DocumentWidget::ViewMode::Orthogonal);
+        document.setOrthogonalViews(true);
         for (auto *source : document.views()) {
             for (const double requested : {1e-12, 1e6}) {
                 source->setZoom(requested);
@@ -457,7 +530,7 @@ TEST(Viewer, OrthogonalViewsDecodeLazyStorageAndRetirePendingPlanes)
 {
     auto storage = std::make_shared<SlowSlices>();
     auto document = std::make_unique<DocumentWidget>(Image::fromStorage(PixelType::UInt16, {16, 16, 6}, storage));
-    document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    document->setOrthogonalViews(true);
     std::array<bool, 3> ready{};
     QString error;
     for (int i = 0; i < document->views().size(); ++i) {
@@ -476,7 +549,7 @@ TEST(Viewer, OrthogonalViewsDecodeLazyStorageAndRetirePendingPlanes)
     document->setPosition(3, 4, 1);
     DocumentWidget other(Image::allocate(PixelType::UInt8, {16, 16, 6}));
     document->linkTo({&other});
-    document->setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    document->setOrthogonalViews(true);
     document->setPosition(7, 8, 4);
     QPointer<QWidget> xzWindow(document->views()[1]->window());
     QPointer<QWidget> yzWindow(document->views()[2]->window());
@@ -1226,7 +1299,7 @@ TEST(Viewer, GpuOrthogonalViewsRenderOriginalSamplesAndRefreshEdits)
                     for (std::size_t x = 0; x < 5; ++x)
                         pixels[x + 5*(y + 4*(z + 3*(c + 2*t)))] = x + 5*y + 20*z + 60*c + 120*t;
     DocumentWidget document(image);
-    document.setViewMode(DocumentWidget::ViewMode::Orthogonal);
+    document.setOrthogonalViews(true);
     document.setPosition(1, 2, 2, 1, 1);
     document.viewer->setWindow(0, 255);
     QString error;
