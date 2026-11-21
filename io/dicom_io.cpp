@@ -486,4 +486,19 @@ void writeDicom(const Image &input, const QString &path, std::stop_token stop, I
     if (progress) progress(1);
 }
 
+QString formatDicomTag(const QString &key)
+{
+    static const QRegularExpression dicomTag(QStringLiteral("^DICOM\\.([0-9a-fA-F]{4}),([0-9a-fA-F]{4})$"));
+    const auto match = dicomTag.match(key);
+    if (!match.hasMatch()) return {};
+    DcmTag tag(match.captured(1).toUShort(nullptr, 16), match.captured(2).toUShort(nullptr, 16));
+    QString label = QStringLiteral("(%1,%2)").arg(match.captured(1), match.captured(2));
+    QString name = QString::fromLatin1(tag.getTagName());
+    if (name != QLatin1String(DcmTag_ERROR_TagName)) {
+        static const QRegularExpression wordBoundary(QStringLiteral("(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])"));
+        label.append(QLatin1Char(' ') + name.replace(wordBoundary, QStringLiteral(" ")));
+    }
+    return label;
+}
+
 } // namespace imagecxx

@@ -817,3 +817,31 @@ TEST(CsvExport, FormulaPrefixesRemainTextAndOrdinaryFieldsRoundTrip) {
               QStringLiteral("\"plain, \"\"quoted\"\" ☃\""));
     EXPECT_EQ(detail::spreadsheetCsvCell(QStringLiteral("-2.5")), QStringLiteral("\"-2.5\""));
 }
+
+TEST(PixelEdit, EditsOnlyTargetPlaneAndSupportsRoiOperationsAndCancellation) {
+    auto image = Image::allocate(PixelType::UInt8, {4, 4, 2});
+    for (std::size_t z = 0; z < 2; ++z)
+        for (std::size_t y = 0; y < 4; ++y)
+            for (std::size_t x = 0; x < 4; ++x)
+                image.setValue(std::array<std::size_t, 3>{x, y, z}, 100);
+    Roi rect;
+    rect.type = RoiType::Rectangle;
+    rect.points = {{1, 1}, {3, 3}};
+    const auto cleared = editPixels(image, PixelEdit::Clear, rect, 0, 0, 0);
+    EXPECT_DOUBLE_EQ(cleared.sample(1, 1, 0), 0);
+    EXPECT_DOUBLE_EQ(cleared.sample(0, 0, 0), 100);
+    EXPECT_DOUBLE_EQ(cleared.sample(1, 1, 1), 100);
+    const auto inverted = editPixels(image, PixelEdit::Invert, rect, 0, 0, 0);
+    EXPECT_DOUBLE_EQ(inverted.sample(1, 1, 0), 155);
+    EXPECT_DOUBLE_EQ(inverted.sample(0, 0, 0), 100);
+    std::stop_source stop;
+    stop.request_stop();
+    EXPECT_THROW(editPixels(image, PixelEdit::Fill, rect, 0, 0, 0, 0xffffffff, stop.get_token()), std::runtime_error);
+    EXPECT_THROW(editPixels(image, PixelEdit::Draw, std::nullopt, 0, 0, 0), std::invalid_argument);
+    Roi line;
+    line.type = RoiType::Line;
+    line.points = {{0, 0}, {3, 3}};
+    EXPECT_THROW(editPixels(image, PixelEdit::Fill, line, 0, 0, 0), std::invalid_argument);
+    const auto sixD = Image::allocate(PixelType::UInt8, {2, 2, 1, 1, 1, 1});
+    EXPECT_THROW(editPixels(sixD, PixelEdit::Clear, std::nullopt, 0, 0, 0), std::invalid_argument);
+}
