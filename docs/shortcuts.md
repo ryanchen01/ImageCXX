@@ -38,7 +38,7 @@ Ctrl means Command on macOS. Alt means Option. Shift keeps its usual meaning. Te
 ## ROIs and drawing
 
 - **ROI manager:** Press `Ctrl+T` to save the active selection to the ROI manager. **Select none** clears the canvas selection without deleting saved ROIs.
-- **Selection properties:** **Edit > Selection properties** lets you edit an ROI's name, color, visibility, and zero-based pixel coordinates (`Apply` updates without closing, `OK` saves and closes, `Cancel` reverts to the last `Apply`). Polygon vertices remain editable on the canvas.
+- **Selection properties:** **Edit > Selection > Selection properties** lets you edit an ROI's name, color, visibility, and zero-based pixel coordinates (`Apply` updates without closing, `OK` saves and closes, `Cancel` reverts to the last `Apply`). Polygon vertices remain editable on the canvas.
 - **Drawing color:** **Edit > Drawing color** (or the toolbar swatch, white by default) sets the color used by **Fill** and **Draw** on the current Z/C/T plane (undoable). Scalar images map the chosen grayscale intensity to the image's numeric range; **Clear** writes zero.
 
 ## Copy and paste

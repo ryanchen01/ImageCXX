@@ -59,7 +59,7 @@ target_link_libraries(imagecxx_ui PUBLIC imagecxx_app imagecxx_viewer imagecxx_p
 qt_add_resources(imagecxx_ui imagecxx_icons PREFIX "/" BASE "resources" FILES
     resources/icons/open.svg resources/icons/pointer.svg resources/icons/rectangle.svg resources/icons/ellipse.svg
     resources/icons/polygon.svg resources/icons/line.svg resources/icons/measure.svg
-    resources/icons/histogram.svg resources/icons/undo.svg resources/icons/search.svg resources/icons/imagecxx.svg)
+    resources/icons/histogram.svg resources/icons/undo.svg resources/icons/imagecxx.svg)
 qt_add_executable(ImageCXX WIN32 MACOSX_BUNDLE main.cpp app/file_open_service.cpp)
 target_link_libraries(ImageCXX PRIVATE imagecxx_ui Qt6::Network)
 set(IMAGECXX_TRANSLATION_LANGUAGES "en_US" CACHE STRING "Semicolon-separated translation locales")

@@ -1096,6 +1096,129 @@ TEST(Desktop, RoiMeasurementAndPixelEditsUseTheCurrentSliceAfterNavigation)
     EXPECT_DOUBLE_EQ(document->image.sample(1, 1, 0), 100);
 }
 
+TEST(Desktop, MenusHideIconsKeepToolbarIconsAndGroupCommands)
+{
+    MainWindow window;
+    auto *doc = window.addDocument(Image::allocate(PixelType::UInt8, {16, 16, 4}));
+    window.show();
+    EXPECT_TRUE(QApplication::testAttribute(Qt::AA_DontShowIconsInMenus));
+
+    const auto topActions = window.menuBar()->actions();
+    ASSERT_EQ(topActions.size(), 7);
+    auto menuByTitle = [&](const QString &title) -> QMenu * {
+        for (auto *action : topActions)
+            if (action->text() == title) return action->menu();
+        return nullptr;
+    };
+    auto *fileMenu = menuByTitle("File"); ASSERT_NE(fileMenu, nullptr);
+    auto *editMenu = menuByTitle("Edit"); ASSERT_NE(editMenu, nullptr);
+    auto *processMenu = menuByTitle("Process"); ASSERT_NE(processMenu, nullptr);
+    auto *analyzeMenu = menuByTitle("Analyze"); ASSERT_NE(analyzeMenu, nullptr);
+    auto *viewMenu = menuByTitle("View"); ASSERT_NE(viewMenu, nullptr);
+    auto *windowMenu = menuByTitle("Window"); ASSERT_NE(windowMenu, nullptr);
+    auto *helpMenu = menuByTitle("Help"); ASSERT_NE(helpMenu, nullptr);
+
+    // Trigger dynamic Window menu twice to ensure shared window.* actions survive clear().
+    QMetaObject::invokeMethod(windowMenu, "aboutToShow");
+    QMetaObject::invokeMethod(windowMenu, "aboutToShow");
+
+    auto checkNoMenuIcons = [](auto &&self, QMenu *menu) -> void {
+        for (auto *action : menu->actions()) {
+            EXPECT_FALSE(action->isIconVisibleInMenu()) << action->objectName().toStdString();
+            if (auto *sub = action->menu()) self(self, sub);
+        }
+    };
+    for (auto *menu : {fileMenu, editMenu, processMenu, analyzeMenu, viewMenu, windowMenu, helpMenu,
+            window.findChild<QMenu *>("lutMenu")}) {
+        ASSERT_NE(menu, nullptr);
+        checkNoMenuIcons(checkNoMenuIcons, menu);
+    }
+
+    // Toolbar actions keep their icons, and Stk stays compact on the toolbar.
+    for (const char *id : {"file.open", "analyze.measure", "analyze.histogram", "edit.undo", "edit.color"}) {
+        auto *action = window.findChild<QAction *>(id);
+        ASSERT_NE(action, nullptr) << id;
+        EXPECT_FALSE(action->icon().pixmap(24, 24).isNull()) << id;
+    }
+    auto *findAction = window.findChild<QAction *>("commands.find");
+    ASSERT_NE(findAction, nullptr);
+    EXPECT_TRUE(findAction->icon().isNull());
+    auto *stacksButton = window.findChild<QToolButton *>("stacksButton");
+    ASSERT_NE(stacksButton, nullptr);
+    EXPECT_EQ(stacksButton->text(), "Stk");
+
+    // File: New first, Recent files before Quit, Quit last.
+    const auto fileActions = fileMenu->actions();
+    ASSERT_FALSE(fileActions.isEmpty());
+    EXPECT_EQ(fileActions.front()->objectName(), "file.new");
+    EXPECT_EQ(fileActions.back()->text(), "Quit");
+    auto *recentMenu = window.findChild<QMenu *>("recentMenu");
+    ASSERT_NE(recentMenu, nullptr);
+    const int recentIdx = int(fileActions.indexOf(recentMenu->menuAction()));
+    EXPECT_GT(recentIdx, 0);
+    EXPECT_LT(recentIdx, fileActions.size() - 1);
+
+    // Edit: Cut before Copy, Selection & Overlay submenus, Find command last.
+    const auto editActions = editMenu->actions();
+    EXPECT_LT(editActions.indexOf(window.findChild<QAction *>("edit.cut")),
+              editActions.indexOf(window.findChild<QAction *>("edit.copy")));
+    auto *selectionMenu = window.findChild<QMenu *>("selectionMenu");
+    auto *overlayMenu = window.findChild<QMenu *>("overlayMenu");
+    ASSERT_NE(selectionMenu, nullptr);
+    ASSERT_NE(overlayMenu, nullptr);
+    EXPECT_TRUE(editActions.contains(selectionMenu->menuAction()));
+    EXPECT_TRUE(editActions.contains(overlayMenu->menuAction()));
+    EXPECT_EQ(editActions.back(), findAction);
+
+    // Process: Repeat first, Stacks submenu included, Batch last.
+    const auto processActions = processMenu->actions();
+    auto *stacksMenu = window.findChild<QMenu *>("stacksMenu");
+    ASSERT_NE(stacksMenu, nullptr);
+    EXPECT_EQ(processActions.front()->objectName(), "process.repeat");
+    EXPECT_TRUE(processActions.contains(stacksMenu->menuAction()));
+    EXPECT_EQ(processActions.back()->objectName(), "process.batch");
+
+    // Analyze: Measure first, histogram variants grouped, Gels submenu last with options at end.
+    const auto analyzeActions = analyzeMenu->actions();
+    auto *gelsMenu = window.findChild<QMenu *>("gelsMenu");
+    ASSERT_NE(gelsMenu, nullptr);
+    EXPECT_EQ(analyzeActions.front()->objectName(), "analyze.measure");
+    const int histIdx = int(analyzeActions.indexOf(window.findChild<QAction *>("analyze.histogram")));
+    EXPECT_EQ(analyzeActions[histIdx + 1]->objectName(), "analyze.histogram.log");
+    EXPECT_EQ(analyzeActions[histIdx + 2]->objectName(), "analyze.histogram.options");
+    EXPECT_EQ(analyzeActions.back(), gelsMenu->menuAction());
+    EXPECT_EQ(gelsMenu->actions().back()->objectName(), "gel.options");
+
+    // View omits duplicate panel aliases & window commands; Window holds window.* actions.
+    const auto viewActions = viewMenu->actions();
+    for (const char *omitted : {"view.channels", "view.info", "window.close", "window.showAll", "window.next", "window.launcher"}) {
+        auto *action = window.findChild<QAction *>(omitted);
+        ASSERT_NE(action, nullptr) << omitted;
+        EXPECT_FALSE(viewActions.contains(action)) << omitted;
+    }
+    EXPECT_TRUE(window.actions().contains(window.findChild<QAction *>("view.channels")));
+    EXPECT_TRUE(window.actions().contains(window.findChild<QAction *>("view.info")));
+    const auto windowActions = windowMenu->actions();
+    for (const char *id : {"window.launcher", "window.showAll", "window.next", "window.close"})
+        EXPECT_TRUE(windowActions.contains(window.findChild<QAction *>(id))) << id;
+    EXPECT_EQ(windowActions.back()->objectName(), "window.close");
+
+    // Shortcut aliases still open their panels via keyboard dispatch, and menus do not reserve an empty icon gutter.
+    EXPECT_EQ(fileMenu->style()->pixelMetric(QStyle::PM_SmallIconSize, nullptr, fileMenu), 0);
+    sendKey(doc->viewer, Qt::Key_I);
+    ASSERT_NE(window.panel("properties"), nullptr);
+    EXPECT_TRUE(window.panel("properties")->isVisible());
+    sendKey(doc->viewer, Qt::Key_Z, Qt::ShiftModifier);
+    ASSERT_NE(window.panel("display"), nullptr);
+    EXPECT_TRUE(window.panel("display")->isVisible());
+    // Border sits flush on the popup edge with no corner slivers from border-radius.
+    fileMenu->popup(window.mapToGlobal(QPoint(20, 40)));
+    QCoreApplication::processEvents();
+    const auto menuImage = fileMenu->grab().toImage();
+    EXPECT_EQ(menuImage.pixelColor(0, 0), QColor("#D5CEC2"));
+    fileMenu->hide();
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
