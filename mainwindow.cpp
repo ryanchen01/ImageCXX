@@ -687,17 +687,17 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     commands_.add({"process.repeat", tr("Repeat command"), QT_TRANSLATE_NOOP("CommandCategories", "Process"), QKeySequence("Shift+R"), true, {}, [this](const QVariantMap &) {
         if (!repeatCommand_.isEmpty()) commands_.execute(repeatCommand_, repeatParameters_);
     }});
-    commands_.add({"window.close", tr("Close window"), QT_TRANSLATE_NOOP("CommandCategories", "View"), QKeySequence::Close, false, {}, [this](const QVariantMap &) {
+    commands_.add({"window.close", tr("Close window"), QT_TRANSLATE_NOOP("CommandCategories", "Window"), QKeySequence::Close, false, {}, [this](const QVariantMap &) {
         auto *window = QApplication::activeWindow();
         if (window && window != this) window->close(); else if (active_) active_->close();
     }});
-    commands_.add({"window.showAll", tr("Show all windows"), QT_TRANSLATE_NOOP("CommandCategories", "View"), QKeySequence("Shift+F"), false, {}, [this](const QVariantMap &) {
+    commands_.add({"window.showAll", tr("Show all windows"), QT_TRANSLATE_NOOP("CommandCategories", "Window"), QKeySequence("Shift+F"), false, {}, [this](const QVariantMap &) {
         showNormal();
         for (auto *doc : documents()) doc->showViews();
         for (auto *overlay : findChildren<OverlayWindow *>(QString{}, Qt::FindDirectChildrenOnly)) overlay->showViews();
         for (auto *panel : panels_) if (panel->isVisible() || panel->isMinimized()) panel->showNormal();
     }});
-    commands_.add({"window.next", tr("Next image window"), QT_TRANSLATE_NOOP("CommandCategories", "View"), QKeySequence("Tab"), true, {}, [this](const QVariantMap &) {
+    commands_.add({"window.next", tr("Next image window"), QT_TRANSLATE_NOOP("CommandCategories", "Window"), QKeySequence("Tab"), true, {}, [this](const QVariantMap &) {
         const auto list = documents();
         if (list.isEmpty()) return;
         auto *next = list[(list.indexOf(activeDocument()) + 1) % list.size()];
@@ -707,7 +707,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         next->activateWindow();
         next->viewer->setFocus();
     }});
-    commands_.add({"window.launcher", tr("ImageCXX toolbar"), QT_TRANSLATE_NOOP("CommandCategories", "View"), QKeySequence("Return"), false, {}, [this](const QVariantMap &) {
+    commands_.add({"window.launcher", tr("ImageCXX toolbar"), QT_TRANSLATE_NOOP("CommandCategories", "Window"), QKeySequence("Return"), false, {}, [this](const QVariantMap &) {
         showNormal();
         raise();
         activateWindow();
@@ -722,10 +722,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             QT_TRANSLATE_NOOP("CommandCategories", "Edit"), QT_TRANSLATE_NOOP("CommandCategories", "Process"),
             QT_TRANSLATE_NOOP("CommandCategories", "Analyze"), QT_TRANSLATE_NOOP("CommandCategories", "View")})
         menus.insert(category, menuBar()->addMenu(QCoreApplication::translate("CommandCategories", category)));
-    auto *stacksMenu = new QMenu(tr("Stacks"), this);
-    stacksMenu->setObjectName("stacksMenu");
-    menus.insert("Stacks", stacksMenu);
-    menus.insert("Gels", menus["Analyze"]->addMenu(tr("Gels")));
     const QMap<QString, QStringList> bindings{
             {"file.open", {"O"}}, {"file.new", {"N"}}, {"file.save", {"S"}},
             {"file.next", {"Shift+O", "Alt+Shift+O"}}, {"file.revert", {"R", "Alt+R"}},
@@ -738,9 +734,11 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             {"view.channels", {"Shift+Z"}}, {"selection.add", {"T"}}, {"window.close", {"W"}},
             {"window.showAll", {"Shift+F", "]"}}, {"window.launcher", {"Return", "Enter"}}
         };
+    QMap<QString, QAction *> actions;
     for (const auto &command : commands_.commands()) {
-        auto *action = menus[command.category]->addAction(command.label);
+        auto *action = new QAction(command.label, this);
         action->setObjectName(command.id);
+        actions.insert(command.id, action);
 
         QList<QKeySequence> shortcuts;
         if (command.id == "edit.redo") shortcuts.append(QKeySequence("Ctrl+Y"));
@@ -772,16 +770,87 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         connect(action, &QAction::triggered, this, [this, id = command.id] { executeCommand(id); });
         if (command.needsImage) imageActions_.append(action);
     }
-    menus["File"]->addSeparator();
-    auto *quit = menus["File"]->addAction(tr("Quit"));
+    auto *quit = new QAction(tr("Quit"), this);
     quit->setShortcut(QKeySequence::Quit);
     quit->setShortcutContext(Qt::ApplicationShortcut);
     connect(quit, &QAction::triggered, this, &QWidget::close);
-    auto *search = menus["Edit"]->addAction(QIcon(":/icons/search.svg"), tr("Find command..."));
+    auto *search = new QAction(tr("Find command..."), this);
     search->setObjectName("commands.find");
     search->setShortcuts({QKeySequence("L"), QKeySequence("Ctrl+L")});
     for (const auto &key : search->shortcuts()) shortcutActions_.insert(key, search);
     search->setShortcutContext(Qt::ApplicationShortcut);
+    crosshair_ = new QAction(tr("Crosshair"), this);
+    crosshair_->setCheckable(true);
+    connect(crosshair_, &QAction::toggled, this, [this](bool value) {
+        if (auto *overlay = activeOverlay()) overlay->viewer->setCrosshairVisible(value);
+        else if (auto *doc = activeDocument()) doc->viewer->setCrosshairVisible(value);
+    });
+    scaleBar_ = new QAction(tr("Scale bar"), this);
+    scaleBar_->setCheckable(true);
+    scaleBar_->setChecked(false);
+    connect(scaleBar_, &QAction::toggled, this, [this](bool value) {
+        if (auto *overlay = activeOverlay()) overlay->viewer->setScaleBarVisible(value);
+        else if (auto *doc = activeDocument()) doc->viewer->setScaleBarVisible(value);
+    });
+    const auto addItems = [&actions](QMenu *menu, std::initializer_list<const char *> ids) {
+        for (const char *id : ids) {
+            if (!id) menu->addSeparator();
+            else {
+                auto *action = actions.value(QLatin1String(id));
+                Q_ASSERT(action);
+                menu->addAction(action);
+            }
+        }
+    };
+    addItems(menus["File"], {"file.new", "file.clipboard", "file.text", "file.capture", nullptr,
+        "file.open", "file.folder", "file.dicomSeries", "file.raw"});
+    recentMenu_ = menus["File"]->addMenu(tr("Recent files"));
+    recentMenu_->setObjectName("recentMenu");
+    addItems(menus["File"], {"file.next", nullptr,
+        "file.save", "file.revert", nullptr,
+        "file.print", "file.printPreview", nullptr});
+    menus["File"]->addAction(quit);
+
+    addItems(menus["Edit"], {"edit.undo", "edit.redo", nullptr,
+        "edit.cut", "edit.copy", "edit.paste", "edit.pasteSpecial", nullptr,
+        "edit.clear", "edit.fill", "edit.draw", "edit.invert", "edit.smooth", "edit.color", nullptr,
+        "image.crop", "image.duplicate", nullptr});
+    auto *selectionMenu = menus["Edit"]->addMenu(tr("Selection"));
+    selectionMenu->setObjectName("selectionMenu");
+    addItems(selectionMenu, {"selection.all", "selection.none", "selection.restore", nullptr, "selection.properties"});
+    auto *overlayMenu = menus["Edit"]->addMenu(tr("Overlay"));
+    overlayMenu->setObjectName("overlayMenu");
+    addItems(overlayMenu, {"overlay.add", "overlay.toggle", "overlay.removeLast"});
+    menus["Edit"]->addSeparator();
+    menus["Edit"]->addAction(search);
+
+    auto *stacksMenu = new QMenu(tr("Stacks"), this);
+    stacksMenu->setObjectName("stacksMenu");
+    addItems(stacksMenu, {"stacks.reslice", "stacks.project3d"});
+    addItems(menus["Process"], {"process.repeat", nullptr,
+        "process.gaussian", "process.median", "process.threshold", "process.dilate", "process.erode", "process.resample", nullptr});
+    menus["Process"]->addMenu(stacksMenu);
+    menus["Process"]->addSeparator();
+    addItems(menus["Process"], {"process.batch"});
+
+    addItems(menus["Analyze"], {"analyze.measure", "analyze.multiMeasure", "selection.add", "results.export", nullptr,
+        "analyze.histogram", "analyze.histogram.log", "analyze.histogram.options",
+        "analyze.profile", "analyze.profile.options",
+        "analyze.roiPlot", "analyze.scatter", nullptr,
+        "analyze.mask"});
+    auto *gelsMenu = menus["Analyze"]->addMenu(tr("Gels"));
+    gelsMenu->setObjectName("gelsMenu");
+    addItems(gelsMenu, {"gel.first", "gel.next", "gel.plot", "gel.label", nullptr, "gel.options"});
+
+    addItems(menus["View"], {"view.fit", "image.animate", nullptr,
+        "view.single", "view.linked", "view.orthogonal", "view.overlay", nullptr});
+    menus["View"]->addAction(crosshair_);
+    menus["View"]->addAction(scaleBar_);
+    menus["View"]->addSeparator();
+    addItems(menus["View"], {"view.display", "view.properties", "view.controlPanel"});
+    // Keep shortcut-only panel aliases attached to the window so Qt dispatches their shortcuts.
+    addAction(actions.value("view.channels"));
+    addAction(actions.value("view.info"));
     auto *query = new QLineEdit(this);
     query->setObjectName("commandSearch");
     query->setPlaceholderText(tr("Find command..."));
@@ -844,19 +913,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     checkUpdates->setObjectName("help.checkUpdates");
     checkUpdates->setMenuRole(QAction::NoRole);
     checkUpdates->setEnabled(false);
-    crosshair_ = menus["View"]->addAction(tr("Crosshair"));
-    crosshair_->setCheckable(true);
-    connect(crosshair_, &QAction::toggled, this, [this](bool value) {
-        if (auto *overlay = activeOverlay()) overlay->viewer->setCrosshairVisible(value);
-        else if (auto *doc = activeDocument()) doc->viewer->setCrosshairVisible(value);
-    });
-    scaleBar_ = menus["View"]->addAction(tr("Scale bar"));
-    scaleBar_->setCheckable(true);
-    scaleBar_->setChecked(false);
-    connect(scaleBar_, &QAction::toggled, this, [this](bool value) {
-        if (auto *overlay = activeOverlay()) overlay->viewer->setScaleBarVisible(value);
-        else if (auto *doc = activeDocument()) doc->viewer->setScaleBarVisible(value);
-    });
     auto *toolbar = addToolBar(tr("Image tools"));
     toolbar->setObjectName("imageTools");
     toolbar->setMovable(false);
@@ -939,7 +995,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         restoreGeometry(settings.value("launcherGeometry").toByteArray());
     resize(std::clamp(width(), 560, 900), minimumSizeHint().height());
     restorePanelLayout(settings.value("panels").toByteArray());
-    recentMenu_ = menus["File"]->addMenu(tr("Recent files"));
     updateRecentFiles();
     updateWindowMenu();
     updatePanels();

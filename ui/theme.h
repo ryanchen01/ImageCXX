@@ -1,14 +1,26 @@
 #pragma once
 
 #include <QApplication>
+#include <QMenu>
 #include <QPalette>
-#include <QStyleFactory>
+#include <QProxyStyle>
 
 namespace imagecxx {
 
+class ThemeStyle final : public QProxyStyle {
+public:
+    using QProxyStyle::QProxyStyle;
+    int pixelMetric(PixelMetric metric, const QStyleOption *option = nullptr, const QWidget *widget = nullptr) const override
+    {
+        if (metric == PM_SmallIconSize && qobject_cast<const QMenu *>(widget)) return 0;
+        return QProxyStyle::pixelMetric(metric, option, widget);
+    }
+};
+
 inline void applyTheme()
 {
-    QApplication::setStyle(QStyleFactory::create("Fusion"));
+    QApplication::setStyle(new ThemeStyle(QStringLiteral("Fusion")));
+    QApplication::setAttribute(Qt::AA_DontShowIconsInMenus, true);
     QPalette palette;
     const QColor window("#F7F4EE");
     const QColor base("#FDFBF7");
@@ -48,7 +60,7 @@ inline QString mainWindowStyleSheet()
         QMenuBar { border-bottom: 1px solid #DFD9CE; padding: 1px 4px; }
         QMenuBar::item { padding: 4px 8px; border-radius: 4px; }
         QMenuBar::item:selected { background: #EAE4D9; color: #18191B; }
-        QMenu { background: #FDFBF7; color: #18191B; border: 1px solid #D5CEC2; border-radius: 6px; padding: 4px; }
+        QMenu { background: #FDFBF7; color: #18191B; border: 1px solid #D5CEC2; padding: 4px; }
         QMenu::item { padding: 5px 24px 5px 10px; border-radius: 4px; }
         QMenu::item:selected { background: #E5DEC8; color: #18191B; }
         QMenu::item:disabled { color: #8A857E; }

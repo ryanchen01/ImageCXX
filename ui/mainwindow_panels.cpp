@@ -566,8 +566,9 @@ void MainWindow::updateRecentFiles()
 void MainWindow::updateWindowMenu()
 {
     windowMenu_->clear();
-    auto *launcher = windowMenu_->addAction(tr("ImageCXX toolbar"));
-    connect(launcher, &QAction::triggered, this, [this] { showNormal(); raise(); activateWindow(); });
+    windowMenu_->addAction(findChild<QAction *>("window.launcher"));
+    windowMenu_->addAction(findChild<QAction *>("window.showAll"));
+    windowMenu_->addAction(findChild<QAction *>("window.next"));
     windowMenu_->addSeparator();
     const QList<QPair<QString, QString>> entries{{"display", tr("Display")}, {"properties", tr("Image properties")},
         {"rois", tr("ROI manager")}, {"history", tr("History")}, {"measurements", tr("Measurements")},
