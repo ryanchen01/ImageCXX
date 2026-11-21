@@ -144,7 +144,7 @@ endif()
 if(IMAGECXX_BUILD_BENCHMARKS)
     find_package(benchmark CONFIG REQUIRED)
     add_executable(imagecxx_benchmarks benchmarks/image_benchmarks.cpp)
-    target_link_libraries(imagecxx_benchmarks PRIVATE imagecxx_processing benchmark::benchmark_main)
+    target_link_libraries(imagecxx_benchmarks PRIVATE imagecxx_processing imagecxx_viewer benchmark::benchmark_main)
 endif()
 
 install(TARGETS ImageCXX BUNDLE DESTINATION . RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

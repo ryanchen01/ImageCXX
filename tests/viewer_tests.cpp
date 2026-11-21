@@ -1,4 +1,5 @@
 #include "viewer/image_viewer.h"
+#include "viewer/viewer_internal.h"
 #include "ui/document_widget.h"
 
 #include <QApplication>
@@ -1579,6 +1580,170 @@ TEST(Viewer, ModifierGesturesIgnoreInvisibleSelectionsFromOtherPlanes)
         roiMouse(viewer, QEvent::MouseButtonPress, {40, 40}, Qt::AltModifier);
         roiMouse(viewer, QEvent::MouseButtonRelease, {40, 40}, Qt::AltModifier);
         EXPECT_EQ(document.rois.front().points.size(), 4u);
+    }
+}
+
+TEST(Viewer, CachedSliceNavigationUpdatesSynchronouslyAndPrefetchesInDirection)
+{
+    auto image = Image::allocate(PixelType::UInt16, {8, 8, 5});
+    auto *pixels = reinterpret_cast<std::uint16_t *>(image.mutableData());
+    for (std::size_t z = 0; z < 5; ++z)
+        std::fill_n(pixels + z * 64, 64, std::uint16_t(100 * (z + 1)));
+    ImageViewer viewer;
+    constexpr std::size_t oneSlice = 8 * 8 * sizeof(float);
+    viewer.setCacheBudgets(oneSlice * 3, oneSlice * 3);
+    int ready = 0;
+    int loadingTrue = 0;
+    QStringList events;
+    QObject::connect(&viewer, &ImageViewer::sliceChanged, [&](std::size_t z, std::size_t, std::size_t) {
+        events.append(QStringLiteral("changed:%1").arg(z));
+    });
+    QObject::connect(&viewer, &ImageViewer::sliceReady, [&] {
+        ++ready;
+        events.append(QStringLiteral("ready:%1").arg(viewer.slice()));
+    });
+    QObject::connect(&viewer, &ImageViewer::loadingChanged, [&](bool busy) { if (busy) ++loadingTrue; });
+    viewer.setImage(image);
+    ASSERT_TRUE(waitFor([&] { return viewer.hasCachedSlice(1) && ready == 1; }));
+    EXPECT_DOUBLE_EQ(viewer.sliceRange().first, 100);
+
+    // Slice 1 was prefetched: navigating to it completes synchronously without toggling loading,
+    // and emits sliceChanged before sliceReady (matching cache misses).
+    events.clear();
+    const int loadingBefore = loadingTrue;
+    viewer.setSlice(1);
+    EXPECT_EQ(ready, 2);
+    EXPECT_EQ(loadingTrue, loadingBefore);
+    EXPECT_DOUBLE_EQ(viewer.sliceRange().first, 200);
+    EXPECT_EQ(events, (QStringList{"changed:1", "ready:1"}));
+    // Worker prefetches slice 2 in the forward scroll direction.
+    ASSERT_TRUE(waitFor([&] { return viewer.hasCachedSlice(2); }));
+    // Re-entrant navigation from a sliceReady handler preserves event ordering without stale signals.
+    bool advanceOnce = true;
+    const auto reentrant = QObject::connect(&viewer, &ImageViewer::sliceReady, [&] {
+        if (advanceOnce && viewer.slice() == 2) {
+            advanceOnce = false;
+            viewer.setSlice(1);
+        }
+    });
+    events.clear();
+    viewer.setSlice(2);
+    QObject::disconnect(reentrant);
+    EXPECT_EQ(ready, 4);
+    EXPECT_EQ(loadingTrue, loadingBefore);
+    EXPECT_EQ(viewer.slice(), 1u);
+    EXPECT_EQ(events, (QStringList{"changed:2", "ready:2", "changed:1", "ready:1"}));
+
+    // Interrupting an in-flight decode with a cached slice whose sliceChanged handler jumps to
+    // another cached slice still emits loadingChanged(false) once when the winning slice finishes.
+    auto slow = std::make_shared<SlowSlices>();
+    ImageViewer interruptViewer;
+    constexpr std::size_t slowSlice = 16 * 16 * sizeof(float);
+    interruptViewer.setCacheBudgets(slowSlice * 3, slowSlice * 3);
+    bool isLoading = false;
+    int loadingFalse = 0;
+    QObject::connect(&interruptViewer, &ImageViewer::loadingChanged, [&](bool busy) {
+        isLoading = busy;
+        if (!busy) ++loadingFalse;
+    });
+    interruptViewer.setImage(Image::fromStorage(PixelType::UInt16, {16, 16, 6}, slow));
+    ASSERT_TRUE(waitFor([&] { return !isLoading && interruptViewer.hasCachedSlice(0) && interruptViewer.hasCachedSlice(1); }));
+    bool redirectOnce = true;
+    const auto redirect = QObject::connect(&interruptViewer, &ImageViewer::sliceChanged,
+        [&](std::size_t z, std::size_t, std::size_t) {
+            if (redirectOnce && z == 1) {
+                redirectOnce = false;
+                interruptViewer.setSlice(0);
+            }
+        });
+    const int falseBefore = loadingFalse;
+    interruptViewer.setSlice(5); // cache miss -> starts async decode (loading == true)
+    ASSERT_TRUE(isLoading);
+    interruptViewer.setSlice(1); // cached -> sliceChanged redirects to cached slice 0
+    QObject::disconnect(redirect);
+    EXPECT_FALSE(isLoading);
+    EXPECT_EQ(loadingFalse, falseBefore + 1);
+    EXPECT_EQ(interruptViewer.slice(), 0u);
+
+    // A one-plane cache retains the forward neighbor instead of evicting it with the trailing neighbor.
+    auto lazy = std::make_shared<SlowSlices>();
+    constexpr std::size_t lazySlice = 16 * 16 * sizeof(float);
+    ImageViewer smallCache;
+    smallCache.setCacheBudgets(lazySlice, lazySlice);
+    int smallReady = 0, smallLoadingTrue = 0;
+    QObject::connect(&smallCache, &ImageViewer::sliceReady, [&] { ++smallReady; });
+    QObject::connect(&smallCache, &ImageViewer::loadingChanged, [&](bool busy) { if (busy) ++smallLoadingTrue; });
+    smallCache.setImage(Image::fromStorage(PixelType::UInt16, {16, 16, 6}, lazy));
+    ASSERT_TRUE(waitFor([&] { return smallReady == 1 && smallCache.hasCachedSlice(1); }));
+    const int forwardLoads = smallLoadingTrue;
+    smallCache.setSlice(1);
+    EXPECT_EQ(smallReady, 2);
+    EXPECT_EQ(smallLoadingTrue, forwardLoads);
+    EXPECT_DOUBLE_EQ(smallCache.sliceRange().first, 100);
+    // Worker prefetches slice 2 and skips trailing slice 0 so slice 2 stays cached.
+    ASSERT_TRUE(waitFor([&] { return smallCache.hasCachedSlice(2); }));
+    EXPECT_EQ(lazy->reads.load(), 768);
+    smallCache.setSlice(2);
+    EXPECT_EQ(smallReady, 3);
+    EXPECT_EQ(smallLoadingTrue, forwardLoads);
+    EXPECT_DOUBLE_EQ(smallCache.sliceRange().first, 200);
+    ASSERT_TRUE(waitFor([&] { return smallCache.hasCachedSlice(3); }));
+    EXPECT_EQ(lazy->reads.load(), 1024);
+    // Reverse scroll from slice 2 -> slice 1 (miss, prefetches slice 0, skips slice 2) -> slice 0 (hit).
+    smallCache.setSlice(1);
+    ASSERT_TRUE(waitFor([&] { return smallReady == 4 && smallCache.hasCachedSlice(0); }));
+    EXPECT_EQ(lazy->reads.load(), 1536);
+    const int backwardLoads = smallLoadingTrue;
+    smallCache.setSlice(0);
+    EXPECT_EQ(smallReady, 5);
+    EXPECT_EQ(smallLoadingTrue, backwardLoads);
+    EXPECT_DOUBLE_EQ(smallCache.sliceRange().first, 0);
+}
+
+TEST(Viewer, OrthogonalPermutedViewsDecodeAllPixelTypesAccurately)
+{
+    const auto never = [] { return false; };
+    for (const auto type : {PixelType::UInt8, PixelType::UInt16, PixelType::Int16,
+                            PixelType::Float32, PixelType::Float64, PixelType::RGB8, PixelType::RGBA8}) {
+        SCOPED_TRACE(pixelTypeName(type).toStdString());
+        auto volume = Image::allocate(type, {5, 4, 3, 2});
+        for (std::size_t c = 0; c < 2; ++c)
+            for (std::size_t z = 0; z < 3; ++z)
+                for (std::size_t y = 0; y < 4; ++y)
+                    for (std::size_t x = 0; x < 5; ++x)
+                        for (std::size_t k = 0; k < componentCount(type); ++k) {
+                            const double v = double(x + 10 * y + 50 * z + 15 * c + 3 * k);
+                            volume.setValue(std::array<std::size_t, 4>{x, y, z, c},
+                                type == PixelType::Int16 ? v - 100 : type == PixelType::Float64 ? 1e9 + v * 0.25 : v, k);
+                        }
+        for (const auto axes : {std::array<std::size_t, 3>{0, 2, 1}, std::array<std::size_t, 3>{1, 2, 0}}) {
+            const auto permuted = volume.permutedSpatialAxes(axes);
+            const auto decoded = detail::decodeSlice(permuted, {1, 1, 1, 0, false}, 1024 * 1024, never);
+            ASSERT_NE(decoded, nullptr);
+            ASSERT_EQ(decoded->size, QSize(int(permuted.width()), int(permuted.height())));
+            double lo = std::numeric_limits<double>::infinity(), hi = -lo;
+            for (std::size_t y = 0; y < permuted.height(); ++y)
+                for (std::size_t x = 0; x < permuted.width(); ++x) {
+                    const double v = permuted.sample(x, y, 1, 1, 0);
+                    lo = std::min(lo, v); hi = std::max(hi, v);
+                    if (componentCount(type) > 1) {
+                        const auto *px = reinterpret_cast<const std::uint8_t *>(decoded->pixels.constData()) + (y * permuted.width() + x) * 4;
+                        for (std::size_t k = 0; k < componentCount(type); ++k)
+                            EXPECT_EQ(double(px[k]), permuted.sample(x, y, 1, 1, 0, k));
+                        if (componentCount(type) == 3) EXPECT_EQ(px[3], 255);
+                    } else {
+                        float stored;
+                        std::memcpy(&stored, decoded->pixels.constData() + (y * permuted.width() + x) * sizeof(float), sizeof(float));
+                        const double expected = type == PixelType::Float64
+                            ? double(float((v - decoded->offset) / decoded->scale))
+                            : double(float(v));
+                        EXPECT_DOUBLE_EQ(double(stored), expected);
+                    }
+                }
+            if (componentCount(type) > 1) { lo = 0; hi = 255; }
+            EXPECT_DOUBLE_EQ(decoded->minimum, lo);
+            EXPECT_DOUBLE_EQ(decoded->maximum, hi);
+        }
     }
 }
 

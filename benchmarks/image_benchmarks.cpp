@@ -1,6 +1,8 @@
 #include "core/image.h"
 #include "processing/processing.h"
+#include "viewer/viewer_internal.h"
 #include <benchmark/benchmark.h>
+#include <array>
 #include <cmath>
 #include <cstdint>
 
@@ -71,6 +73,33 @@ void Project3D(benchmark::State &state) {
     }
 }
 BENCHMARK(Project3D)->ArgsProduct({{0, 1, 2}, {0, 1}})->Unit(benchmark::kMillisecond)->UseRealTime();
+
+void ResliceVolume(benchmark::State &state) {
+    const auto image = unsignedRamp(128, 128);
+    ResliceOptions options;
+    options.start = state.range(0) == 0 ? ResliceStart::Top : ResliceStart::Left;
+    options.avoidInterpolation = state.range(1) != 0;
+    options.outputSpacing = options.avoidInterpolation ? 1.0 : 0.75;
+    for (auto _ : state) {
+        const auto result = reslice(image, options);
+        benchmark::DoNotOptimize(result.data());
+    }
+}
+BENCHMARK(ResliceVolume)->ArgsProduct({{0, 1}, {0, 1}})->Unit(benchmark::kMillisecond)->UseRealTime();
+
+void DecodeSliceOrthogonal(benchmark::State &state) {
+    const auto volume = unsignedRamp(256, 128);
+    const auto view = state.range(0) == 0 ? volume
+        : state.range(0) == 1 ? volume.permutedSpatialAxes({0, 2, 1})
+        : volume.permutedSpatialAxes({1, 2, 0});
+    const auto never = [] { return false; };
+    std::size_t z = 0;
+    for (auto _ : state) {
+        const auto decoded = detail::decodeSlice(view, {1, z++ % view.depth(), 0, 0, false}, 128 * 1024 * 1024, never);
+        benchmark::DoNotOptimize(decoded->pixels.constData());
+    }
+}
+BENCHMARK(DecodeSliceOrthogonal)->Arg(0)->Arg(1)->Arg(2)->Unit(benchmark::kMillisecond);
 
 void ItkGaussianFloat32(benchmark::State &state) {
     const auto edge = static_cast<std::size_t>(state.range(0));

@@ -51,7 +51,7 @@ struct ResliceGeometry {
     std::size_t requiredMemoryBytes = 0;
 };
 
-// Full-stack orthogonal XZ/YZ reslicing through ITK. Channel/time axes stay independent.
+// Full-stack orthogonal XZ/YZ reslicing. Channel/time axes stay independent.
 // Interpolation samples within source voxel centers; Z uses profile-axis spacing.
 // rotate90 exchanges the output plane axes, matching ImageJ's reslice option.
 ResliceGeometry resliceGeometry(const Image &image, const ResliceOptions &options);

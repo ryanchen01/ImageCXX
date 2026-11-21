@@ -152,7 +152,8 @@ void SliceCanvas::render(QRhiCommandBuffer *cb)
             updates->uploadTexture(slot.texture.get(), QRhiTextureUploadDescription({{0, 0, data}}));
             slot.uploaded = decoded;
         }
-        const QByteArray maskData = layer.mask.isEmpty() ? QByteArray(1, '\0') : layer.mask;
+        static const QByteArray emptyMask(1, '\0');
+        const QByteArray &maskData = layer.mask.isEmpty() ? emptyMask : layer.mask;
         if (slot.uploadedMask != maskData) {
             QRhiTextureSubresourceUploadDescription data(maskData);
             data.setSourceSize(requestedMaskSize);
@@ -267,99 +268,264 @@ std::shared_ptr<const DecodedSlice> decodeSlice(const Image &image, const SliceK
     result->channels = result->mode == 2 ? int(std::min<std::size_t>(4, image.channels())) : 1;
     const std::size_t components = result->mode == 0 ? 1 : 4;
     const bool doublePrecision = image.pixelType() == PixelType::Float64;
-    const std::size_t bytesPerSample = color ? 1 : doublePrecision ? sizeof(double) : sizeof(float);
+    const auto *base = image.data();
+    const bool lazyDouble = doublePrecision && !base;
+    const std::size_t bytesPerSample = color ? 1 : lazyDouble ? sizeof(double) : sizeof(float);
     const std::size_t perPixel = components * bytesPerSample;
-    if (image.width() > std::size_t(std::numeric_limits<int>::max())
-        || image.height() > std::size_t(std::numeric_limits<int>::max())
-        || image.width() > decodedBudget / perPixel / image.height())
+    const auto width = image.width(), height = image.height();
+    if (width > std::size_t(std::numeric_limits<int>::max())
+        || height > std::size_t(std::numeric_limits<int>::max())
+        || width > decodedBudget / perPixel / height)
         throw std::runtime_error(QCoreApplication::translate("ImageViewer", "The decoded slice exceeds the viewer cache memory limit.").toStdString());
-    result->size = QSize(int(image.width()), int(image.height()));
-    const auto byteCount = image.width() * image.height() * perPixel;
-    result->pixels = QByteArray(qsizetype(byteCount), Qt::Uninitialized);
+    if (key.z >= image.depth() || key.channel >= image.channels() || key.time >= image.frames())
+        throw std::out_of_range(QCoreApplication::translate("Image", "Slice is outside the image").toStdString());
+    result->size = QSize(int(width), int(height));
+    result->pixels = QByteArray(qsizetype(width * height * perPixel), Qt::Uninitialized);
     result->minimum = std::numeric_limits<double>::infinity();
     result->maximum = -std::numeric_limits<double>::infinity();
-    std::vector<Image> planes;
-    for (int c = 0; c < result->channels; ++c)
-        planes.push_back(image.slice(key.z, result->mode == 2 ? std::size_t(c) : key.channel, key.time));
-    const auto width = image.width(), height = image.height();
     auto *destination = result->pixels.data();
-    const auto convert = [&](auto sample) {
-        for (std::size_t y = 0; y < height; ++y) {
-            if (cancelled()) break;
-            for (std::size_t x = 0; x < width; ++x) {
-                const auto offset = (y * width + x) * components;
-                for (std::size_t c = 0; c < components; ++c) {
-                    double value = color && c == 3 && sourceComponents == 3 ? 255.0
-                        : color || c < std::size_t(result->channels) ? sample(x, y, c) : 0.0;
-                    if (c < std::size_t(color ? 3 : result->channels) && std::isfinite(value)) {
-                        result->minimum = std::min(result->minimum, value);
-                        result->maximum = std::max(result->maximum, value);
-                    }
-                    if (!std::isfinite(value)) value = 0;
-                    if (color) {
-                        const auto displayValue = std::uint8_t(std::clamp(value, 0.0, 255.0));
-                        std::memcpy(destination + offset + c, &displayValue, sizeof(displayValue));
-                    } else if (doublePrecision) {
-                        std::memcpy(destination + (offset + c) * sizeof(double), &value, sizeof(double));
-                    } else {
-                        const float displayValue = float(std::clamp(value,
-                            -double(std::numeric_limits<float>::max()), double(std::numeric_limits<float>::max())));
-                        std::memcpy(destination + (offset + c) * sizeof(float), &displayValue, sizeof(float));
+
+    const auto finalizeRange = [&] {
+        if (!std::isfinite(result->minimum)) { result->minimum = 0; result->maximum = 1; }
+        if (result->maximum <= result->minimum) {
+            const double expanded = result->minimum + std::max(1.0, std::abs(result->minimum) * 1e-6);
+            result->maximum = expanded;
+            if (!std::isfinite(expanded)) {
+                result->minimum = std::nextafter(result->minimum, -std::numeric_limits<double>::infinity());
+                result->maximum = std::numeric_limits<double>::max();
+            }
+        }
+        if (color) { result->minimum = 0; result->maximum = 255; }
+    };
+
+    if (base) {
+        const auto &shape = image.shape();
+        const auto &strides = image.strides();
+        const std::size_t strideX = strides[0], strideY = strides[1];
+        const std::size_t basePlaneOffset = (shape.size() > 2 ? key.z * strides[2] : 0)
+            + (shape.size() > 4 ? key.time * strides[4] : 0);
+        std::array<const std::byte *, 4> planes{};
+        for (int c = 0; c < result->channels; ++c) {
+            const std::size_t ch = result->mode == 2 ? std::size_t(c) : key.channel;
+            planes[std::size_t(c)] = base + basePlaneOffset + (shape.size() > 3 ? ch * strides[3] : 0);
+        }
+        if (color) {
+            const auto *plane = planes[0];
+            auto *dst = reinterpret_cast<std::uint8_t *>(destination);
+            for (std::size_t y = 0; y < height; ++y) {
+                if (cancelled()) return {};
+                const auto *srcRow = plane + y * strideY;
+                auto *dstRow = dst + y * width * 4;
+                if (sourceComponents == 4 && strideX == 4) {
+                    std::memcpy(dstRow, srcRow, width * 4);
+                } else if (sourceComponents == 4) {
+                    for (std::size_t x = 0; x < width; ++x)
+                        std::memcpy(dstRow + x * 4, srcRow + x * strideX, 4);
+                } else {
+                    for (std::size_t x = 0; x < width; ++x) {
+                        const auto *px = srcRow + x * strideX;
+                        dstRow[x * 4 + 0] = std::to_integer<std::uint8_t>(px[0]);
+                        dstRow[x * 4 + 1] = std::to_integer<std::uint8_t>(px[1]);
+                        dstRow[x * 4 + 2] = std::to_integer<std::uint8_t>(px[2]);
+                        dstRow[x * 4 + 3] = 255;
                     }
                 }
             }
+            result->minimum = 0;
+            result->maximum = 255;
+            return result;
         }
-    };
-    std::array<const std::byte *, 4> buffers{};
-    bool direct = true;
-    for (std::size_t c = 0; c < planes.size(); ++c) {
-        if (!planes[c].contiguous() || !(buffers[c] = planes[c].data())) {
-            direct = false;
-            break;
-        }
-    }
-    if (direct) {
-        const auto convertBuffer = [&]<typename T>() {
-            convert([&](std::size_t x, std::size_t y, std::size_t c) {
-                const auto offset = (y * width + x) * sourceComponents + (color ? c : 0);
-                T value;
-                // Mapped buffers and image views may start at unaligned addresses.
-                std::memcpy(&value, buffers[color ? 0 : c] + offset * sizeof(T), sizeof(T));
-                return double(value);
-            });
+        const auto convertTyped = [&]<typename T>() -> bool {
+            if constexpr (std::is_integral_v<T>) {
+                T lo = std::numeric_limits<T>::max(), hi = std::numeric_limits<T>::lowest();
+                if (result->mode == 0) {
+                    const bool contiguousRow = strideX == sizeof(T);
+                    for (std::size_t y = 0; y < height; ++y) {
+                        if (cancelled()) return false;
+                        const auto *srcRow = planes[0] + y * strideY;
+                        auto *dstRow = destination + y * width * sizeof(float);
+                        if (contiguousRow) {
+                            for (std::size_t x = 0; x < width; ++x) {
+                                T value;
+                                std::memcpy(&value, srcRow + x * sizeof(T), sizeof(T));
+                                if (value < lo) lo = value;
+                                if (value > hi) hi = value;
+                                const float f = static_cast<float>(value);
+                                std::memcpy(dstRow + x * sizeof(float), &f, sizeof(float));
+                            }
+                        } else {
+                            for (std::size_t x = 0; x < width; ++x) {
+                                T value;
+                                std::memcpy(&value, srcRow + x * strideX, sizeof(T));
+                                if (value < lo) lo = value;
+                                if (value > hi) hi = value;
+                                const float f = static_cast<float>(value);
+                                std::memcpy(dstRow + x * sizeof(float), &f, sizeof(float));
+                            }
+                        }
+                    }
+                } else {
+                    for (std::size_t y = 0; y < height; ++y) {
+                        if (cancelled()) return false;
+                        auto *dstRow = destination + y * width * 4 * sizeof(float);
+                        for (std::size_t x = 0; x < width; ++x) {
+                            float pixel[4]{0, 0, 0, 0};
+                            for (int c = 0; c < result->channels; ++c) {
+                                T value;
+                                std::memcpy(&value, planes[std::size_t(c)] + y * strideY + x * strideX, sizeof(T));
+                                if (value < lo) lo = value;
+                                if (value > hi) hi = value;
+                                pixel[c] = static_cast<float>(value);
+                            }
+                            std::memcpy(dstRow + x * 4 * sizeof(float), pixel, sizeof(pixel));
+                        }
+                    }
+                }
+                result->minimum = double(lo);
+                result->maximum = double(hi);
+            } else if constexpr (std::is_same_v<T, float>) {
+                double lo = std::numeric_limits<double>::infinity(), hi = -lo;
+                if (result->mode == 0) {
+                    const bool contiguousRow = strideX == sizeof(float);
+                    for (std::size_t y = 0; y < height; ++y) {
+                        if (cancelled()) return false;
+                        const auto *srcRow = planes[0] + y * strideY;
+                        auto *dstRow = destination + y * width * sizeof(float);
+                        for (std::size_t x = 0; x < width; ++x) {
+                            float value;
+                            std::memcpy(&value, srcRow + (contiguousRow ? x * sizeof(float) : x * strideX), sizeof(float));
+                            if (std::isfinite(value)) {
+                                if (double(value) < lo) lo = double(value);
+                                if (double(value) > hi) hi = double(value);
+                            } else value = 0.0f;
+                            std::memcpy(dstRow + x * sizeof(float), &value, sizeof(float));
+                        }
+                    }
+                } else {
+                    for (std::size_t y = 0; y < height; ++y) {
+                        if (cancelled()) return false;
+                        auto *dstRow = destination + y * width * 4 * sizeof(float);
+                        for (std::size_t x = 0; x < width; ++x) {
+                            float pixel[4]{0, 0, 0, 0};
+                            for (int c = 0; c < result->channels; ++c) {
+                                float value;
+                                std::memcpy(&value, planes[std::size_t(c)] + y * strideY + x * strideX, sizeof(float));
+                                if (std::isfinite(value)) {
+                                    if (double(value) < lo) lo = double(value);
+                                    if (double(value) > hi) hi = double(value);
+                                    pixel[c] = value;
+                                }
+                            }
+                            std::memcpy(dstRow + x * 4 * sizeof(float), pixel, sizeof(pixel));
+                        }
+                    }
+                }
+                result->minimum = lo;
+                result->maximum = hi;
+            } else {
+                double lo = std::numeric_limits<double>::infinity(), hi = -lo;
+                for (std::size_t y = 0; y < height; ++y) {
+                    if (cancelled()) return false;
+                    for (int c = 0; c < result->channels; ++c) {
+                        const auto *srcRow = planes[std::size_t(c)] + y * strideY;
+                        for (std::size_t x = 0; x < width; ++x) {
+                            double value;
+                            std::memcpy(&value, srcRow + x * strideX, sizeof(double));
+                            if (std::isfinite(value)) {
+                                if (value < lo) lo = value;
+                                if (value > hi) hi = value;
+                            }
+                        }
+                    }
+                }
+                result->minimum = lo;
+                result->maximum = hi;
+                finalizeRange();
+                result->offset = result->minimum;
+                result->scale = result->maximum - result->minimum;
+                if (!std::isfinite(result->scale)) {
+                    result->offset = 0;
+                    result->scale = std::max(std::abs(result->minimum), std::abs(result->maximum));
+                }
+                const double offset = result->offset, scale = result->scale;
+                const float zeroEncoded = float((0.0 - offset) / scale);
+                for (std::size_t y = 0; y < height; ++y) {
+                    if (cancelled()) return false;
+                    if (result->mode == 0) {
+                        const auto *srcRow = planes[0] + y * strideY;
+                        auto *dstRow = destination + y * width * sizeof(float);
+                        for (std::size_t x = 0; x < width; ++x) {
+                            double value;
+                            std::memcpy(&value, srcRow + x * strideX, sizeof(double));
+                            const float encoded = std::isfinite(value) ? float((value - offset) / scale) : zeroEncoded;
+                            std::memcpy(dstRow + x * sizeof(float), &encoded, sizeof(float));
+                        }
+                    } else {
+                        auto *dstRow = destination + y * width * 4 * sizeof(float);
+                        for (std::size_t x = 0; x < width; ++x) {
+                            float pixel[4]{zeroEncoded, zeroEncoded, zeroEncoded, zeroEncoded};
+                            for (int c = 0; c < result->channels; ++c) {
+                                double value;
+                                std::memcpy(&value, planes[std::size_t(c)] + y * strideY + x * strideX, sizeof(double));
+                                if (std::isfinite(value)) pixel[c] = float((value - offset) / scale);
+                            }
+                            std::memcpy(dstRow + x * 4 * sizeof(float), pixel, sizeof(pixel));
+                        }
+                    }
+                }
+                return true;
+            }
+            finalizeRange();
+            return true;
         };
+        bool finished = false;
         switch (image.pixelType()) {
-        case PixelType::UInt8: case PixelType::RGB8: case PixelType::RGBA8:
-            convertBuffer.template operator()<std::uint8_t>(); break;
-        case PixelType::UInt16: convertBuffer.template operator()<std::uint16_t>(); break;
-        case PixelType::Int16: convertBuffer.template operator()<std::int16_t>(); break;
-        case PixelType::Float32: convertBuffer.template operator()<float>(); break;
-        case PixelType::Float64: convertBuffer.template operator()<double>(); break;
+        case PixelType::UInt8: finished = convertTyped.template operator()<std::uint8_t>(); break;
+        case PixelType::UInt16: finished = convertTyped.template operator()<std::uint16_t>(); break;
+        case PixelType::Int16: finished = convertTyped.template operator()<std::int16_t>(); break;
+        case PixelType::Float32: finished = convertTyped.template operator()<float>(); break;
+        case PixelType::Float64: finished = convertTyped.template operator()<double>(); break;
+        default: break;
         }
-    } else {
-        convert([&](std::size_t x, std::size_t y, std::size_t c) {
-            return color ? planes[0].sample(x, y, 0, 0, 0, c) : planes[c].sample(x, y);
-        });
+        return finished ? result : nullptr;
+    }
+
+    for (std::size_t y = 0; y < height; ++y) {
+        if (cancelled()) return {};
+        for (std::size_t x = 0; x < width; ++x) {
+            const auto offset = (y * width + x) * components;
+            for (std::size_t c = 0; c < components; ++c) {
+                double value = color && c == 3 && sourceComponents == 3 ? 255.0
+                    : color ? image.sample(x, y, key.z, key.channel, key.time, c)
+                    : c < std::size_t(result->channels) ? image.sample(x, y, key.z, result->mode == 2 ? c : key.channel, key.time) : 0.0;
+                if (c < std::size_t(color ? 3 : result->channels) && std::isfinite(value)) {
+                    result->minimum = std::min(result->minimum, value);
+                    result->maximum = std::max(result->maximum, value);
+                }
+                if (!std::isfinite(value)) value = 0;
+                if (color) {
+                    const auto displayValue = std::uint8_t(std::clamp(value, 0.0, 255.0));
+                    std::memcpy(destination + offset + c, &displayValue, sizeof(displayValue));
+                } else if (lazyDouble) {
+                    std::memcpy(destination + (offset + c) * sizeof(double), &value, sizeof(double));
+                } else {
+                    const float displayValue = float(std::clamp(value,
+                        -double(std::numeric_limits<float>::max()), double(std::numeric_limits<float>::max())));
+                    std::memcpy(destination + (offset + c) * sizeof(float), &displayValue, sizeof(float));
+                }
+            }
+        }
     }
     if (cancelled()) return {};
-    if (!std::isfinite(result->minimum)) { result->minimum = 0; result->maximum = 1; }
-    if (result->maximum <= result->minimum) {
-        const double expanded = result->minimum + std::max(1.0, std::abs(result->minimum) * 1e-6);
-        result->maximum = expanded;
-        if (!std::isfinite(expanded)) {
-            result->minimum = std::nextafter(result->minimum, -std::numeric_limits<double>::infinity());
-            result->maximum = std::numeric_limits<double>::max();
-        }
-    }
-    if (color) { result->minimum = 0; result->maximum = 255; }
-    if (doublePrecision) {
+    finalizeRange();
+    if (lazyDouble) {
         result->offset = result->minimum;
         result->scale = result->maximum - result->minimum;
         if (!std::isfinite(result->scale)) {
             result->offset = 0;
             result->scale = std::max(std::abs(result->minimum), std::abs(result->maximum));
         }
-        const auto values = image.width() * image.height() * components;
+        const auto values = width * height * components;
         for (std::size_t pixel = 0; pixel < values; ++pixel) {
             double value;
             std::memcpy(&value, result->pixels.constData() + pixel * sizeof(double), sizeof(double));
@@ -367,8 +533,8 @@ std::shared_ptr<const DecodedSlice> decodeSlice(const Image &image, const SliceK
             std::memcpy(result->pixels.data() + pixel * sizeof(float), &encoded, sizeof(float));
         }
         result->pixels.resize(qsizetype(values * sizeof(float)));
+        result->pixels.squeeze();
     }
-    result->pixels.squeeze();
     return result;
 }
 

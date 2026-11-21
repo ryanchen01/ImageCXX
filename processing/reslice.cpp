@@ -1,138 +1,307 @@
 #include "core/memory.h"
 #include <QCoreApplication>
 #include "processing/processing.h"
-#include "processing_detail.h"
 
-#include <itkAffineTransform.h>
-#include <itkLinearInterpolateImageFunction.h>
-#include <itkNearestNeighborInterpolateImageFunction.h>
-#include <itkResampleImageFilter.h>
+#include <itkMultiThreaderBase.h>
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cmath>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <type_traits>
+#include <vector>
 
 namespace imagecxx {
 namespace {
-using ResliceTransform = itk::AffineTransform<double, 3>;
 
-ResliceTransform::Pointer indexTransform(const ResliceGeometry &geometry) {
-    auto transform = ResliceTransform::New();
-    ResliceTransform::MatrixType matrix;
-    ResliceTransform::OutputVectorType offset;
-    matrix.Fill(0);
-    for (std::size_t axis = 0; axis < 3; ++axis) {
-        matrix[geometry.sourceAxes[axis]][axis] = geometry.step[axis];
-        offset[geometry.sourceAxes[axis]] = geometry.start[axis];
+struct AxisSample {
+    std::size_t low = 0;
+    std::size_t high = 0;
+    double weight = 0.0;
+};
+
+inline AxisSample sampleAxis(double start, double step, std::size_t index, std::size_t srcLen, bool avoidInterpolation) {
+    const double pos = start + double(index) * step;
+    if (avoidInterpolation) {
+        const auto idx = static_cast<std::size_t>(
+            std::clamp(std::llround(pos), 0LL, static_cast<long long>(srcLen - 1)));
+        return {idx, idx, 0.0};
     }
-    transform->SetMatrix(matrix);
-    transform->SetOffset(offset);
-    return transform;
+    const double clamped = std::clamp(pos, 0.0, double(srcLen - 1));
+    const auto low = static_cast<std::size_t>(clamped);
+    const double frac = clamped - double(low);
+    if (low >= srcLen - 1 || frac == 0.0)
+        return {std::min(low, srcLen - 1), std::min(low, srcLen - 1), 0.0};
+    return {low, low + 1, frac};
+}
+
+inline double interp1D(double v0, double v1, double w) {
+    return v0 + (v1 - v0) * w;
+}
+
+inline double interp2D(double v00, double v01, double v10, double v11, double wFirst, double wSecond) {
+    const double a = v00 + (v01 - v00) * wFirst;
+    const double b = v10 + (v11 - v10) * wFirst;
+    return a + (b - a) * wSecond;
+}
+
+template <typename T>
+inline T readTyped(const std::byte *at) {
+    T value;
+    std::memcpy(&value, at, sizeof(T));
+    return value;
+}
+
+template <typename T>
+inline void writeTyped(std::byte *at, double value) {
+    if constexpr (std::is_integral_v<T>)
+        value = std::round(std::clamp(value, double(std::numeric_limits<T>::lowest()),
+                                      double(std::numeric_limits<T>::max())));
+    const T converted = static_cast<T>(value);
+    std::memcpy(at, &converted, sizeof(T));
 }
 
 template <typename T>
 Image sampleReslice(const Image &source, const ResliceGeometry &geometry, const ResliceOptions &options,
                     std::stop_token stop, const Progress &progress) {
-    using Input = itk::Image<T, 3>;
-    using Output = itk::Image<double, 3>;
-    using Filter = itk::ResampleImageFilter<Input, Output>;
-    double reported = 0;
-    std::mutex progressMutex;
-    const auto report = [&](double fraction) {
-        const std::lock_guard lock(progressMutex);
-        reported = std::max(reported, std::clamp(fraction, 0.0, 1.0));
-        if (progress) progress(reported);
-    };
-    report(0);
-    if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("Reslice", "Reslice cancelled").toStdString());
+    if (stop.stop_requested())
+        throw std::runtime_error(QCoreApplication::translate("Reslice", "Reslice cancelled").toStdString());
     auto result = Image::allocate(source.pixelType(), geometry.shape, geometry.metadata);
     auto *destination = result.mutableData();
     const auto *buffer = source.data();
+    const auto &srcStrides = source.strides();
     const auto components = componentCount(source.pixelType());
     const auto pixelBytes = bytesPerPixel(source.pixelType());
-    const auto inputPixels = source.width() * source.height() * source.depth();
-    const auto outputPixels = geometry.shape[0] * geometry.shape[1] * geometry.shape[2];
-    const auto volumes = source.pixelCount() / inputPixels;
-    const double units = double(volumes) * double(components);
-    typename Input::SizeType inputSize;
-    for (std::size_t axis = 0; axis < 3; ++axis) inputSize[axis] = source.dimension(axis);
-    typename Output::SizeType outputSize;
-    for (std::size_t axis = 0; axis < 3; ++axis) outputSize[axis] = geometry.shape[axis];
-    const auto transform = indexTransform(geometry);
-    std::vector<std::size_t> index(source.shape().size(), 0);
-    for (std::size_t volume = 0; volume < volumes; ++volume) {
-        auto remainder = volume;
-        for (std::size_t axis = 3; axis < index.size(); ++axis) {
-            index[axis] = remainder % source.dimension(axis);
-            remainder /= source.dimension(axis);
+    const auto outW = geometry.shape[0], outH = geometry.shape[1], outD = geometry.shape[2];
+    const auto inputVolumePixels = source.width() * source.height() * source.depth();
+    const auto volumes = source.pixelCount() / inputVolumePixels;
+    const auto totalRows = volumes * outD * outH;
+    const auto progressStep = std::max<std::size_t>(1, totalRows / 100);
+
+    const std::size_t sa0 = geometry.sourceAxes[0], sa1 = geometry.sourceAxes[1], sa2 = geometry.sourceAxes[2];
+    const std::size_t srcLen0 = source.dimension(sa0), srcLen1 = source.dimension(sa1), srcLen2 = source.dimension(sa2);
+    const std::size_t stride0 = srcStrides[sa0], stride1 = srcStrides[sa1], stride2 = srcStrides[sa2];
+    const bool identityX = !options.rotate90;
+    const bool contiguousCopyX = identityX && stride0 == pixelBytes;
+
+    std::vector<std::size_t> volumeOffsets(volumes, 0);
+    std::vector<std::vector<std::size_t>> volumeIndices;
+    if (buffer) {
+        for (std::size_t volume = 0; volume < volumes; ++volume) {
+            auto remainder = volume;
+            std::size_t offset = 0;
+            for (std::size_t axis = 3; axis < source.shape().size(); ++axis) {
+                offset += (remainder % source.dimension(axis)) * srcStrides[axis];
+                remainder /= source.dimension(axis);
+            }
+            volumeOffsets[volume] = offset;
         }
-        for (std::size_t component = 0; component < components; ++component) {
-            if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("Reslice", "Reslice cancelled").toStdString());
-            const double unit = double(volume * components + component);
-            const T *inputBuffer = buffer && source.contiguous() && components == 1
-                && reinterpret_cast<std::uintptr_t>(buffer) % alignof(T) == 0
-                ? reinterpret_cast<const T *>(buffer) + volume * inputPixels : nullptr;
-            std::vector<T> packed;
-            if (!inputBuffer) {
-                packed.resize(inputPixels);
-                for (std::size_t pixel = 0; pixel < inputPixels; ++pixel) {
-                    if ((pixel & 4095) == 0) {
-                        if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("Reslice", "Reslice cancelled").toStdString());
-                        report((unit + .1 * double(pixel) / double(inputPixels)) / units);
-                    }
-                    index[0] = pixel % source.width(); index[1] = pixel / source.width() % source.height();
-                    index[2] = pixel / (source.width() * source.height());
-                    if (buffer) {
-                        std::size_t offset = component * sizeof(T);
-                        for (std::size_t axis = 0; axis < index.size(); ++axis) offset += index[axis] * source.strides()[axis];
-                        std::memcpy(&packed[pixel], buffer + offset, sizeof(T));
-                    } else packed[pixel] = static_cast<T>(source.value(index, component));
-                }
-                inputBuffer = packed.data();
+    } else {
+        volumeIndices.assign(volumes, std::vector<std::size_t>(source.shape().size(), 0));
+        for (std::size_t volume = 0; volume < volumes; ++volume) {
+            auto remainder = volume;
+            for (std::size_t axis = 3; axis < source.shape().size(); ++axis) {
+                volumeIndices[volume][axis] = remainder % source.dimension(axis);
+                remainder /= source.dimension(axis);
             }
-            auto input = Input::New();
-            input->SetRegions(inputSize);
-            input->GetPixelContainer()->SetImportPointer(const_cast<T *>(inputBuffer), inputPixels, false);
-            auto filter = Filter::New();
-            // A unit voxel basis avoids cancellation from large world origins or
-            // oblique direction inverses. ITK owns the output-to-input affine map;
-            // the corresponding calibrated world transform is retained in metadata.
-            filter->SetInput(input);
-            filter->SetTransform(transform); filter->SetSize(outputSize);
-            if (options.avoidInterpolation)
-                filter->SetInterpolator(itk::NearestNeighborInterpolateImageFunction<Input, double>::New());
-            else filter->SetInterpolator(itk::LinearInterpolateImageFunction<Input, double>::New());
-            auto observer = detail::ProgressObserver::New(); observer->stop = stop;
-            filter->AddObserver(itk::ProgressEvent(), observer);
-            observer->progress = [&](double fraction) {
-                report((unit + .1 + .8 * fraction) / units);
-            };
-            filter->UpdateLargestPossibleRegion();
-            if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("Reslice", "Reslice cancelled").toStdString());
-            const auto *resampled = filter->GetOutput()->GetBufferPointer();
-            for (std::size_t pixel = 0; pixel < outputPixels; ++pixel) {
-                if ((pixel & 4095) == 0) {
-                    if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("Reslice", "Reslice cancelled").toStdString());
-                    report((unit + .9 + .1 * double(pixel) / double(outputPixels)) / units);
-                }
-                double value = resampled[pixel];
-                if constexpr (std::is_integral_v<T>)
-                    value = std::round(std::clamp(value, double(std::numeric_limits<T>::lowest()),
-                                                  double(std::numeric_limits<T>::max())));
-                const T converted = static_cast<T>(value);
-                const auto at = (volume * outputPixels + pixel) * pixelBytes + component * sizeof(T);
-                std::memcpy(destination + at, &converted, sizeof(T));
-            }
-            report((unit + 1) / units);
         }
     }
-    if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("Reslice", "Reslice cancelled").toStdString());
-    report(1);
+
+    std::atomic<std::size_t> completed{0};
+    std::mutex progressMutex;
+    double reported = 0.0;
+    std::exception_ptr error;
+    std::atomic<bool> failed{false};
+    const auto report = [&](double fraction) {
+        if (!progress) return;
+        const std::lock_guard lock(progressMutex);
+        if (failed.load() || stop.stop_requested()) return;
+        reported = std::max(reported, std::clamp(fraction, 0.0, 1.0));
+        progress(reported);
+    };
+    report(0.0);
+
+    auto threader = itk::MultiThreaderBase::New();
+    if (!buffer) {
+        threader->SetMaximumNumberOfThreads(1);
+        threader->SetNumberOfWorkUnits(1);
+    }
+    threader->ParallelizeArray(0, totalRows, [&](std::size_t row) {
+        try {
+            if (failed.load()) return;
+            if (stop.stop_requested())
+                throw std::runtime_error(QCoreApplication::translate("Reslice", "Reslice cancelled").toStdString());
+            const std::size_t y = row % outH;
+            const std::size_t z = (row / outH) % outD;
+            const std::size_t volume = row / (outH * outD);
+            auto *dstRow = destination + row * outW * pixelBytes;
+            const AxisSample sY = options.rotate90
+                ? AxisSample{y, y, 0.0}
+                : sampleAxis(geometry.start[1], geometry.step[1], y, srcLen1, options.avoidInterpolation);
+            const AxisSample sZ = sampleAxis(geometry.start[2], geometry.step[2], z, srcLen2, options.avoidInterpolation);
+
+            if (buffer) {
+                const auto *volBase = buffer + volumeOffsets[volume];
+                if (options.avoidInterpolation) {
+                    const auto *srcBase = volBase + sY.low * stride1 + sZ.low * stride2;
+                    if (contiguousCopyX) {
+                        std::memcpy(dstRow, srcBase, outW * pixelBytes);
+                    } else if (identityX) {
+                        for (std::size_t x = 0; x < outW; ++x)
+                            std::memcpy(dstRow + x * pixelBytes, srcBase + x * stride0, pixelBytes);
+                    } else {
+                        for (std::size_t x = 0; x < outW; ++x) {
+                            const auto sX = sampleAxis(geometry.start[0], geometry.step[0], x, srcLen0, true);
+                            std::memcpy(dstRow + x * pixelBytes, srcBase + sX.low * stride0, pixelBytes);
+                        }
+                    }
+                } else if (identityX) {
+                    // Output axis 0 (X) is the uninterpolated profile axis: weights are row-constant.
+                    // Interpolate along source X/Y (sZ) before source Z (sY) to match ITK's axis order.
+                    const bool interpY = sY.weight > 0.0;
+                    const bool interpZ = sZ.weight > 0.0;
+                    const auto *p00 = volBase + sY.low * stride1 + sZ.low * stride2;
+                    if (!interpY && !interpZ) {
+                        if (contiguousCopyX) {
+                            std::memcpy(dstRow, p00, outW * pixelBytes);
+                        } else {
+                            for (std::size_t x = 0; x < outW; ++x)
+                                std::memcpy(dstRow + x * pixelBytes, p00 + x * stride0, pixelBytes);
+                        }
+                    } else if (!interpY || !interpZ) {
+                        const double w = interpY ? sY.weight : sZ.weight;
+                        const auto *p1 = interpY ? volBase + sY.high * stride1 + sZ.low * stride2
+                                                 : volBase + sY.low * stride1 + sZ.high * stride2;
+                        if (contiguousCopyX && components == 1) {
+                            for (std::size_t x = 0; x < outW; ++x) {
+                                const std::size_t off = x * sizeof(T);
+                                writeTyped<T>(dstRow + off, interp1D(double(readTyped<T>(p00 + off)), double(readTyped<T>(p1 + off)), w));
+                            }
+                        } else {
+                            for (std::size_t x = 0; x < outW; ++x) {
+                                const std::size_t srcOff = x * stride0;
+                                auto *dstPx = dstRow + x * pixelBytes;
+                                for (std::size_t k = 0; k < components; ++k) {
+                                    const std::size_t cOff = k * sizeof(T);
+                                    writeTyped<T>(dstPx + cOff, interp1D(double(readTyped<T>(p00 + srcOff + cOff)),
+                                                                         double(readTyped<T>(p1 + srcOff + cOff)), w));
+                                }
+                            }
+                        }
+                    } else {
+                        const double wy = sY.weight, wz = sZ.weight;
+                        const auto *p10 = volBase + sY.high * stride1 + sZ.low * stride2;
+                        const auto *p01 = volBase + sY.low * stride1 + sZ.high * stride2;
+                        const auto *p11 = volBase + sY.high * stride1 + sZ.high * stride2;
+                        if (contiguousCopyX && components == 1) {
+                            for (std::size_t x = 0; x < outW; ++x) {
+                                const std::size_t off = x * sizeof(T);
+                                writeTyped<T>(dstRow + off, interp2D(double(readTyped<T>(p00 + off)), double(readTyped<T>(p01 + off)),
+                                                                     double(readTyped<T>(p10 + off)), double(readTyped<T>(p11 + off)), wz, wy));
+                            }
+                        } else {
+                            for (std::size_t x = 0; x < outW; ++x) {
+                                const std::size_t srcOff = x * stride0;
+                                auto *dstPx = dstRow + x * pixelBytes;
+                                for (std::size_t k = 0; k < components; ++k) {
+                                    const std::size_t cOff = k * sizeof(T);
+                                    writeTyped<T>(dstPx + cOff, interp2D(double(readTyped<T>(p00 + srcOff + cOff)), double(readTyped<T>(p01 + srcOff + cOff)),
+                                                                         double(readTyped<T>(p10 + srcOff + cOff)), double(readTyped<T>(p11 + srcOff + cOff)), wz, wy));
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // rotate90: output axis 1 (Y) is exact; interpolate source X/Y (sZ) before source Z (sX).
+                    const bool interpZ = sZ.weight > 0.0;
+                    const double wz = sZ.weight;
+                    const auto *base0 = volBase + sY.low * stride1 + sZ.low * stride2;
+                    const auto *base1 = interpZ ? volBase + sY.low * stride1 + sZ.high * stride2 : base0;
+                    for (std::size_t x = 0; x < outW; ++x) {
+                        const auto sX = sampleAxis(geometry.start[0], geometry.step[0], x, srcLen0, false);
+                        const bool interpX = sX.weight > 0.0;
+                        auto *dstPx = dstRow + x * pixelBytes;
+                        const std::size_t offL = sX.low * stride0;
+                        if (!interpX && !interpZ) {
+                            std::memcpy(dstPx, base0 + offL, pixelBytes);
+                        } else if (!interpX) {
+                            for (std::size_t k = 0; k < components; ++k) {
+                                const std::size_t cOff = k * sizeof(T);
+                                writeTyped<T>(dstPx + cOff, interp1D(double(readTyped<T>(base0 + offL + cOff)),
+                                                                     double(readTyped<T>(base1 + offL + cOff)), wz));
+                            }
+                        } else if (!interpZ) {
+                            const double wx = sX.weight;
+                            const std::size_t offH = sX.high * stride0;
+                            for (std::size_t k = 0; k < components; ++k) {
+                                const std::size_t cOff = k * sizeof(T);
+                                writeTyped<T>(dstPx + cOff, interp1D(double(readTyped<T>(base0 + offL + cOff)),
+                                                                     double(readTyped<T>(base0 + offH + cOff)), wx));
+                            }
+                        } else {
+                            const double wx = sX.weight;
+                            const std::size_t offH = sX.high * stride0;
+                            for (std::size_t k = 0; k < components; ++k) {
+                                const std::size_t cOff = k * sizeof(T);
+                                writeTyped<T>(dstPx + cOff, interp2D(double(readTyped<T>(base0 + offL + cOff)), double(readTyped<T>(base1 + offL + cOff)),
+                                                                     double(readTyped<T>(base0 + offH + cOff)), double(readTyped<T>(base1 + offH + cOff)), wz, wx));
+                            }
+                        }
+                    }
+                }
+            } else {
+                auto idx = volumeIndices[volume];
+                for (std::size_t x = 0; x < outW; ++x) {
+                    const AxisSample sX = identityX
+                        ? AxisSample{x, x, 0.0}
+                        : sampleAxis(geometry.start[0], geometry.step[0], x, srcLen0, options.avoidInterpolation);
+                    auto *dstPx = dstRow + x * pixelBytes;
+                    if (options.avoidInterpolation || (sX.weight == 0.0 && sY.weight == 0.0 && sZ.weight == 0.0)) {
+                        idx[sa0] = sX.low; idx[sa1] = sY.low; idx[sa2] = sZ.low;
+                        for (std::size_t k = 0; k < components; ++k)
+                            writeTyped<T>(dstPx + k * sizeof(T), source.value(idx, k));
+                    } else {
+                        const AxisSample &sDepth = identityX ? sY : sX;
+                        const std::size_t depthAxis = identityX ? sa1 : sa0;
+                        idx[identityX ? sa0 : sa1] = identityX ? x : y;
+                        const auto readSweep = [&](std::size_t depthIndex, std::size_t k) {
+                            idx[depthAxis] = depthIndex;
+                            idx[sa2] = sZ.low;
+                            const double v0 = source.value(idx, k);
+                            if (sZ.weight == 0.0) return v0;
+                            idx[sa2] = sZ.high;
+                            return interp1D(v0, source.value(idx, k), sZ.weight);
+                        };
+                        for (std::size_t k = 0; k < components; ++k) {
+                            const double a = readSweep(sDepth.low, k);
+                            const double v = sDepth.weight == 0.0 ? a : interp1D(a, readSweep(sDepth.high, k), sDepth.weight);
+                            writeTyped<T>(dstPx + k * sizeof(T), v);
+                        }
+                    }
+                }
+            }
+
+            const auto done = completed.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (progress && (done % progressStep == 0 || done == totalRows))
+                report(double(done) / double(totalRows));
+        } catch (...) {
+            const std::lock_guard lock(progressMutex);
+            if (!error) error = std::current_exception();
+            failed.store(true);
+        }
+    }, nullptr);
+
+    if (error) std::rethrow_exception(error);
+    if (stop.stop_requested())
+        throw std::runtime_error(QCoreApplication::translate("Reslice", "Reslice cancelled").toStdString());
+    report(1.0);
     return result;
 }
+
 } // namespace
 
 ResliceGeometry resliceGeometry(const Image &image, const ResliceOptions &options) {
@@ -201,23 +370,17 @@ ResliceGeometry resliceGeometry(const Image &image, const ResliceOptions &option
             geometry.metadata.direction[row * 3 + axis] =
                 direction[row * 3 + sourceAxis] * (geometry.step[axis] < 0 ? -1 : 1);
     }
-    // Transform the output origin through the same ITK affine map used by the
-    // resampler, then through the source's calibrated voxel-to-world transform.
-    auto world = ResliceTransform::New();
-    ResliceTransform::MatrixType worldMatrix;
-    ResliceTransform::OutputVectorType worldOffset;
+    std::array<double, 3> startVoxel{};
+    for (std::size_t axis = 0; axis < 3; ++axis)
+        startVoxel[geometry.sourceAxes[axis]] = geometry.start[axis];
     for (std::size_t row = 0; row < 3; ++row) {
-        worldOffset[row] = axes[row].origin;
+        double shift = 0.0;
         for (std::size_t col = 0; col < 3; ++col)
-            worldMatrix[row][col] = direction[row * 3 + col] * axes[col].spacing;
-    }
-    world->SetMatrix(worldMatrix); world->SetOffset(worldOffset);
-    ResliceTransform::InputPointType zero; zero.Fill(0);
-    const auto origin = world->TransformPoint(indexTransform(geometry)->TransformPoint(zero));
-    for (std::size_t row = 0; row < 3; ++row) {
-        if (!std::isfinite(origin[row]))
+            shift += direction[row * 3 + col] * axes[col].spacing * startVoxel[col];
+        const double origin = axes[row].origin + shift;
+        if (!std::isfinite(origin))
             throw std::overflow_error(QCoreApplication::translate("Reslice", "Resliced spatial origin is not finite").toStdString());
-        geometry.metadata.axes[row].origin = origin[row];
+        geometry.metadata.axes[row].origin = origin;
     }
     geometry.byteCount = bytesPerPixel(image.pixelType());
     for (const auto size : geometry.shape) {
@@ -225,15 +388,6 @@ ResliceGeometry resliceGeometry(const Image &image, const ResliceOptions &option
             throw std::overflow_error(QCoreApplication::translate("Reslice", "Resliced image exceeds the addressable buffer size").toStdString());
         geometry.byteCount *= size;
     }
-    // ITK imports contiguous scalar volumes without copying. Other storage and
-    // color components need one packed input component volume. Its resampler
-    // produces a complete double-precision spatial volume before typed export.
-    const auto volumePixels = image.width() * image.height() * image.depth();
-    const auto componentBytes = bytesPerPixel(image.pixelType()) / componentCount(image.pixelType());
-    const auto *buffer = image.data();
-    const bool packInput = componentCount(image.pixelType()) > 1 || !image.contiguous() || !buffer ||
-                           reinterpret_cast<std::uintptr_t>(buffer) % componentBytes != 0;
-    const auto packedBytes = packInput ? volumePixels * componentBytes : 0;
     // Reserve the result window's decoded cache (its current 128 MiB default), plus four plane
     // buffers for decoding/encoding, upload and texture staging. Non-RAM inputs
     // may also fault their entire source into memory while being read.
@@ -249,12 +403,8 @@ ResliceGeometry resliceGeometry(const Image &image, const ResliceOptions &option
     const auto cacheBytes =
         std::min(cachePixels, std::size_t{128} * 1024 * 1024 / decodedBytes) * decodedBytes;
     geometry.requiredMemoryBytes = geometry.byteCount;
-    const auto outputVolumePixels = planePixels * geometry.shape[2];
-    if (outputVolumePixels > std::numeric_limits<std::size_t>::max() / sizeof(double))
-        throw std::overflow_error(QCoreApplication::translate("Reslice", "ITK output volume exceeds the addressable size").toStdString());
     for (const auto extra :
-         {planeBytes * 4, cacheBytes, packedBytes, outputVolumePixels * sizeof(double),
-          image.storageKind() == "RAM" ? std::size_t{0} : image.byteCount()}) {
+         {planeBytes * 4, cacheBytes, image.storageKind() == "RAM" ? std::size_t{0} : image.byteCount()}) {
         if (extra > std::numeric_limits<std::size_t>::max() - geometry.requiredMemoryBytes)
             throw std::overflow_error(QCoreApplication::translate("Reslice", "Reslice memory requirement exceeds the addressable size").toStdString());
         geometry.requiredMemoryBytes += extra;
@@ -292,11 +442,6 @@ Image reslice(const Image &image, const ResliceOptions &options, std::stop_token
         throw std::invalid_argument(QCoreApplication::translate("Reslice", "Unsupported reslice pixel type").toStdString());
     } catch (const std::bad_alloc &) {
         throw std::runtime_error(QCoreApplication::translate("Reslice", "Memory allocation failed while reslicing. The source image is unchanged.").toStdString());
-    } catch (const itk::MemoryAllocationError &) {
-        throw std::runtime_error(QCoreApplication::translate("Reslice", "ITK could not allocate reslice buffers. The source image is unchanged.").toStdString());
-    } catch (const itk::ExceptionObject &) {
-        if (stop.stop_requested()) throw std::runtime_error(QCoreApplication::translate("Reslice", "Reslice cancelled").toStdString());
-        throw;
     }
 }
 } // namespace imagecxx
