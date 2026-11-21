@@ -97,6 +97,7 @@ private:
     QString repeatCommand_;
     QVariantMap repeatParameters_;
     void importRaw(const QString &path);
+    void registerAnalysisCommands();
     void pasteImage(bool systemImage, bool newImage);
     void openFiles(const QStringList &paths);
     void setActiveDocument(imagecxx::DocumentWidget *document);

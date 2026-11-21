@@ -1505,3 +1505,10 @@ TEST(ImageIo, DefaultExportNormalizesUnicodeMicrometerAndMicrosecondUnits)
         }
     }
 }
+
+TEST(ImageIo, FormatDicomTagResolvesKnownUnknownAndNonDicomKeys)
+{
+    EXPECT_EQ(formatDicomTag(QStringLiteral("DICOM.0010,0010")), QStringLiteral("(0010,0010) Patient Name"));
+    EXPECT_EQ(formatDicomTag(QStringLiteral("DICOM.0009,1001")), QStringLiteral("(0009,1001)"));
+    EXPECT_TRUE(formatDicomTag(QStringLiteral("nifti_type")).isEmpty());
+}

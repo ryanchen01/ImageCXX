@@ -92,4 +92,9 @@ LineProfile gelLaneProfile(const Image &slice, const Roi &lane, bool horizontal 
 double gelPeakArea(const LineProfile &profile, std::size_t first, std::size_t last);
 Mask createMask(const Image &slice, const Roi &roi, std::stop_token stop = {});
 
+enum class PixelEdit { Clear, Fill, Draw, Invert, Smooth };
+Image editPixels(const Image &image, PixelEdit operation, const std::optional<Roi> &roi,
+                 std::size_t z, std::size_t channel, std::size_t time, std::uint32_t color = 0xffffffff,
+                 std::stop_token stop = {}, Progress progress = {});
+
 } // namespace imagecxx

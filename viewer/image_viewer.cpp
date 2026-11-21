@@ -1,10 +1,9 @@
 #include "viewer/image_viewer.h"
+#include "viewer/viewer_internal.h"
 
 #include <QCoreApplication>
 #include <QContextMenuEvent>
-#include <QFile>
 #include <QKeyEvent>
-#include <QMatrix4x4>
 #include <QMouseEvent>
 #include <QNativeGestureEvent>
 #include <QLineF>
@@ -12,17 +11,13 @@
 #include <QPainterPath>
 #include <QPainterPathStroker>
 #include <numbers>
-#include <QRhiWidget>
 #include <QResizeEvent>
 #include <QWheelEvent>
-#include <rhi/qrhi.h>
-#include <rhi/qshader.h>
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
-#include <cstring>
 #include <deque>
 #include <functional>
 #include <limits>
@@ -32,6 +27,13 @@
 #include <thread>
 
 namespace imagecxx {
+using detail::CanvasLayer;
+using detail::DecodedSlice;
+using detail::SliceCanvas;
+using detail::SliceKey;
+using detail::decodeSlice;
+using detail::renderSliceImage;
+
 namespace {
 
 std::vector<QPointF> roiHandles(const Roi &roi)
@@ -83,282 +85,6 @@ QPointF constrainedPoint(QPointF anchor, QPointF point, RoiType type, QSizeF ima
     else if (delta.y() < 0) scale = std::min(scale, -anchor.y() / delta.y());
     return anchor + delta * scale;
 }
-
-struct SliceKey {
-    std::uint64_t image = 0;
-    std::size_t z = 0, channel = 0, time = 0;
-    bool composite = false;
-    bool operator==(const SliceKey &) const = default;
-};
-
-struct DecodedSlice {
-    SliceKey key;
-    QSize size;
-    QByteArray pixels;
-    int mode = 0;
-    int channels = 1;
-    double minimum = 0, maximum = 1;
-    // Float64 values use an affine encoding before upload to the float texture.
-    double offset = 0, scale = 1;
-};
-
-QShader loadShader(const QString &path)
-{
-    QFile file(path);
-    return file.open(QIODevice::ReadOnly) ? QShader::fromSerialized(file.readAll()) : QShader{};
-}
-
-struct CanvasLayer {
-    std::shared_ptr<const DecodedSlice> frame;
-    QTransform transform;
-    ImageMetadata metadata;
-    double minimum = 0, maximum = 1, gamma = 1, opacity = 1;
-    int lut = 0;
-    bool inverted = false, linear = false;
-    QByteArray mask;
-    QSize maskSize;
-};
-
-// This is the only class that knows about the private Qt RHI API.
-class SliceCanvas final : public QRhiWidget {
-public:
-    explicit SliceCanvas(QWidget *parent) : QRhiWidget(parent)
-    {
-        setAttribute(Qt::WA_TransparentForMouseEvents);
-        connect(this, &QRhiWidget::renderFailed, this, [this] {
-            reportError(QCoreApplication::translate("ImageViewer", "The graphics backend could not initialize the image viewer."));
-        });
-    }
-    ~SliceCanvas() override { releaseResources(); }
-    std::shared_ptr<const DecodedSlice> frame;
-    QRectF imageRect;
-    ImageMetadata metadata;
-    double minimum = 0, maximum = 1, gamma = 1;
-    int lut = 0;
-    bool inverted = false, linear = false, overlayMode = false;
-    QByteArray mask;
-    QSize maskSize;
-    QList<CanvasLayer> layers;
-    std::size_t gpuBudget = 128 * 1024 * 1024;
-    std::size_t gpuBytes = 0;
-    std::function<void(const QString &)> failed;
-
-protected:
-    void initialize(QRhiCommandBuffer *) override
-    {
-        releaseResources();
-        nearest.reset(rhi()->newSampler(QRhiSampler::Nearest, QRhiSampler::Nearest,
-                                      QRhiSampler::None, QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge));
-        smooth.reset(rhi()->newSampler(QRhiSampler::Linear, QRhiSampler::Linear,
-                                     QRhiSampler::None, QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge));
-        if (!nearest->create() || !smooth->create()) {
-            reportError(QCoreApplication::translate("ImageViewer", "Could not create GPU display resources."));
-            releaseResources();
-        }
-    }
-
-    void render(QRhiCommandBuffer *cb) override
-    {
-        QList<CanvasLayer> active = layers;
-        if (!overlayMode && frame) {
-            active = {{frame, QTransform(imageRect.width(), 0, 0, imageRect.height(), imageRect.x(), imageRect.y()),
-                metadata, minimum, maximum, gamma, 1, lut, inverted, linear, mask, maskSize}};
-        }
-        const QColor background = overlayMode ? QColor(Qt::black) : QColor("#F7F4EE");
-        std::size_t bytes = 0;
-        const auto sizeLimit = rhi()->resourceLimit(QRhi::TextureSizeMax);
-        for (const auto &layer : active) {
-            const auto textureBytes = std::size_t(layer.frame->pixels.size());
-            const auto maskBytes = layer.mask.isEmpty() ? std::size_t(1) : std::size_t(layer.mask.size());
-            if (textureBytes > gpuBudget - bytes || maskBytes > gpuBudget - bytes - textureBytes
-                || layer.frame->size.width() > sizeLimit || layer.frame->size.height() > sizeLimit) {
-                pipeline.reset();
-                resources.clear();
-                gpuBytes = 0;
-                reportError(QCoreApplication::translate("ImageViewer", "This view exceeds the GPU texture or memory limit."));
-                cb->beginPass(renderTarget(), background, {1.0f, 0});
-                cb->endPass();
-                return;
-            }
-            bytes += textureBytes + maskBytes;
-        }
-        gpuBytes = bytes;
-        if (!nearest || !smooth || active.isEmpty()) {
-            pipeline.reset();
-            resources.clear();
-            cb->beginPass(renderTarget(), background, {1.0f, 0});
-            cb->endPass();
-            return;
-        }
-        if (resources.size() != std::size_t(active.size())) {
-            pipeline.reset();
-            resources.resize(std::size_t(active.size()));
-        }
-        auto *updates = rhi()->nextResourceUpdateBatch();
-        for (qsizetype index = 0; index < active.size(); ++index) {
-            const auto &layer = active[index];
-            const auto &decoded = layer.frame;
-            auto &resource = resources[std::size_t(index)];
-            if (!resource) resource = std::make_unique<Resources>();
-            auto &slot = *resource;
-            if (!slot.uniforms) {
-                slot.uniforms.reset(rhi()->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 176));
-                if (!slot.uniforms->create()) {
-                    updates->release();
-                    reportError(QCoreApplication::translate("ImageViewer", "Could not create GPU display resources."));
-                    return;
-                }
-            }
-            const auto format = decoded->mode == 1 ? QRhiTexture::RGBA8
-                : decoded->mode == 2 ? QRhiTexture::RGBA32F : QRhiTexture::R32F;
-            bool bindingsChanged = !slot.bindings || slot.boundLinear != layer.linear;
-            if (!slot.texture || slot.texture->pixelSize() != decoded->size || slot.texture->format() != format) {
-                pipeline.reset();
-                slot.bindings.reset();
-                slot.texture.reset(rhi()->newTexture(format, decoded->size));
-                if (!rhi()->isTextureFormatSupported(format) || !slot.texture->create()) {
-                    updates->release();
-                    reportError(QCoreApplication::translate("ImageViewer", "The graphics backend does not support this pixel texture format."));
-                    return;
-                }
-                slot.uploaded.reset();
-                bindingsChanged = true;
-            }
-            const QSize requestedMaskSize = layer.mask.isEmpty() ? QSize(1, 1) : layer.maskSize;
-            if (!slot.maskTexture || slot.maskTexture->pixelSize() != requestedMaskSize) {
-                pipeline.reset();
-                slot.bindings.reset();
-                slot.maskTexture.reset(rhi()->newTexture(QRhiTexture::R8, requestedMaskSize));
-                if (!slot.maskTexture->create()) {
-                    updates->release();
-                    reportError(QCoreApplication::translate("ImageViewer", "Could not create the mask texture."));
-                    return;
-                }
-                slot.uploadedMask.clear();
-                bindingsChanged = true;
-            }
-            if (slot.uploaded.lock() != decoded) {
-                QRhiTextureSubresourceUploadDescription data(decoded->pixels);
-                data.setSourceSize(decoded->size);
-                updates->uploadTexture(slot.texture.get(), QRhiTextureUploadDescription({{0, 0, data}}));
-                slot.uploaded = decoded;
-            }
-            const QByteArray maskData = layer.mask.isEmpty() ? QByteArray(1, '\0') : layer.mask;
-            if (slot.uploadedMask != maskData) {
-                QRhiTextureSubresourceUploadDescription data(maskData);
-                data.setSourceSize(requestedMaskSize);
-                updates->uploadTexture(slot.maskTexture.get(), QRhiTextureUploadDescription({{0, 0, data}}));
-                slot.uploadedMask = maskData;
-            }
-            if (bindingsChanged) {
-                pipeline.reset();
-                slot.bindings.reset(rhi()->newShaderResourceBindings());
-                slot.bindings->setBindings({
-                    QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::VertexStage
-                                                               | QRhiShaderResourceBinding::FragmentStage, slot.uniforms.get()),
-                    QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage,
-                        slot.texture.get(), layer.linear ? smooth.get() : nearest.get()),
-                    QRhiShaderResourceBinding::sampledTexture(2, QRhiShaderResourceBinding::FragmentStage,
-                        slot.maskTexture.get(), nearest.get())});
-                if (!slot.bindings->create()) {
-                    updates->release();
-                    reportError(QCoreApplication::translate("ImageViewer", "Could not bind the image texture."));
-                    return;
-                }
-                slot.boundLinear = layer.linear;
-            }
-            std::array<float, 44> parameters{};
-            QMatrix4x4 matrix = rhi()->clipSpaceCorrMatrix();
-            matrix.ortho(0.0f, float(width()), float(height()), 0.0f, -1.0f, 1.0f);
-            matrix *= QMatrix4x4(layer.transform);
-            std::copy_n(matrix.constData(), 16, parameters.begin());
-            const double relativeMinimum = layer.minimum - decoded->offset;
-            parameters[16] = float(std::isfinite(relativeMinimum) ? relativeMinimum / decoded->scale
-                : layer.minimum / decoded->scale - decoded->offset / decoded->scale);
-            const double range = layer.maximum - layer.minimum;
-            parameters[17] = float(std::isfinite(range)
-                ? decoded->scale / std::max(range, std::numeric_limits<double>::denorm_min())
-                : (decoded->scale / 2) / (layer.maximum / 2 - layer.minimum / 2));
-            parameters[18] = float(1.0 / layer.gamma);
-            parameters[19] = layer.inverted ? 1.0f : 0.0f;
-            parameters[20] = float(decoded->mode);
-            parameters[21] = float(layer.lut);
-            parameters[22] = float(decoded->channels);
-            parameters[23] = layer.mask.isEmpty() ? 0.0f : 1.0f;
-            constexpr std::array<QRgb, 4> defaults{0xffff4545, 0xff55e887, 0xff529bff, 0xffeeeeee};
-            for (std::size_t c = 0; c < 4; ++c) {
-                const QColor color = QColor::fromRgba(c < layer.metadata.channels.size() ? layer.metadata.channels[c].color : defaults[c]);
-                parameters[24 + c * 4] = float(color.redF());
-                parameters[25 + c * 4] = float(color.greenF());
-                parameters[26 + c * 4] = float(color.blueF());
-            }
-            parameters[40] = float(layer.opacity);
-            updates->updateDynamicBuffer(slot.uniforms.get(), 0, sizeof(parameters), parameters.data());
-        }
-        if (!pipeline) {
-            pipeline.reset(rhi()->newGraphicsPipeline());
-            pipeline->setTopology(QRhiGraphicsPipeline::TriangleStrip);
-            pipeline->setShaderStages({
-                {QRhiShaderStage::Vertex, loadShader(QStringLiteral(":/imagecxx/slice.vert.qsb"))},
-                {QRhiShaderStage::Fragment, loadShader(QStringLiteral(":/imagecxx/slice.frag.qsb"))}});
-            QRhiGraphicsPipeline::TargetBlend blend;
-            blend.enable = true;
-            blend.srcColor = QRhiGraphicsPipeline::SrcAlpha;
-            blend.dstColor = QRhiGraphicsPipeline::OneMinusSrcAlpha;
-            blend.srcAlpha = QRhiGraphicsPipeline::One;
-            blend.dstAlpha = QRhiGraphicsPipeline::OneMinusSrcAlpha;
-            pipeline->setTargetBlends({blend});
-            pipeline->setShaderResourceBindings(resources.front()->bindings.get());
-            pipeline->setRenderPassDescriptor(renderTarget()->renderPassDescriptor());
-            pipeline->setSampleCount(sampleCount());
-            if (!pipeline->create()) {
-                pipeline.reset();
-                updates->release();
-                reportError(QCoreApplication::translate("ImageViewer", "Could not create the image shader pipeline."));
-                return;
-            }
-        }
-        cb->beginPass(renderTarget(), background, {1.0f, 0}, updates);
-        cb->setGraphicsPipeline(pipeline.get());
-        const QSize targetSize = renderTarget()->pixelSize();
-        cb->setViewport({0, 0, float(targetSize.width()), float(targetSize.height())});
-        for (const auto &resource : resources) {
-            cb->setShaderResources(resource->bindings.get());
-            cb->draw(4);
-        }
-        cb->endPass();
-    }
-
-    void releaseResources() override
-    {
-        pipeline.reset();
-        resources.clear();
-        nearest.reset();
-        smooth.reset();
-        gpuBytes = 0;
-    }
-
-private:
-    struct Resources {
-        std::unique_ptr<QRhiBuffer> uniforms;
-        std::unique_ptr<QRhiTexture> texture, maskTexture;
-        std::unique_ptr<QRhiShaderResourceBindings> bindings;
-        std::weak_ptr<const DecodedSlice> uploaded;
-        QByteArray uploadedMask;
-        bool boundLinear = false;
-    };
-    void reportError(const QString &message)
-    {
-        if (lastError != message && failed) {
-            lastError = message;
-            failed(message);
-        }
-    }
-    QString lastError;
-    std::vector<std::unique_ptr<Resources>> resources;
-    std::unique_ptr<QRhiSampler> nearest, smooth;
-    std::unique_ptr<QRhiGraphicsPipeline> pipeline;
-};
 
 class ViewerOverlay final : public QWidget {
 public:
@@ -469,123 +195,15 @@ ImageViewer::ImageViewer(QWidget *parent) : QWidget(parent), d(std::make_unique<
                 }
                 try {
                     if (!decoded) {
-                        auto result = std::make_shared<DecodedSlice>();
-                        result->key = key;
-                        const Image &image = request.image;
-                        const auto sourceComponents = componentCount(image.pixelType());
-                        const bool color = sourceComponents > 1;
-                        result->mode = color ? 1 : key.composite ? 2 : 0;
-                        result->channels = result->mode == 2 ? int(std::min<std::size_t>(4, image.channels())) : 1;
-                        const std::size_t components = result->mode == 0 ? 1 : 4;
-                        const bool doublePrecision = image.pixelType() == PixelType::Float64;
-                        const std::size_t bytesPerSample = color ? 1 : doublePrecision ? sizeof(double) : sizeof(float);
-                        const std::size_t perPixel = components * bytesPerSample;
                         std::size_t budget;
                         {
                             std::lock_guard lock(d->mutex);
                             budget = d->decodedBudget;
                         }
-                        if (image.width() > std::size_t(std::numeric_limits<int>::max())
-                            || image.height() > std::size_t(std::numeric_limits<int>::max())
-                            || image.width() > budget / perPixel / image.height())
-                            throw std::runtime_error(QCoreApplication::translate("ImageViewer", "The decoded slice exceeds the viewer cache memory limit.").toStdString());
-                        result->size = QSize(int(image.width()), int(image.height()));
-                        const auto byteCount = image.width() * image.height() * perPixel;
-                        result->pixels = QByteArray(qsizetype(byteCount), Qt::Uninitialized);
-                        result->minimum = std::numeric_limits<double>::infinity();
-                        result->maximum = -std::numeric_limits<double>::infinity();
-                        std::vector<Image> planes;
-                        for (int c = 0; c < result->channels; ++c)
-                            planes.push_back(image.slice(key.z, result->mode == 2 ? std::size_t(c) : key.channel, key.time));
-                        const auto width = image.width(), height = image.height();
-                        auto *destination = result->pixels.data();
-                        const auto convert = [&](auto sample) {
-                            for (std::size_t y = 0; y < height; ++y) {
-                                if (stop.stop_requested() || request.serial != d->serial.load()) break;
-                                for (std::size_t x = 0; x < width; ++x) {
-                                    const auto offset = (y * width + x) * components;
-                                    for (std::size_t c = 0; c < components; ++c) {
-                                        double value = color && c == 3 && sourceComponents == 3 ? 255.0
-                                            : color || c < std::size_t(result->channels) ? sample(x, y, c) : 0.0;
-                                        if (c < std::size_t(color ? 3 : result->channels) && std::isfinite(value)) {
-                                            result->minimum = std::min(result->minimum, value);
-                                            result->maximum = std::max(result->maximum, value);
-                                        }
-                                        if (!std::isfinite(value)) value = 0;
-                                        if (color) {
-                                            const auto displayValue = std::uint8_t(std::clamp(value, 0.0, 255.0));
-                                            std::memcpy(destination + offset + c, &displayValue, sizeof(displayValue));
-                                        } else if (doublePrecision) {
-                                            std::memcpy(destination + (offset + c) * sizeof(double), &value, sizeof(double));
-                                        } else {
-                                            const float displayValue = float(std::clamp(value,
-                                                -double(std::numeric_limits<float>::max()), double(std::numeric_limits<float>::max())));
-                                            std::memcpy(destination + (offset + c) * sizeof(float), &displayValue, sizeof(float));
-                                        }
-                                    }
-                                }
-                            }
-                        };
-                        std::array<const std::byte *, 4> buffers{};
-                        bool direct = true;
-                        for (std::size_t c = 0; c < planes.size(); ++c) {
-                            if (!planes[c].contiguous() || !(buffers[c] = planes[c].data())) {
-                                direct = false;
-                                break;
-                            }
-                        }
-                        if (direct) {
-                            const auto convertBuffer = [&]<typename T>() {
-                                convert([&](std::size_t x, std::size_t y, std::size_t c) {
-                                    const auto offset = (y * width + x) * sourceComponents + (color ? c : 0);
-                                    T value;
-                                    // Mapped buffers and image views may start at unaligned addresses.
-                                    std::memcpy(&value, buffers[color ? 0 : c] + offset * sizeof(T), sizeof(T));
-                                    return double(value);
-                                });
-                            };
-                            switch (image.pixelType()) {
-                            case PixelType::UInt8: case PixelType::RGB8: case PixelType::RGBA8:
-                                convertBuffer.template operator()<std::uint8_t>(); break;
-                            case PixelType::UInt16: convertBuffer.template operator()<std::uint16_t>(); break;
-                            case PixelType::Int16: convertBuffer.template operator()<std::int16_t>(); break;
-                            case PixelType::Float32: convertBuffer.template operator()<float>(); break;
-                            case PixelType::Float64: convertBuffer.template operator()<double>(); break;
-                            }
-                        } else {
-                            convert([&](std::size_t x, std::size_t y, std::size_t c) {
-                                return color ? planes[0].sample(x, y, 0, 0, 0, c) : planes[c].sample(x, y);
-                            });
-                        }
-                        if (stop.stop_requested() || request.serial != d->serial.load()) break;
-                        if (!std::isfinite(result->minimum)) { result->minimum = 0; result->maximum = 1; }
-                        if (result->maximum <= result->minimum) {
-                            const double expanded = result->minimum + std::max(1.0, std::abs(result->minimum) * 1e-6);
-                            result->maximum = expanded;
-                            if (!std::isfinite(expanded)) {
-                                result->minimum = std::nextafter(result->minimum, -std::numeric_limits<double>::infinity());
-                                result->maximum = std::numeric_limits<double>::max();
-                            }
-                        }
-                        if (color) { result->minimum = 0; result->maximum = 255; }
-                        if (doublePrecision) {
-                            result->offset = result->minimum;
-                            result->scale = result->maximum - result->minimum;
-                            if (!std::isfinite(result->scale)) {
-                                result->offset = 0;
-                                result->scale = std::max(std::abs(result->minimum), std::abs(result->maximum));
-                            }
-                            const auto values = image.width() * image.height() * components;
-                            for (std::size_t pixel = 0; pixel < values; ++pixel) {
-                                double value;
-                                std::memcpy(&value, result->pixels.constData() + pixel * sizeof(double), sizeof(double));
-                                const float encoded = float((value - result->offset) / result->scale);
-                                std::memcpy(result->pixels.data() + pixel * sizeof(float), &encoded, sizeof(float));
-                            }
-                            result->pixels.resize(qsizetype(values * sizeof(float)));
-                        }
-                        result->pixels.squeeze();
-                        decoded = result;
+                        decoded = decodeSlice(request.image, key, budget, [&stop, &request, this] {
+                            return stop.stop_requested() || request.serial != d->serial.load();
+                        });
+                        if (!decoded) break;
                         {
                             std::lock_guard lock(d->mutex);
                             const auto retainedBytes = std::size_t(decoded->pixels.capacity());
@@ -916,54 +534,12 @@ bool ImageViewer::composite() const { return d->composite; }
 
 QImage ImageViewer::renderedImage()
 {
-    if (d->image.empty()) return {};
-    constexpr std::size_t budget = 512 * 1024 * 1024;
-    if (d->image.width() > std::size_t(std::numeric_limits<int>::max())
-        || d->image.height() > std::size_t(std::numeric_limits<int>::max())
-        || d->image.width() > budget / 4 / d->image.height())
-        throw std::length_error(tr("The print image exceeds the 512 MiB display budget.").toStdString());
-    QImage result(int(d->image.width()), int(d->image.height()), QImage::Format_ARGB32);
-    if (result.isNull()) throw std::runtime_error(tr("Cannot allocate print image.").toStdString());
-    const auto components = componentCount(d->image.pixelType());
-    const auto normalize = [this](double raw) {
-        const double minimum = windowMinimum(), maximum = windowMaximum();
-        const double range = maximum - minimum;
-        double value = std::isfinite(raw) ? (std::isfinite(range) ? (raw - minimum) / range
-            : (raw / 2 - minimum / 2) / (maximum / 2 - minimum / 2)) : 0;
-        value = std::pow(std::clamp(std::isfinite(value) ? value : 0., 0., 1.), 1. / gamma());
-        return isInverted() ? 1. - value : value;
-    };
-    constexpr std::array<QRgb, 4> defaults{0xffff4545, 0xff55e887, 0xff529bff, 0xffeeeeee};
-    constexpr std::array<std::array<double, 3>, 6> palette{{{.267,.005,.329}, {.254,.265,.530},
-        {.164,.471,.558}, {.135,.659,.518}, {.478,.821,.318}, {.993,.906,.144}}};
-    for (int y = 0; y < result.height(); ++y) for (int x = 0; x < result.width(); ++x) {
-        std::array<double, 3> color{};
-        double alpha = 1;
-        if (components >= 3) {
-            for (std::size_t c = 0; c < 3; ++c) color[c] = normalize(d->image.sample(x, y, d->z, d->channel, d->time, c));
-            if (components == 4) alpha = std::clamp(d->image.sample(x, y, d->z, d->channel, d->time, 3) / 255., 0., 1.);
-        } else if (d->composite && d->image.channels() > 1) {
-            for (std::size_t c = 0; c < std::min<std::size_t>(4, d->image.channels()); ++c) {
-                const double value = normalize(d->image.sample(x, y, d->z, c, d->time));
-                const auto tint = QColor::fromRgba(c < d->image.metadata().channels.size() ? d->image.metadata().channels[c].color : defaults[c]);
-                color[0] += value * tint.redF(); color[1] += value * tint.greenF(); color[2] += value * tint.blueF();
-            }
-        } else {
-            const double value = normalize(d->image.sample(x, y, d->z, d->channel, d->time));
-            if (d->canvas->lut == 2) {
-                const double position = value * 5; const auto index = std::min<std::size_t>(std::size_t(position), 4);
-                for (std::size_t c = 0; c < 3; ++c) color[c] = std::lerp(palette[index][c], palette[index + 1][c], position - index);
-            } else if (d->canvas->lut == 1) color = {3 * value, 3 * value - 1, 3 * value - 2};
-            else color.fill(value);
-        }
-        for (auto &value : color) value = std::clamp(value, 0., 1.);
-        if (!d->mask.empty() && d->mask.sample(x, y) != 0) {
-            constexpr std::array<double, 3> tint{.95, .25, .34};
-            for (std::size_t c = 0; c < 3; ++c) color[c] = std::lerp(color[c], tint[c], .36);
-        }
-        result.setPixelColor(x, y, QColor::fromRgbF(color[0], color[1], color[2], alpha));
-    }
-    QPainter painter(&result); painter.setRenderHint(QPainter::Antialiasing); painter.setFont(font());
+    QImage result = renderSliceImage(d->image, d->z, d->channel, d->time, windowMinimum(), windowMaximum(),
+        gamma(), d->canvas->lut, isInverted(), d->composite, d->mask);
+    if (result.isNull()) return {};
+    QPainter painter(&result);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setFont(font());
     paintOverlays(painter, true);
     return result;
 }

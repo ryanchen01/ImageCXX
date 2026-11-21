@@ -45,6 +45,7 @@ void writeScientific(const Image &image, const QString &path,
 
 QString imageFileFilter();
 QString imageSaveFilter();
+QString formatDicomTag(const QString &key);
 
 struct ImageImport {
     QStringList paths;
