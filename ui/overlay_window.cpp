@@ -152,7 +152,11 @@ void OverlayWindow::connectViewer(ImageViewer *view, int index)
         position[axes[1]] = coordinate(point.y(), axes[1]);
         setPosition(position[0], position[1], position[2], viewer->channel(), viewer->time());
     });
-    connect(view, &ImageViewer::viewTransformChanged, this, [this, view, index] { synchronizeTransform(view, index); });
+    connect(view, &ImageViewer::viewTransformChanged, this, [this, view, index] {
+        if (synchronizing_ || !document_) return;
+        QScopedValueRollback guard(synchronizing_, true);
+        synchronizeOrthogonalTransform(document_->image, orthogonal_, views_, view, index, center_);
+    });
     connect(view, &ImageViewer::overlaysChanged, this, [this, view](bool crosshair, bool scaleBar) {
         if (synchronizing_) return;
         QScopedValueRollback guard(synchronizing_, true);
@@ -167,13 +171,6 @@ void OverlayWindow::updateNavigation(std::size_t channel, std::size_t time)
 {
     if (!document_) return;
     updateSliceControls(document_->image, orthogonal_, views_, navigation_, spatial_, channel, time, baseTitle());
-}
-
-void OverlayWindow::synchronizeTransform(ImageViewer *source, int index)
-{
-    if (synchronizing_ || !document_) return;
-    QScopedValueRollback guard(synchronizing_, true);
-    synchronizeOrthogonalTransform(document_->image, orthogonal_, views_, source, index, center_);
 }
 
 void OverlayWindow::setOrthogonalViews(bool enabled)
@@ -254,28 +251,6 @@ void OverlayWindow::setPosition(std::size_t x, std::size_t y, std::size_t z, std
         document_->setPosition(spatial_[0], spatial_[1], spatial_[2], clampedC, clampedT);
     }
     updateLayers();
-}
-
-ImageViewer *OverlayWindow::layerPlaneViewer(DocumentWidget *document, std::array<std::size_t, 3> axes)
-{
-    const int planeIndex = axes == std::array<std::size_t, 3>{0, 2, 1} ? 0 : 1;
-    auto &entry = layerPlanes_[document];
-    const bool updated = entry.revision != document->revision;
-    if (updated) {
-        entry.revision = document->revision;
-        for (int i = 0; i < 2; ++i) if (entry.planes[i])
-            entry.planes[i]->setImage(document->image.permutedSpatialAxes(orthogonalAxes(true, i + 1)), true);
-    }
-    if (!entry.planes[planeIndex]) {
-        entry.planes[planeIndex] = std::make_unique<ImageViewer>();
-        entry.planes[planeIndex]->setImage(document->image.permutedSpatialAxes(axes));
-        if (!entry.displayConnection) {
-            entry.displayConnection = connect(document->viewer, &ImageViewer::displaySettingsChanged, this,
-                [this, document] { syncLayerDisplay(document); });
-        }
-    }
-    if (updated || entry.planes[planeIndex]) syncLayerDisplay(document);
-    return entry.planes[planeIndex].get();
 }
 
 void OverlayWindow::syncLayerDisplay(DocumentWidget *document)
@@ -542,7 +517,24 @@ void OverlayWindow::updateLayers()
                 (*origin)[refAxes[1]] + .5 - .5 * (xy + yy));
             ImageViewer *layerViewer = document->viewer;
             if (docSliceAxis != 2) {
-                layerViewer = layerPlaneViewer(document, docAxes);
+                const int planeIndex = docAxes == std::array<std::size_t, 3>{0, 2, 1} ? 0 : 1;
+                auto &planeEntry = layerPlanes_[document];
+                const bool updated = planeEntry.revision != document->revision;
+                if (updated) {
+                    planeEntry.revision = document->revision;
+                    for (int p = 0; p < 2; ++p) if (planeEntry.planes[p])
+                        planeEntry.planes[p]->setImage(document->image.permutedSpatialAxes(orthogonalAxes(true, p + 1)), true);
+                }
+                if (!planeEntry.planes[planeIndex]) {
+                    planeEntry.planes[planeIndex] = std::make_unique<ImageViewer>();
+                    planeEntry.planes[planeIndex]->setImage(document->image.permutedSpatialAxes(docAxes));
+                    if (!planeEntry.displayConnection) {
+                        planeEntry.displayConnection = connect(document->viewer, &ImageViewer::displaySettingsChanged, this,
+                            [this, document] { syncLayerDisplay(document); });
+                    }
+                }
+                if (updated || planeEntry.planes[planeIndex]) syncLayerDisplay(document);
+                layerViewer = planeEntry.planes[planeIndex].get();
                 layerViewer->setSlice(sliceIndex, viewer->channel(), viewer->time());
                 usedPlanes.insert(layerViewer);
             }

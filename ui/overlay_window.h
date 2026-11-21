@@ -60,8 +60,6 @@ private:
     void addNavigationControls(ImageWindow *window, int index);
     void connectViewer(ImageViewer *view, int index);
     void updateNavigation(std::size_t channel, std::size_t time);
-    void synchronizeTransform(ImageViewer *source, int index);
-    ImageViewer *layerPlaneViewer(DocumentWidget *document, std::array<std::size_t, 3> axes);
     void syncLayerDisplay(DocumentWidget *document);
     void refreshEditor();
     void removeDocument(DocumentWidget *document);
