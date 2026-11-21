@@ -1412,47 +1412,89 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
         showPanel("rois");
     }});
     commands_.add({"view.fit", tr("Fit to window"), QT_TRANSLATE_NOOP("CommandCategories", "View"), QKeySequence("Ctrl+0"), true, {}, [this](const QVariantMap &) {
-        if (auto *doc = activeDocument()) doc->viewer->fitToWindow();
+        if (auto *overlay = activeOverlay()) overlay->viewer->fitToWindow();
+        else if (auto *doc = activeDocument()) doc->viewer->fitToWindow();
     }});
-    const QList<QPair<QString, QString>> viewModes{{"view.single", tr("Single view")},
-        {"view.linked", tr("Linked view")}, {"view.orthogonal", tr("Orthogonal views")}};
-    for (int index = 0; index < viewModes.size(); ++index) {
-        commands_.add({viewModes[index].first, viewModes[index].second, QT_TRANSLATE_NOOP("CommandCategories", "View"), {}, true, {}, [this, index](const QVariantMap &) {
-            QPointer<DocumentWidget> doc = activeDocument();
-            if (!doc) return;
-            if (index != int(DocumentWidget::ViewMode::Linked)) {
-                doc->setViewMode(DocumentWidget::ViewMode(index));
-                return;
-            }
-            QList<QPointer<DocumentWidget>> candidates;
-            QDialog picker(this);
-            picker.setWindowTitle(tr("Linked view"));
-            auto *layout = new QVBoxLayout(&picker);
-            auto *images = new QListWidget(&picker);
-            images->setObjectName("linkedImages");
-            images->setAccessibleName(tr("Linked images"));
-            layout->addWidget(images);
-            for (auto *other : documents()) if (other != doc) {
-                candidates.append(other);
-                auto *item = new QListWidgetItem(tr("%1. %2").arg(candidates.size()).arg(other->title()), images);
-                item->setToolTip(other->image.metadata().sourcePath);
-                item->setCheckState(doc->linkedDocuments().contains(other) ? Qt::Checked : Qt::Unchecked);
-            }
-            if (candidates.isEmpty()) return;
-            auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &picker);
-            layout->addWidget(buttons);
-            connect(buttons, &QDialogButtonBox::accepted, &picker, &QDialog::accept);
-            connect(buttons, &QDialogButtonBox::rejected, &picker, &QDialog::reject);
-            picker.resize(400, 300);
-            if (picker.exec() == QDialog::Accepted && doc) {
-                QList<DocumentWidget *> selected;
-                for (int i = 0; i < candidates.size(); ++i)
-                    if (candidates[i] && images->item(i)->checkState() == Qt::Checked) selected.append(candidates[i]);
-                doc->linkTo(selected);
+    commands_.add({"view.single", tr("Single view"), QT_TRANSLATE_NOOP("CommandCategories", "View"), {}, true, {}, [this](const QVariantMap &) {
+        QPointer<DocumentWidget> doc = activeDocument();
+        if (!doc) return;
+        if (auto *overlay = activeOverlay()) overlay->close();
+        activeOverlay_.clear();
+        doc->unlink();
+        doc->setOrthogonalViews(false);
+        updatePanels();
+    }});
+    commands_.add({"view.linked", tr("Linked view"), QT_TRANSLATE_NOOP("CommandCategories", "View"), {}, true, {}, [this](const QVariantMap &) {
+        QPointer<DocumentWidget> doc = activeDocument();
+        if (!doc) return;
+        QList<QPointer<DocumentWidget>> candidates;
+        QDialog picker(this);
+        picker.setWindowTitle(tr("Linked view"));
+        auto *layout = new QVBoxLayout(&picker);
+        auto *images = new QListWidget(&picker);
+        images->setObjectName("linkedImages");
+        images->setAccessibleName(tr("Linked images"));
+        layout->addWidget(images);
+        for (auto *other : documents()) if (other != doc) {
+            candidates.append(other);
+            auto *item = new QListWidgetItem(tr("%1. %2").arg(candidates.size()).arg(other->title()), images);
+            item->setToolTip(other->image.metadata().sourcePath);
+            item->setCheckState(doc->linkedDocuments().contains(other) ? Qt::Checked : Qt::Unchecked);
+        }
+        if (candidates.isEmpty()) return;
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &picker);
+        layout->addWidget(buttons);
+        connect(buttons, &QDialogButtonBox::accepted, &picker, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, &picker, &QDialog::reject);
+        picker.resize(400, 300);
+        if (picker.exec() == QDialog::Accepted && doc) {
+            QList<DocumentWidget *> selected;
+            for (int i = 0; i < candidates.size(); ++i)
+                if (candidates[i] && images->item(i)->checkState() == Qt::Checked) selected.append(candidates[i]);
+            activeOverlay_.clear();
+            doc->linkTo(selected);
+        }
+        updatePanels();
+    }});
+    commands_.add({"view.orthogonal", tr("Orthogonal views"), QT_TRANSLATE_NOOP("CommandCategories", "View"), {}, true, {}, [this](const QVariantMap &) {
+        if (auto *overlay = activeOverlay()) {
+            if (!overlay->orthogonalViews()) {
+                overlay->setOrthogonalViews(true);
+            } else {
+                bool hidden = false;
+                for (int i = 1; i < overlay->views().size(); ++i)
+                    hidden |= !overlay->views()[i]->window()->isVisible();
+                if (hidden) overlay->showViews();
+                else overlay->setOrthogonalViews(false);
             }
             updatePanels();
-        }});
-    }
+            return;
+        }
+        QPointer<DocumentWidget> doc = activeDocument();
+        if (!doc) return;
+        QList<DocumentWidget *> group{doc};
+        for (const auto &other : doc->linkedDocuments()) if (other) group.append(other);
+        const bool anyOrthogonal = std::any_of(group.begin(), group.end(),
+            [](DocumentWidget *member) { return member->orthogonalViews(); });
+        if (!anyOrthogonal) {
+            for (auto *member : group)
+                if (member->image.depth() > 1) member->setOrthogonalViews(true);
+        } else {
+            bool hidden = false;
+            for (auto *member : group)
+                for (int i = 1; i < member->views().size(); ++i) {
+                    auto *window = member->views()[i]->window();
+                    if (window->property("sliceReady").toBool() && !window->isVisible()) hidden = true;
+                }
+            if (hidden) {
+                for (auto *member : group) if (member->orthogonalViews()) member->showViews();
+            } else {
+                for (auto *member : group) member->setOrthogonalViews(false);
+                if (doc->isLinked()) doc->viewer->fitToWindow();
+            }
+        }
+        updatePanels();
+    }});
     commands_.add({"view.overlay", tr("Overlay view"), QT_TRANSLATE_NOOP("CommandCategories", "View"), {}, true, {}, [this](const QVariantMap &) {
         auto *document = activeDocument();
         if (!document) return;
@@ -1463,12 +1505,16 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
             overlay = new OverlayWindow(document, this);
             overlay->setScreen(document->screen());
             overlay->move(document->pos() + QPoint(28, 28));
-            connect(overlay, &OverlayWindow::activated, this, [this, document] { setActiveDocument(document); });
-            connect(overlay, &OverlayWindow::visibilityChanged, this, &MainWindow::updatePanels);
+            connect(overlay, &OverlayWindow::activated, this, [this, overlay] { setActiveOverlay(overlay); });
+            connect(overlay, &OverlayWindow::visibilityChanged, this, [this, overlay] {
+                if (activeOverlay_ == overlay && !overlay->isVisible()) activeOverlay_.clear();
+                updatePanels();
+            });
             connect(overlay, &OverlayWindow::viewError, this, [this](const QString &error) { statusBar()->showMessage(error, 15000); });
         }
         overlay->refreshDocuments(documents());
         overlay->showEditor();
+        setActiveOverlay(overlay);
     }});
     commands_.add({"process.repeat", tr("Repeat command"), QT_TRANSLATE_NOOP("CommandCategories", "Process"), QKeySequence("Shift+R"), true, {}, [this](const QVariantMap &) {
         if (!repeatCommand_.isEmpty()) commands_.execute(repeatCommand_, repeatParameters_);
@@ -1479,7 +1525,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     }});
     commands_.add({"window.showAll", tr("Show all windows"), QT_TRANSLATE_NOOP("CommandCategories", "View"), QKeySequence("Shift+F"), false, {}, [this](const QVariantMap &) {
         showNormal(); for (auto *doc : documents()) doc->showViews();
-        for (auto *overlay : findChildren<OverlayWindow *>(QString{}, Qt::FindDirectChildrenOnly)) overlay->showNormal();
+        for (auto *overlay : findChildren<OverlayWindow *>(QString{}, Qt::FindDirectChildrenOnly)) overlay->showViews();
         for (auto *panel : panels_) if (panel->isVisible() || panel->isMinimized()) panel->showNormal();
     }});
     commands_.add({"window.next", tr("Next image window"), QT_TRANSLATE_NOOP("CommandCategories", "View"), QKeySequence("Tab"), true, {}, [this](const QVariantMap &) {
@@ -1645,9 +1691,15 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), jobs_(nullptr, 2)
     checkUpdates->setMenuRole(QAction::NoRole);
     checkUpdates->setEnabled(false);
     crosshair_ = menus["View"]->addAction(tr("Crosshair")); crosshair_->setCheckable(true);
-    connect(crosshair_, &QAction::toggled, this, [this](bool value) { if (auto *doc = activeDocument()) doc->viewer->setCrosshairVisible(value); });
+    connect(crosshair_, &QAction::toggled, this, [this](bool value) {
+        if (auto *overlay = activeOverlay()) overlay->viewer->setCrosshairVisible(value);
+        else if (auto *doc = activeDocument()) doc->viewer->setCrosshairVisible(value);
+    });
     scaleBar_ = menus["View"]->addAction(tr("Scale bar")); scaleBar_->setCheckable(true); scaleBar_->setChecked(false);
-    connect(scaleBar_, &QAction::toggled, this, [this](bool value) { if (auto *doc = activeDocument()) doc->viewer->setScaleBarVisible(value); });
+    connect(scaleBar_, &QAction::toggled, this, [this](bool value) {
+        if (auto *overlay = activeOverlay()) overlay->viewer->setScaleBarVisible(value);
+        else if (auto *doc = activeDocument()) doc->viewer->setScaleBarVisible(value);
+    });
     auto *toolbar = addToolBar(tr("Image tools"));
     toolbar->setObjectName("imageTools"); toolbar->setMovable(false); toolbar->setFloatable(false);
     toolbar->setToolButtonStyle(Qt::ToolButtonIconOnly); toolbar->setIconSize(QSize(24, 24));
@@ -1996,7 +2048,9 @@ void MainWindow::updatePixelStatus()
 
 void MainWindow::setActiveDocument(DocumentWidget *document)
 {
-    if (active_ == document) return;
+    const bool hadOverlay = !activeOverlay_.isNull();
+    activeOverlay_.clear();
+    if (active_ == document && !hadOverlay) return;
     active_ = document;
     if (document) {
         document->viewer->setCrosshairVisible(crosshair_->isChecked());
@@ -2013,8 +2067,30 @@ void MainWindow::setActiveDocument(DocumentWidget *document)
     updatePanels();
 }
 
+OverlayWindow *MainWindow::activeOverlay() const
+{
+    return activeOverlay_ && activeOverlay_->isVisible() && activeOverlay_->document() ? activeOverlay_.data() : nullptr;
+}
+
+void MainWindow::setActiveOverlay(OverlayWindow *overlay)
+{
+    if (!overlay || !overlay->document()) return;
+    const bool same = activeOverlay_ == overlay && active_ == overlay->document();
+    activeOverlay_ = overlay;
+    active_ = overlay->document();
+    overlay->viewer->setCrosshairVisible(crosshair_->isChecked());
+    overlay->viewer->setScaleBarVisible(scaleBar_->isChecked());
+    if (!same) {
+        pixelStatusText_ = overlay->document()->image.metadata().name;
+        toolDimensions_.clear();
+        updatePixelStatus();
+    }
+    updatePanels();
+}
+
 void MainWindow::clearDocuments()
 {
+    activeOverlay_.clear();
     for (auto *overlay : findChildren<OverlayWindow *>(QString{}, Qt::FindDirectChildrenOnly)) delete overlay;
     // Include windows waiting for WA_DeleteOnClose's deferred destruction.
     const auto windows = findChildren<DocumentWidget *>(QString{}, Qt::FindDirectChildrenOnly);
@@ -2444,8 +2520,13 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
     for (auto *document : docs)
         for (auto *view : document->views())
             if (view->window() == top) imageDocument = document;
-    if (top != this && !isAncestorOf(top) && !imageDocument) return false;
-    if (imageDocument && event->type() == QEvent::KeyPress) setActiveDocument(imageDocument);
+    OverlayWindow *overlayWindow = nullptr;
+    for (auto *overlay : findChildren<OverlayWindow *>(QString{}, Qt::FindDirectChildrenOnly))
+        for (auto *view : overlay->views())
+            if (view->window() == top) overlayWindow = overlay;
+    if (top != this && !isAncestorOf(top) && !imageDocument && !overlayWindow) return false;
+    if (overlayWindow && event->type() == QEvent::KeyPress) setActiveOverlay(overlayWindow);
+    else if (imageDocument && event->type() == QEvent::KeyPress) setActiveDocument(imageDocument);
     if ((top == panel("measurements") || top == panel("multiMeasurements") || top == panel("multiMeasurementsPerSlice"))
         && key->key() == Qt::Key_Escape && !QApplication::activeModalWidget()) {
         if (event->type() == QEvent::KeyPress) top->close();
@@ -2460,8 +2541,8 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
             || qobject_cast<QComboBox *>(parent);
     }
     const bool canvas = qobject_cast<ImageViewer *>(widget) != nullptr;
-    const bool selectionCanvas = canvas && !qobject_cast<OverlayWindow *>(top) && activeDocument()
-        && (widget == activeDocument()->viewer || activeDocument()->viewMode() != DocumentWidget::ViewMode::Orthogonal);
+    const bool selectionCanvas = canvas && !overlayWindow && activeDocument()
+        && (widget == activeDocument()->viewer || !activeDocument()->orthogonalViews());
     // Keep Tab/Enter and arrow navigation local to controls and ROI drafts.
     if ((key->key() == Qt::Key_Tab || key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter)
         && !canvas && top != this) return false;
@@ -2700,20 +2781,24 @@ void MainWindow::updatePanels()
             ++it;
         }
     }
-    bool overlayVisible = false;
-    for (auto *overlay : findChildren<OverlayWindow *>(QString{}, Qt::FindDirectChildrenOnly))
-        overlayVisible |= overlay->document() == doc && overlay->isVisible();
+    auto *overlay = activeOverlay();
     auto *overlayAction = findChild<QAction *>("view.overlay");
-    overlayAction->setCheckable(true);
-    overlayAction->setChecked(overlayVisible);
-    const QStringList viewCommands{"view.single", "view.linked", "view.orthogonal"};
-    for (int index = 0; index < viewCommands.size(); ++index) {
-        auto *action = findChild<QAction *>(viewCommands[index]);
-        action->setCheckable(true);
-        action->setChecked(doc && !overlayVisible && int(doc->viewMode()) == index);
+    auto *singleAction = findChild<QAction *>("view.single");
+    auto *linkedAction = findChild<QAction *>("view.linked");
+    auto *orthogonalAction = findChild<QAction *>("view.orthogonal");
+    for (auto *action : {overlayAction, singleAction, linkedAction, orthogonalAction}) action->setCheckable(true);
+    bool groupHas3d = doc && doc->image.depth() > 1;
+    bool groupOrthogonal = doc && doc->orthogonalViews();
+    if (doc) for (const auto &other : doc->linkedDocuments()) if (other) {
+        groupHas3d |= other->image.depth() > 1;
+        groupOrthogonal |= other->orthogonalViews();
     }
-    findChild<QAction *>("view.orthogonal")->setEnabled(doc && doc->image.depth() > 1);
-    findChild<QAction *>("view.linked")->setEnabled(doc && documents().size() > 1);
+    overlayAction->setChecked(overlay != nullptr);
+    singleAction->setChecked(doc && !overlay && !doc->isLinked() && !doc->orthogonalViews());
+    linkedAction->setChecked(doc && !overlay && doc->isLinked());
+    orthogonalAction->setChecked(overlay ? overlay->orthogonalViews() : groupOrthogonal);
+    orthogonalAction->setEnabled(overlay ? overlay->document()->image.depth() > 1 : groupHas3d);
+    linkedAction->setEnabled(doc && documents().size() > 1);
     for (auto *document : documents())
         for (auto *view : document->views()) view->setCacheActive(document == doc);
     const bool showProperties = metadata_ && panel("properties")->isVisible();
@@ -2900,6 +2985,17 @@ void MainWindow::updateWindowMenu()
     for (auto *overlay : findChildren<OverlayWindow *>(QString{}, Qt::FindDirectChildrenOnly)) {
         auto *action = windowMenu_->addAction(overlay->windowTitle());
         connect(action, &QAction::triggered, overlay, &OverlayWindow::showEditor);
+        for (int index = 1; index < overlay->views().size(); ++index) {
+            const QPointer<QWidget> viewWindow(overlay->views()[index]->window());
+            const QPointer<OverlayWindow> target(overlay);
+            auto *viewAction = windowMenu_->addAction(viewWindow->windowTitle());
+            connect(viewAction, &QAction::triggered, this, [this, target, viewWindow] {
+                if (!target || !viewWindow) return;
+                target->showViews();
+                setActiveOverlay(target);
+                viewWindow->showNormal(); viewWindow->raise(); viewWindow->activateWindow();
+            });
+        }
     }
     for (auto *plot : findChildren<QDialog *>("roiMeasurementsWindow") + findChildren<QDialog *>("scatterPlotWindow")) {
         auto *action = windowMenu_->addAction(plot->windowTitle());

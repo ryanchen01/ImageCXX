@@ -978,7 +978,10 @@ void ImageViewer::setOverlayLayers(const QList<OverlayLayer> &layers)
         d->layerConnections.append(connect(layer.viewer, &ImageViewer::sliceReady, this, &ImageViewer::updateCanvas));
         d->layerConnections.append(connect(layer.viewer, &ImageViewer::displaySettingsChanged, this, &ImageViewer::updateCanvas));
         d->layerConnections.append(connect(layer.viewer, &ImageViewer::loadFailed, this, [this] { updateCanvas(); }));
-        d->layerConnections.append(connect(layer.viewer, &QObject::destroyed, this, [this] { updateCanvas(); }));
+        d->layerConnections.append(connect(layer.viewer, &QObject::destroyed, this, [this, dying = layer.viewer.data()] {
+            for (auto &entry : d->layers) if (entry.viewer == dying) entry.viewer.clear();
+            updateCanvas();
+        }));
     }
     updateCanvas();
 }

@@ -21,7 +21,7 @@ class QCheckBox;
 class QLabel;
 class QProgressBar;
 class QCloseEvent;
-namespace imagecxx { class PlotWidget; }
+namespace imagecxx { class OverlayWindow; class PlotWidget; }
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -48,6 +48,7 @@ private:
     imagecxx::JobScheduler jobs_;
     QList<QPointer<imagecxx::DocumentWidget>> documents_;
     QPointer<imagecxx::DocumentWidget> active_;
+    QPointer<imagecxx::OverlayWindow> activeOverlay_;
     QMap<QString, QWidget *> panels_;
     QMap<QString, QByteArray> panelGeometries_;
     QTreeWidget *metadata_ = nullptr;
@@ -99,6 +100,8 @@ private:
     void pasteImage(bool systemImage, bool newImage);
     void openFiles(const QStringList &paths);
     void setActiveDocument(imagecxx::DocumentWidget *document);
+    imagecxx::OverlayWindow *activeOverlay() const;
+    void setActiveOverlay(imagecxx::OverlayWindow *overlay);
     void clearDocuments();
     void ensurePanel(const QString &id);
     void updatePanels();
