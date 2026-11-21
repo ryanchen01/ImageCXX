@@ -111,13 +111,17 @@ public:
         SliceKey key;
         Image image;
         std::uint64_t serial = 0;
+        int zDirection = 1;
+        bool prefetchOnly = false;
     };
     QList<OverlayLayer> layers;
     QList<QMetaObject::Connection> layerConnections;
+    QList<QPointer<ImageViewer>> connectedLayerViewers;
     SliceCanvas *canvas = nullptr;
     ViewerOverlay *overlay = nullptr;
     Image image, mask;
     std::size_t z = 0, channel = 0, time = 0;
+    int zDirection = 1;
     std::uint64_t imageRevision = 0;
     double zoom = 1, pixelAspect = 1;
     QPointF pan;
@@ -145,6 +149,60 @@ public:
     std::size_t cacheBytes = 0, decodedBudget = 128 * 1024 * 1024;
     std::atomic<std::uint64_t> serial{0};
     std::jthread worker;
+
+    std::shared_ptr<const DecodedSlice> enqueueSlice(ImageViewer *owner, std::uint64_t serialValue)
+    {
+        const SliceKey key{imageRevision, z, channel, time, composite};
+        std::shared_ptr<const DecodedSlice> cached;
+        bool notifyWorker = true;
+        {
+            std::lock_guard lock(mutex);
+            const auto found = std::find_if(cache.begin(), cache.end(),
+                [&key](const auto &entry) { return entry->key == key; });
+            if (found != cache.end()) {
+                cached = *found;
+                cache.erase(found);
+                cache.push_front(cached);
+                if (cacheActive && image.depth() > 1) {
+                    pending = Request{key, image, serialValue, zDirection, true};
+                } else {
+                    pending.reset();
+                    notifyWorker = false;
+                }
+            } else {
+                pending = Request{key, image, serialValue, zDirection, false};
+            }
+        }
+        if (cached) {
+            canvas->frame = cached;
+            if (notifyWorker) condition.notify_one();
+            return cached;
+        }
+        loading = true;
+        condition.notify_one();
+        owner->updateCanvas();
+        Q_EMIT owner->loadingChanged(true);
+        return {};
+    }
+
+    void finishDecoded(ImageViewer *owner, const std::shared_ptr<const DecodedSlice> &decoded)
+    {
+        const bool wasLoading = loading;
+        canvas->frame = decoded;
+        loading = false;
+        if (autoRangePending) {
+            autoRangePending = false;
+            // RGB8 textures are normalized by the sampler.
+            const double divisor = decoded->mode == 1 ? 255.0 : 1.0;
+            canvas->minimum = decoded->minimum / divisor;
+            canvas->maximum = decoded->maximum / divisor;
+            Q_EMIT owner->displayRangeChanged(decoded->minimum, decoded->maximum);
+            Q_EMIT owner->displaySettingsChanged();
+        }
+        owner->updateCanvas();
+        if (wasLoading) Q_EMIT owner->loadingChanged(false);
+        Q_EMIT owner->sliceReady();
+    }
 };
 
 ImageViewer::ImageViewer(QWidget *parent) : QWidget(parent), d(std::make_unique<Private>())
@@ -170,14 +228,20 @@ ImageViewer::ImageViewer(QWidget *parent) : QWidget(parent), d(std::make_unique<
                 request = std::move(*d->pending);
                 d->pending.reset();
             }
-            std::array<std::size_t, 3> slices{request.key.z,
-                request.key.z + 1 < request.image.depth() ? request.key.z + 1 : request.key.z,
-                request.key.z > 0 ? request.key.z - 1 : request.key.z};
-            for (std::size_t index = 0; index < slices.size(); ++index) {
+            const std::size_t depth = request.image.depth();
+            const auto neighbor = [z = request.key.z, depth](int delta) {
+                return delta > 0 ? (z + 1 < depth ? z + 1 : z) : (z > 0 ? z - 1 : z);
+            };
+            const std::array<std::size_t, 3> slices{request.key.z,
+                neighbor(request.zDirection), neighbor(-request.zDirection)};
+            for (std::size_t index = request.prefetchOnly ? 1 : 0; index < slices.size(); ++index) {
                 if (stop.stop_requested() || request.serial != d->serial.load()) break;
                 if (index) {
                     std::lock_guard lock(d->mutex);
                     if (!d->cacheActive) break;
+                    if (index == 2 && slices[1] != request.key.z && !d->cache.empty()
+                        && std::size_t(d->cache.front()->pixels.capacity()) * 2 > d->decodedBudget)
+                        break;
                 }
                 SliceKey key = request.key;
                 key.z = slices[index];
@@ -220,20 +284,7 @@ ImageViewer::ImageViewer(QWidget *parent) : QWidget(parent), d(std::make_unique<
                     if (index == 0) {
                         QMetaObject::invokeMethod(this, [this, decoded, serial = request.serial] {
                             if (serial != d->serial.load()) return;
-                            d->canvas->frame = decoded;
-                            d->loading = false;
-                            if (d->autoRangePending) {
-                                d->autoRangePending = false;
-                                // RGB8 textures are normalized by the sampler.
-                                const double divisor = decoded->mode == 1 ? 255.0 : 1.0;
-                                d->canvas->minimum = decoded->minimum / divisor;
-                                d->canvas->maximum = decoded->maximum / divisor;
-                                Q_EMIT displayRangeChanged(decoded->minimum, decoded->maximum);
-                                Q_EMIT displaySettingsChanged();
-                            }
-                            updateCanvas();
-                            Q_EMIT loadingChanged(false);
-                            Q_EMIT sliceReady();
+                            d->finishDecoded(this, decoded);
                         }, Qt::QueuedConnection);
                     }
                 } catch (const std::exception &error) {
@@ -381,6 +432,7 @@ void ImageViewer::setImage(const Image &image, bool preserveInversion)
     d->image = image;
     ++d->imageRevision;
     d->z = d->channel = d->time = 0;
+    d->zDirection = 1;
     d->autoRangePending = true;
     d->mask = {};
     d->canvas->mask.clear();
@@ -411,6 +463,7 @@ void ImageViewer::setSlice(std::size_t z, std::size_t channel, std::size_t time)
     time = std::min(time, d->image.frames() - 1);
     if (d->z == z && d->channel == channel && d->time == time) return;
     const bool planeGroupChanged = d->channel != channel || d->time != time;
+    if (z != d->z) d->zDirection = z > d->z ? 1 : -1;
     d->z = z; d->channel = channel; d->time = time;
     // A mask created on one plane must not appear on unrelated slices.
     d->mask = {};
@@ -419,8 +472,11 @@ void ImageViewer::setSlice(std::size_t z, std::size_t channel, std::size_t time)
     if (d->dragOriginal) d->selection = d->dragOriginal;
     d->dragOriginal.reset(); d->drawing = false;
     if (planeGroupChanged) d->editing = false;
-    requestSlice();
+    const auto serial = ++d->serial;
+    const auto cached = d->enqueueSlice(this, serial);
     Q_EMIT sliceChanged(z, channel, time);
+    if (cached && serial == d->serial.load())
+        d->finishDecoded(this, cached);
 }
 
 void ImageViewer::requestSlice()
@@ -436,14 +492,8 @@ void ImageViewer::requestSlice()
         Q_EMIT loadingChanged(false);
         return;
     }
-    {
-        std::lock_guard lock(d->mutex);
-        d->pending = Private::Request{{d->imageRevision, d->z, d->channel, d->time, d->composite}, d->image, serial};
-    }
-    d->loading = true;
-    d->condition.notify_one();
-    updateCanvas();
-    Q_EMIT loadingChanged(true);
+    if (const auto cached = d->enqueueSlice(this, serial))
+        d->finishDecoded(this, cached);
 }
 
 void ImageViewer::setWindow(double minimum, double maximum)
@@ -546,18 +596,25 @@ QImage ImageViewer::renderedImage()
 
 void ImageViewer::setOverlayLayers(const QList<OverlayLayer> &layers)
 {
-    for (const auto &connection : d->layerConnections) disconnect(connection);
-    d->layerConnections.clear();
     d->layers = layers;
     d->canvas->overlayMode = true;
-    for (const auto &layer : layers) if (layer.viewer && layer.viewer != this) {
-        d->layerConnections.append(connect(layer.viewer, &ImageViewer::sliceReady, this, &ImageViewer::updateCanvas));
-        d->layerConnections.append(connect(layer.viewer, &ImageViewer::displaySettingsChanged, this, &ImageViewer::updateCanvas));
-        d->layerConnections.append(connect(layer.viewer, &ImageViewer::loadFailed, this, [this] { updateCanvas(); }));
-        d->layerConnections.append(connect(layer.viewer, &QObject::destroyed, this, [this, dying = layer.viewer.data()] {
-            for (auto &entry : d->layers) if (entry.viewer == dying) entry.viewer.clear();
-            updateCanvas();
-        }));
+    QList<QPointer<ImageViewer>> viewers;
+    for (const auto &layer : layers)
+        if (layer.viewer && layer.viewer != this && !viewers.contains(layer.viewer))
+            viewers.append(layer.viewer);
+    if (viewers != d->connectedLayerViewers) {
+        for (const auto &connection : d->layerConnections) disconnect(connection);
+        d->layerConnections.clear();
+        d->connectedLayerViewers = viewers;
+        for (const auto &viewer : viewers) {
+            d->layerConnections.append(connect(viewer, &ImageViewer::sliceReady, this, &ImageViewer::updateCanvas));
+            d->layerConnections.append(connect(viewer, &ImageViewer::displaySettingsChanged, this, &ImageViewer::updateCanvas));
+            d->layerConnections.append(connect(viewer, &ImageViewer::loadFailed, this, [this] { updateCanvas(); }));
+            d->layerConnections.append(connect(viewer, &QObject::destroyed, this, [this, dying = viewer.data()] {
+                for (auto &entry : d->layers) if (entry.viewer == dying) entry.viewer.clear();
+                updateCanvas();
+            }));
+        }
     }
     updateCanvas();
 }
@@ -708,6 +765,13 @@ std::size_t ImageViewer::decodedCacheBytes() const
 {
     std::lock_guard lock(d->mutex);
     return d->cacheBytes;
+}
+bool ImageViewer::hasCachedSlice(std::size_t z, std::size_t channel, std::size_t time) const
+{
+    const SliceKey key{d->imageRevision, z, channel, time, d->composite};
+    std::lock_guard lock(d->mutex);
+    return std::any_of(d->cache.begin(), d->cache.end(),
+        [&key](const auto &entry) { return entry->key == key; });
 }
 std::size_t ImageViewer::gpuCacheBytes() const { return d->canvas->gpuBytes; }
 

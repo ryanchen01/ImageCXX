@@ -82,6 +82,7 @@ public:
     void setCacheActive(bool active);
     void setCacheBudgets(std::size_t decodedBytes, std::size_t gpuBytes);
     std::size_t decodedCacheBytes() const;
+    bool hasCachedSlice(std::size_t z, std::size_t channel = 0, std::size_t time = 0) const;
     std::size_t gpuCacheBytes() const;
     QPointF imageToWidget(QPointF point) const;
     QPointF widgetToImage(QPointF point) const;

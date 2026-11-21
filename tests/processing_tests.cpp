@@ -226,6 +226,75 @@ TEST(Projection, SingleAngleSerializesProgressAndPropagatesWorkerCancellationAnd
     EXPECT_EQ(source.sample(0, 0), 100);
 }
 
+TEST(Projection, ZAxisNonExactSpacingAndLargeFloat64MeanStayAccurate) {
+    auto stack = Image::allocate(PixelType::Float64, {1, 1, 3});
+    stack.setValue(std::array<std::size_t, 3>{0, 0, 0}, 10);
+    stack.setValue(std::array<std::size_t, 3>{0, 0, 1}, 20);
+    stack.setValue(std::array<std::size_t, 3>{0, 0, 2}, 30);
+    ProjectionOptions options;
+    options.rotationAxis = 2;
+    options.totalRotation = 0;
+    options.sliceSpacing = 0.11;
+    options.method = ProjectionMethod::MeanValue;
+    options.surfaceDepthCue = options.interiorDepthCue = 0;
+    EXPECT_DOUBLE_EQ(project3D(stack, options).sample(1, 1), 20.0);
+    options.interpolate = true;
+    EXPECT_DOUBLE_EQ(project3D(stack, options).sample(1, 1), 20.0);
+
+    auto huge = Image::allocate(PixelType::Float64, {1, 1, 3});
+    huge.setValue(std::array<std::size_t, 3>{0, 0, 0}, 0.0);
+    huge.setValue(std::array<std::size_t, 3>{0, 0, 1}, 1e308);
+    huge.setValue(std::array<std::size_t, 3>{0, 0, 2}, 1e308);
+    options.sliceSpacing = 1.0;
+    options.interpolate = false;
+    options.lower = 0.0;
+    options.upper = std::numeric_limits<double>::max();
+    const double mean = project3D(huge, options).sample(1, 1);
+    EXPECT_TRUE(std::isfinite(mean));
+    EXPECT_NEAR(mean, (2.0 / 3.0) * 1e308, 1e294);
+
+    // X/Y ray sampling preserves exact std::lerp rounding at boundary spacings.
+    auto boundary = Image::allocate(PixelType::UInt8, {1, 1, 6});
+    const std::array<std::uint8_t, 6> boundaryValues{10, 10, 10, 80, 10, 10};
+    std::memcpy(boundary.mutableData(), boundaryValues.data(), boundaryValues.size());
+    ProjectionOptions xyOptions;
+    xyOptions.initialAngle = 0; xyOptions.totalRotation = 0; xyOptions.sliceSpacing = 0.19;
+    xyOptions.method = ProjectionMethod::MeanValue; xyOptions.interpolate = false;
+    xyOptions.surfaceDepthCue = xyOptions.interiorDepthCue = 0;
+    for (int axis : {0, 1}) {
+        xyOptions.rotationAxis = axis;
+        const auto projected = project3D(boundary, xyOptions);
+        EXPECT_EQ(projected.sample(axis == 0 ? 0 : projected.width() / 2, axis == 1 ? 0 : projected.height() / 2), 30.0);
+    }
+
+    // Nearest-neighbor rounding matches std::round at 0.5 - 1 ULP (no coord + 0.5 upward drift).
+    auto halfUlp = Image::allocate(PixelType::UInt8, {1, 2, 2});
+    for (std::size_t y = 0; y < 2; ++y) {
+        halfUlp.setValue(std::array<std::size_t, 3>{0, y, 0}, 10);
+        halfUlp.setValue(std::array<std::size_t, 3>{0, y, 1}, 100);
+    }
+    xyOptions.rotationAxis = 0; xyOptions.initialAngle = 5; xyOptions.sliceSpacing = 0.19;
+    EXPECT_EQ(project3D(halfUlp, xyOptions).sample(0, 2), 40.0);
+
+    // Z-axis interpolated weighted sum retains exact accumulation order for tight bounds.
+    auto uniform = Image::allocate(PixelType::UInt8, {2, 2, 6});
+    std::memset(uniform.mutableData(), 100, uniform.byteCount());
+    ProjectionOptions zTight;
+    zTight.rotationAxis = 2; zTight.initialAngle = 1; zTight.totalRotation = 0;
+    zTight.sliceSpacing = 0.19; zTight.interpolate = true;
+    zTight.lower = 100; zTight.upper = 100;
+    zTight.surfaceDepthCue = zTight.interiorDepthCue = 0;
+    EXPECT_EQ(project3D(uniform, zTight).sample(1, 1), 100.0);
+
+    // Exact sum-and-divide integer mean avoids iterative-lerp rounding drift (15 / 6 = 2.5 -> 3).
+    auto exactMean = Image::allocate(PixelType::UInt8, {1, 1, 6});
+    const std::array<std::uint8_t, 6> exactValues{1, 1, 5, 1, 5, 2};
+    std::memcpy(exactMean.mutableData(), exactValues.data(), exactValues.size());
+    options.rotationAxis = 2; options.sliceSpacing = 1.0; options.interpolate = false;
+    options.lower = 1; options.upper = 255; options.opacity = 0;
+    EXPECT_EQ(project3D(exactMean, options).sample(1, 1), 3.0);
+}
+
 TEST(Reslice, ExactPermutationPreservesPixelsAndWorldCoordinatesForEveryOrientation) {
     for (auto type : {PixelType::UInt8, PixelType::UInt16, PixelType::Int16, PixelType::Float32,
                       PixelType::Float64, PixelType::RGB8, PixelType::RGBA8}) {
@@ -527,16 +596,47 @@ TEST(Reslice, ItkNearestRetainsDoubleSignedZeroAndNonFiniteSamples) {
     }
 }
 
-TEST(Reslice, ItkMemoryEstimateIncludesPackedInputAndDoubleOutputVolume) {
+TEST(Reslice, SweepHalfwayRoundingAndConstantDblMaxBilinearStayExact) {
+    auto ramp = Image::allocate(PixelType::UInt8, {2, 2, 2});
+    for (std::size_t z = 0; z < 2; ++z) for (std::size_t x = 0; x < 2; ++x) {
+        ramp.setValue(std::array<std::size_t, 3>{x, 0, z}, 1);
+        ramp.setValue(std::array<std::size_t, 3>{x, 1, z}, 6);
+    }
+    ResliceOptions options;
+    options.outputSpacing = 0.7;
+    EXPECT_EQ(reslice(ramp, options).sample(0, 0, 1), 5.0);
+
+    ImageMetadata metadata;
+    metadata.axes = {{"X", 0.2, 0, "mm"}, {"Y", 1.0, 0, "mm"}, {"Z", 1.0, 0, "mm"}};
+    auto extreme = Image::allocate(PixelType::Float64, {2, 2, 2}, metadata);
+    std::fill_n(reinterpret_cast<double *>(extreme.mutableData()), extreme.pixelCount(), std::numeric_limits<double>::max());
+    options.outputSpacing = 0.2;
+    const auto bilinear = reslice(extreme, options);
+    EXPECT_EQ(bilinear.sample(0, 1, 1), std::numeric_limits<double>::max());
+
+    // Accumulating displacement before adding a large origin preserves sub-ULP combined shifts.
+    const double largeOrigin = std::ldexp(1.0, 54);
+    const double invSqrt2 = std::sqrt(0.5);
+    ImageMetadata largeMeta;
+    largeMeta.axes = {{"X", 1.0, 0.0, "mm"}, {"Y", 2.0, largeOrigin, "mm"}, {"Z", 2.0, 0.0, "mm"}};
+    largeMeta.direction = {1.0, 0.0, 0.0, 0.0, invSqrt2, invSqrt2, 0.0, -invSqrt2, invSqrt2};
+    auto largeStack = Image::allocate(PixelType::UInt8, {2, 2, 2}, largeMeta);
+    ResliceOptions largeOpts;
+    largeOpts.start = ResliceStart::Bottom;
+    largeOpts.flipVertically = true;
+    largeOpts.avoidInterpolation = true;
+    EXPECT_EQ(resliceGeometry(largeStack, largeOpts).metadata.axes[1].origin, largeOrigin + 4.0);
+}
+
+TEST(Reslice, MemoryEstimateExcludesRemovedIntermediateVolumesAndIncludesDisplayBuffers) {
     auto scalar = Image::allocate(PixelType::UInt8, {8,7,6});
     const auto geometry = resliceGeometry(scalar, {});
     const auto planePixels = geometry.shape[0]*geometry.shape[1];
     const auto expectedDisplay = planePixels*4*4 + scalar.pixelCount()*4;
-    EXPECT_EQ(geometry.requiredMemoryBytes, geometry.byteCount + expectedDisplay + scalar.pixelCount()*sizeof(double));
+    EXPECT_EQ(geometry.requiredMemoryBytes, geometry.byteCount + expectedDisplay);
     auto color = Image::allocate(PixelType::RGB8, {8,7,6});
     const auto colorGeometry = resliceGeometry(color, {});
-    EXPECT_EQ(colorGeometry.requiredMemoryBytes, colorGeometry.byteCount + expectedDisplay
-        + scalar.pixelCount() + scalar.pixelCount()*sizeof(double));
+    EXPECT_EQ(colorGeometry.requiredMemoryBytes, colorGeometry.byteCount + expectedDisplay);
 }
 
 TEST(Reslice, ItkCancellationDuringResamplingKeepsSourceUnchanged) {

@@ -27,8 +27,9 @@ std::optional<std::array<double, 3>> mapImagePosition(const Image &source, const
         std::array<std::array<double, 4>, 3> matrix{};
         const auto &metadata = image.metadata();
         const auto dimensions = std::size_t(std::sqrt(metadata.direction.size()));
-        const auto embedded = QJsonDocument::fromJson(metadata.attributes.value(
-            QStringLiteral("ImageCXX.EmbeddedPlaneOrigin")).toUtf8()).array();
+        const auto embedded = metadata.axes.size() < 3 && metadata.attributes.contains(QStringLiteral("ImageCXX.EmbeddedPlaneOrigin"))
+            ? QJsonDocument::fromJson(metadata.attributes.value(QStringLiteral("ImageCXX.EmbeddedPlaneOrigin")).toUtf8()).array()
+            : QJsonArray{};
         for (std::size_t row = 0; row < 3; ++row) {
             matrix[row][3] = row < metadata.axes.size() ? metadata.axes[row].origin
                 : embedded.size() == 3 ? embedded[int(row)].toDouble() : 0;

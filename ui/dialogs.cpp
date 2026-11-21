@@ -28,11 +28,13 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <stdexcept>
 #include <stop_token>
 #include <tuple>
+#include <type_traits>
 
 namespace imagecxx {
 std::optional<ResliceOptions> showResliceDialog(QWidget *parent, const Image &input)
@@ -298,21 +300,102 @@ std::optional<ProjectionOptions> showProjectionDialog(QWidget *parent, const Ima
     std::stop_source rangeCancellation;
     QObject::connect(&dialog, &QDialog::finished, &dialog, [rangeCancellation]() mutable { rangeCancellation.request_stop(); });
     jobs.submit(MainWindow::tr("Reading projection intensity range"), [input, range, rangeCancellation](auto stop, auto progress) {
-        std::size_t rows = 0;
-        const auto totalRows = input.height() * input.depth() * input.channels() * input.frames();
-        for (std::size_t t = 0; t < input.frames(); ++t) for (std::size_t c = 0; c < input.channels(); ++c)
-            for (std::size_t z = 0; z < input.depth(); ++z) for (std::size_t y = 0; y < input.height(); ++y) {
-                if (stop.stop_requested() || rangeCancellation.stop_requested())
-                    throw std::runtime_error(MainWindow::tr("Intensity range calculation cancelled").toStdString());
-                for (std::size_t x = 0; x < input.width(); ++x)
-                    for (std::size_t k = 0; k < componentCount(input.pixelType()); ++k) {
-                        const double value = input.sample(x, y, z, c, t, k);
-                        if (!std::isfinite(value)) continue;
-                        (*range)[0] = std::min((*range)[0], value);
-                        (*range)[1] = std::max((*range)[1], value);
+        const auto checkStop = [&] {
+            if (stop.stop_requested() || rangeCancellation.stop_requested())
+                throw std::runtime_error(MainWindow::tr("Intensity range calculation cancelled").toStdString());
+        };
+        double lo = std::numeric_limits<double>::infinity(), hi = -lo;
+        const auto components = componentCount(input.pixelType());
+        if (const auto *base = input.data()) {
+            const auto scanTyped = [&]<typename T>() {
+                if (input.contiguous()) {
+                    const std::size_t total = input.pixelCount() * components;
+                    constexpr std::size_t chunk = 65536;
+                    if constexpr (std::is_integral_v<T>) {
+                        T minVal = std::numeric_limits<T>::max(), maxVal = std::numeric_limits<T>::lowest();
+                        for (std::size_t offset = 0; offset < total; offset += chunk) {
+                            checkStop();
+                            const std::size_t end = std::min(total, offset + chunk);
+                            for (std::size_t i = offset; i < end; ++i) {
+                                T value;
+                                std::memcpy(&value, base + i * sizeof(T), sizeof(T));
+                                if (value < minVal) minVal = value;
+                                if (value > maxVal) maxVal = value;
+                            }
+                            progress(double(end) / double(total));
+                        }
+                        if (total > 0) { lo = double(minVal); hi = double(maxVal); }
+                    } else {
+                        for (std::size_t offset = 0; offset < total; offset += chunk) {
+                            checkStop();
+                            const std::size_t end = std::min(total, offset + chunk);
+                            for (std::size_t i = offset; i < end; ++i) {
+                                T value;
+                                std::memcpy(&value, base + i * sizeof(T), sizeof(T));
+                                if (std::isfinite(value)) {
+                                    if (double(value) < lo) lo = double(value);
+                                    if (double(value) > hi) hi = double(value);
+                                }
+                            }
+                            progress(double(end) / double(total));
+                        }
                     }
-                progress(double(++rows) / totalRows);
+                } else {
+                    const auto &strides = input.strides();
+                    const std::size_t sX = strides[0], sY = strides[1];
+                    const std::size_t sZ = strides.size() > 2 ? strides[2] : 0;
+                    const std::size_t sC = strides.size() > 3 ? strides[3] : 0;
+                    const std::size_t sT = strides.size() > 4 ? strides[4] : 0;
+                    const auto totalRows = input.height() * input.depth() * input.channels() * input.frames();
+                    const auto step = std::max<std::size_t>(1, totalRows / 100);
+                    std::size_t rows = 0;
+                    for (std::size_t t = 0; t < input.frames(); ++t) for (std::size_t c = 0; c < input.channels(); ++c)
+                        for (std::size_t z = 0; z < input.depth(); ++z) for (std::size_t y = 0; y < input.height(); ++y) {
+                            checkStop();
+                            const auto *row = base + t * sT + c * sC + z * sZ + y * sY;
+                            for (std::size_t x = 0; x < input.width(); ++x)
+                                for (std::size_t k = 0; k < components; ++k) {
+                                    T value;
+                                    std::memcpy(&value, row + x * sX + k * sizeof(T), sizeof(T));
+                                    if constexpr (std::is_integral_v<T>) {
+                                        if (double(value) < lo) lo = double(value);
+                                        if (double(value) > hi) hi = double(value);
+                                    } else if (std::isfinite(value)) {
+                                        if (double(value) < lo) lo = double(value);
+                                        if (double(value) > hi) hi = double(value);
+                                    }
+                                }
+                            if (++rows % step == 0 || rows == totalRows) progress(double(rows) / double(totalRows));
+                        }
+                }
+            };
+            switch (input.pixelType()) {
+            case PixelType::UInt8: case PixelType::RGB8: case PixelType::RGBA8:
+                scanTyped.template operator()<std::uint8_t>(); break;
+            case PixelType::UInt16: scanTyped.template operator()<std::uint16_t>(); break;
+            case PixelType::Int16: scanTyped.template operator()<std::int16_t>(); break;
+            case PixelType::Float32: scanTyped.template operator()<float>(); break;
+            case PixelType::Float64: scanTyped.template operator()<double>(); break;
             }
+        } else {
+            std::size_t rows = 0;
+            const auto totalRows = input.height() * input.depth() * input.channels() * input.frames();
+            const auto step = std::max<std::size_t>(1, totalRows / 100);
+            for (std::size_t t = 0; t < input.frames(); ++t) for (std::size_t c = 0; c < input.channels(); ++c)
+                for (std::size_t z = 0; z < input.depth(); ++z) for (std::size_t y = 0; y < input.height(); ++y) {
+                    checkStop();
+                    for (std::size_t x = 0; x < input.width(); ++x)
+                        for (std::size_t k = 0; k < components; ++k) {
+                            const double value = input.sample(x, y, z, c, t, k);
+                            if (!std::isfinite(value)) continue;
+                            lo = std::min(lo, value);
+                            hi = std::max(hi, value);
+                        }
+                    if (++rows % step == 0 || rows == totalRows) progress(double(rows) / double(totalRows));
+                }
+        }
+        (*range)[0] = lo;
+        (*range)[1] = hi;
         if (!std::isfinite((*range)[0]))
             throw std::invalid_argument(MainWindow::tr("The image has no finite intensity values").toStdString());
     }, [guard = QPointer<QDialog>(&dialog), range, lower, upper, size, update](auto error) {
