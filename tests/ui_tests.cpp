@@ -1219,6 +1219,83 @@ TEST(Desktop, MenusHideIconsKeepToolbarIconsAndGroupCommands)
     fileMenu->hide();
 }
 
+TEST(Desktop, OpeningImageFocusesOpenedWindowWithoutLeavingNoActivateAttribute)
+{
+    MainWindow window;
+    activateApplicationWindow(&window, "wayland-token", "launcher-1_TIME12345");
+    activateApplicationWindow(&window);
+    EXPECT_TRUE(window.isVisible());
+    EXPECT_TRUE(qEnvironmentVariableIsEmpty("XDG_ACTIVATION_TOKEN"));
+    QCoreApplication::processEvents();
+
+    auto *first = window.addDocument(Image::allocate(PixelType::UInt8, {16, 16}));
+    ASSERT_TRUE(waitFor([&] { return first->isVisible(); }));
+    EXPECT_FALSE(first->testAttribute(Qt::WA_ShowWithoutActivating));
+    EXPECT_EQ(window.activeDocument(), first);
+    EXPECT_TRUE(waitFor([&] { return QApplication::activeWindow() == first && first->viewer->hasFocus(); }));
+
+    auto *second = window.addDocument(Image::allocate(PixelType::UInt8, {16, 16}));
+    ASSERT_TRUE(waitFor([&] { return second->isVisible(); }));
+    EXPECT_FALSE(second->testAttribute(Qt::WA_ShowWithoutActivating));
+    EXPECT_EQ(window.activeDocument(), second);
+    EXPECT_TRUE(waitFor([&] { return QApplication::activeWindow() == second && second->viewer->hasFocus(); }));
+
+    // A document that finishes showing after the user switches back to an earlier window
+    // does not steal focus from the earlier window's controls and does not leave
+    // WA_ShowWithoutActivating stuck on itself.
+    auto *slider = first->findChild<QSlider *>("sliceSlider");
+    ASSERT_NE(slider, nullptr);
+    slider->setFocusPolicy(Qt::StrongFocus);
+    slider->setEnabled(true);
+    auto *third = window.addDocument(Image::allocate(PixelType::UInt8, {16, 16}));
+    QEvent activated(QEvent::WindowActivate);
+    QCoreApplication::sendEvent(first, &activated);
+    first->activateWindow();
+    slider->setFocus();
+    ASSERT_EQ(window.activeDocument(), first);
+    ASSERT_TRUE(waitFor([&] { return third->isVisible(); }));
+    EXPECT_FALSE(third->testAttribute(Qt::WA_ShowWithoutActivating));
+    EXPECT_EQ(window.activeDocument(), first);
+    EXPECT_TRUE(waitFor([&] { return QApplication::activeWindow() == first && slider->hasFocus(); }));
+
+    // A deferred activation token passed to openPaths survives a scan error when a valid
+    // image is also in the request, and is consumed when the opened image shows.
+    QTemporaryDir directory;
+    ASSERT_TRUE(directory.isValid());
+    const auto imagePath = directory.filePath("opened.png");
+    const auto missingPath = directory.filePath("missing.png");
+    auto sample = Image::allocate(PixelType::UInt8, {8, 8});
+    writeImageWithMetadata(sample, imagePath, {}, {}, false);
+    QString tokenOnShow;
+    struct TokenSpy : QObject {
+        QString *captured;
+        bool eventFilter(QObject *watched, QEvent *event) override
+        {
+            if (event->type() == QEvent::Show && qobject_cast<DocumentWidget *>(watched))
+                *captured = qEnvironmentVariable("XDG_ACTIVATION_TOKEN");
+            return false;
+        }
+    } spy;
+    spy.captured = &tokenOnShow;
+    qApp->installEventFilter(&spy);
+    QTimer dismissWarning;
+    dismissWarning.setInterval(10);
+    QObject::connect(&dismissWarning, &QTimer::timeout, &window, [] {
+        if (auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) box->accept();
+    });
+    dismissWarning.start();
+    window.openPaths({imagePath, missingPath}, "deferred-wayland-token");
+    ASSERT_TRUE(finishJobs(window));
+    dismissWarning.stop();
+    auto *opened = window.activeDocument();
+    ASSERT_NE(opened, nullptr);
+    ASSERT_NE(opened, first);
+    ASSERT_TRUE(waitFor([&] { return opened->isVisible(); }));
+    qApp->removeEventFilter(&spy);
+    EXPECT_EQ(tokenOnShow, "deferred-wayland-token");
+    EXPECT_TRUE(qEnvironmentVariableIsEmpty("XDG_ACTIVATION_TOKEN"));
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication::setAttribute(Qt::AA_DontUseNativeDialogs);

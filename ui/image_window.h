@@ -9,6 +9,7 @@ class QSlider;
 
 namespace imagecxx {
 void keepWindowOnScreen(QWidget *window);
+void activateApplicationWindow(QWidget *window, const QString &activationToken = {}, const QString &startupId = {});
 
 struct SliceControls {
     QSlider *slice;
