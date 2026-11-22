@@ -6,6 +6,7 @@
 #include <QColor>
 #include <QMap>
 #include <QPointer>
+#include <memory>
 #include <optional>
 class QMenu;
 class QActionGroup;
@@ -28,7 +29,7 @@ class MainWindow : public QMainWindow {
 public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow() override;
-    void openPaths(const QStringList &paths);
+    void openPaths(const QStringList &paths, const QString &activationToken = {});
     imagecxx::DocumentWidget *activeDocument() const;
     QList<imagecxx::DocumentWidget *> documents() const;
     imagecxx::DocumentWidget *addDocument(imagecxx::Image image, const QString &lut = {},
@@ -94,12 +95,16 @@ private:
     QString propertiesStorage_;
     QMap<QKeySequence, QAction *> shortcutActions_;
     QColor drawingColor_ = Qt::white;
+    struct PendingActivation;
     QString repeatCommand_;
     QVariantMap repeatParameters_;
-    void importRaw(const QString &path);
+    void importRaw(const QString &path, std::shared_ptr<PendingActivation> activation = {});
     void registerAnalysisCommands();
     void pasteImage(bool systemImage, bool newImage);
-    void openFiles(const QStringList &paths);
+    void openFiles(const QStringList &paths, std::shared_ptr<PendingActivation> activation = {});
+    imagecxx::DocumentWidget *addDocument(imagecxx::Image image, const QString &lut,
+                                          std::optional<bool> inverted,
+                                          std::shared_ptr<PendingActivation> activation);
     void setActiveDocument(imagecxx::DocumentWidget *document);
     imagecxx::OverlayWindow *activeOverlay() const;
     void setActiveOverlay(imagecxx::OverlayWindow *overlay);

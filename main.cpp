@@ -21,6 +21,9 @@
 
 int main(int argc, char *argv[])
 {
+    // Capture launcher activation metadata before QApplication strips DESKTOP_STARTUP_ID on X11.
+    const QString activationToken = qEnvironmentVariable("XDG_ACTIVATION_TOKEN");
+    const QString startupId = qEnvironmentVariable("DESKTOP_STARTUP_ID");
     bool batch = false;
     for (int i = 1; i < argc; ++i) if (QByteArray(argv[i]) == "--batch") batch = true;
     std::unique_ptr<QCoreApplication> application;
@@ -59,21 +62,31 @@ int main(int argc, char *argv[])
     }
     imagecxx::FileOpenService fileOpens;
     try {
-        if (!fileOpens.start(parser.positionalArguments())) return 0;
+        if (!fileOpens.start(parser.positionalArguments(), activationToken, startupId)) return 0;
     } catch (const std::exception &error) {
         std::fprintf(stderr, "%s\n", error.what());
         return 1;
     }
     imagecxx::applyTheme();
     QApplication::setWindowIcon(QIcon(":/icons/imagecxx.svg"));
+    const bool wayland = QGuiApplication::platformName().startsWith(QStringLiteral("wayland"));
+    const bool deferWaylandActivation = wayland && !parser.positionalArguments().isEmpty()
+        && (!activationToken.isEmpty() || !startupId.isEmpty());
+    if (deferWaylandActivation) qunsetenv("XDG_ACTIVATION_TOKEN");
     MainWindow window;
+    if (deferWaylandActivation) window.setAttribute(Qt::WA_ShowWithoutActivating);
     window.show();
+    if (deferWaylandActivation) window.setAttribute(Qt::WA_ShowWithoutActivating, false);
     QObject::connect(&fileOpens, &imagecxx::FileOpenService::openRequested, &window,
-        [&window](const QStringList &paths) {
-            if (window.isMinimized()) window.showNormal();
-            window.show();
-            window.raise();
-            window.activateWindow();
+        [&window, wayland](const QStringList &paths, const QString &token, const QString &openStartupId) {
+            const QString waylandToken = !token.isEmpty() ? token : openStartupId;
+            if (wayland && !paths.isEmpty() && !waylandToken.isEmpty()) {
+                if (window.isMinimized()) window.showNormal();
+                else if (!window.isVisible()) window.show();
+                window.openPaths(paths, waylandToken);
+                return;
+            }
+            imagecxx::activateApplicationWindow(&window, token, openStartupId);
             window.openPaths(paths);
         });
 #ifdef IMAGECXX_ENABLE_UPDATES

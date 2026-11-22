@@ -62,6 +62,7 @@
 #include <limits>
 #include <memory>
 #include <stdexcept>
+#include <utility>
 
 using namespace imagecxx;
 
@@ -1091,12 +1092,33 @@ void MainWindow::clearDocuments()
     }
 }
 
+struct MainWindow::PendingActivation {
+    QPointer<MainWindow> window;
+    QString token;
+    PendingActivation(MainWindow *target, QString value) : window(target), token(std::move(value)) {}
+    PendingActivation(const PendingActivation &) = delete;
+    PendingActivation &operator=(const PendingActivation &) = delete;
+    ~PendingActivation()
+    {
+        if (window && !token.isEmpty()) activateApplicationWindow(window, token);
+    }
+};
+
 DocumentWidget *MainWindow::addDocument(Image image, const QString &lut, std::optional<bool> inverted)
+{
+    return addDocument(std::move(image), lut, inverted, {});
+}
+
+DocumentWidget *MainWindow::addDocument(Image image, const QString &lut, std::optional<bool> inverted,
+                                        std::shared_ptr<PendingActivation> activation)
 {
     auto *document = new DocumentWidget(std::move(image), this);
     if (!lut.isEmpty()) document->viewer->setLut(lut);
     if (inverted.has_value()) document->viewer->setInverted(*inverted);
-    connect(document, &DocumentWidget::pathsDropped, this, &MainWindow::openPaths);
+    connect(document, &DocumentWidget::pathsDropped, this, [this, document](const QStringList &paths) {
+        if (document->isVisible()) activateApplicationWindow(document);
+        openPaths(paths);
+    });
     document->setAttribute(Qt::WA_DeleteOnClose);
     documents_.append(document);
     document->setScreen(screen());
@@ -1149,15 +1171,23 @@ DocumentWidget *MainWindow::addDocument(Image image, const QString &lut, std::op
     connect(document->viewer, &ImageViewer::sliceReady, this, [this, document] {
         if (activeDocument() == document) updateDisplayControls();
     });
-    const auto showWhenReady = connect(document->viewer, &ImageViewer::sliceReady, document, [this, document] {
+    const auto showWhenReady = connect(document->viewer, &ImageViewer::sliceReady, document,
+        [this, document, activation = std::move(activation)]() mutable {
+        auto guard = std::move(activation);
         auto *active = activeDocument();
-        document->setAttribute(Qt::WA_ShowWithoutActivating);
+        const bool shouldActivate = active == document;
+        const QString token = shouldActivate && guard ? std::exchange(guard->token, {}) : QString{};
+        if (!token.isEmpty()) qputenv("XDG_ACTIVATION_TOKEN", token.toUtf8());
+        document->setAttribute(Qt::WA_ShowWithoutActivating, !shouldActivate);
         document->show();
+        document->setAttribute(Qt::WA_ShowWithoutActivating, false);
         setActiveDocument(active);
         if (active && active->isVisible()) {
             active->raise();
             active->activateWindow();
+            if (shouldActivate) active->viewer->setFocus();
         }
+        if (!token.isEmpty()) qunsetenv("XDG_ACTIVATION_TOKEN");
     }, Qt::SingleShotConnection);
     connect(document->viewer, &ImageViewer::loadFailed, this, [this, document, showWhenReady](const QString &error) {
         if (disconnect(showWhenReady)) document->close();
@@ -1222,16 +1252,19 @@ void MainWindow::pasteImage(bool systemImage, bool newImage)
     });
 }
 
-void MainWindow::importRaw(const QString &path)
+void MainWindow::importRaw(const QString &path, std::shared_ptr<PendingActivation> activation)
 {
+    if (activation && !activation->token.isEmpty())
+        activateApplicationWindow(this, std::exchange(activation->token, {}));
     const auto options = showRawImportDialog(this, path);
     if (!options) return;
     auto output = std::make_shared<Image>();
     jobs_.submit(tr("Importing raw data"),
         [path, options = *options, output](auto stop, auto progress) { *output = readImage(path, options, stop, progress); },
-        [this, path, output](auto error) {
-            if (showJobError(error)) return;
-            addDocument(*output);
+        [this, path, output, activation = std::move(activation)](auto error) mutable {
+            auto guard = std::move(activation);
+            if (error) { guard.reset(); showJobError(error); return; }
+            addDocument(*output, {}, std::nullopt, std::move(guard));
             recentFiles_.removeAll(path);
             recentFiles_.prepend(path);
             while (recentFiles_.size() > 12) recentFiles_.removeLast();
@@ -1239,8 +1272,11 @@ void MainWindow::importRaw(const QString &path)
         });
 }
 
-void MainWindow::openPaths(const QStringList &paths)
+void MainWindow::openPaths(const QStringList &paths, const QString &activationToken)
 {
+    auto activation = activationToken.isEmpty()
+        ? std::shared_ptr<PendingActivation>{}
+        : std::make_shared<PendingActivation>(this, activationToken);
     QSet<QString> metaImagePayloads;
     for (const auto &path : paths) {
         const QFileInfo info(path);
@@ -1267,7 +1303,7 @@ void MainWindow::openPaths(const QStringList &paths)
         // followed by other files in the same selection.
         if (!info.isDir() && (suffix == "raw" || suffix == "bin")) {
             const auto key = info.exists() ? info.canonicalFilePath() : info.absoluteFilePath();
-            if (!explicitRaw.contains(key)) { explicitRaw.insert(key); openFiles({path}); }
+            if (!explicitRaw.contains(key)) { explicitRaw.insert(key); openFiles({path}, activation); }
         } else pending.append(path);
     }
     if (pending.isEmpty()) return;
@@ -1279,11 +1315,13 @@ void MainWindow::openPaths(const QStringList &paths)
             plan->errors.append(QString::fromUtf8(error.what()));
             plan->images.removeIf([](const auto &image) { return image.dicomBytes || image.paths.size() > 1; });
         }
-    }, [this, plan, explicitRaw](auto error) {
-        if (showJobError(error)) return;
+    }, [this, plan, explicitRaw, activation = std::move(activation)](auto error) mutable {
+        auto guard = std::move(activation);
+        if (error) { guard.reset(); showJobError(error); return; }
         for (const auto &image : plan->images) {
             if (image.paths.size() == 1) {
-                if (explicitRaw.isEmpty() || !explicitRaw.contains(QFileInfo(image.paths.front()).canonicalFilePath())) openFiles(image.paths);
+                if (explicitRaw.isEmpty() || !explicitRaw.contains(QFileInfo(image.paths.front()).canonicalFilePath()))
+                    openFiles(image.paths, guard);
                 continue;
             }
             auto output = std::make_shared<Image>();
@@ -1291,8 +1329,10 @@ void MainWindow::openPaths(const QStringList &paths)
             jobs_.submit(tr("Reading DICOM %1").arg(QFileInfo(paths.front()).fileName()),
                 [paths, output](auto stop, auto progress) {
                     *output = readDicomSeries(paths, stop, progress);
-                }, [this, paths, output](auto error) {
+                }, [this, paths, output, activation = guard](auto error) mutable {
+                    auto dicomGuard = std::move(activation);
                     if (error) {
+                        dicomGuard.reset();
                         try { std::rethrow_exception(error); }
                         catch (const std::exception &exception) {
                             showError(tr("Could not import DICOM %1:\n%2").arg(paths.front(), QString::fromUtf8(exception.what())));
@@ -1300,28 +1340,30 @@ void MainWindow::openPaths(const QStringList &paths)
                         catch (...) { showJobError(error); }
                         return;
                     }
-                    addDocument(*output);
+                    addDocument(*output, {}, std::nullopt, std::move(dicomGuard));
                 });
         }
+        guard.reset();
         if (!plan->errors.isEmpty()) showError(plan->errors.join('\n'));
     });
 }
 
-void MainWindow::openFiles(const QStringList &paths)
+void MainWindow::openFiles(const QStringList &paths, std::shared_ptr<PendingActivation> activation)
 {
     for (const auto &path : paths) {
         if (path.isEmpty()) continue;
         if ((QFileInfo(path).suffix().compare("raw", Qt::CaseInsensitive) == 0 ||
              QFileInfo(path).suffix().compare("bin", Qt::CaseInsensitive) == 0) &&
             !QFileInfo::exists(path + ".json")) {
-            importRaw(path);
+            importRaw(path, activation);
         } else {
             auto output = std::make_shared<Image>();
             jobs_.submit(tr("Opening %1").arg(QFileInfo(path).fileName()),
                 [path, output](auto stop, auto progress) { *output = readImage(path, {}, stop, progress); },
-                [this, path, output](auto error) {
-                    if (showJobError(error)) return;
-                    addDocument(*output);
+                [this, path, output, activation](auto error) mutable {
+                    auto guard = std::move(activation);
+                    if (error) { guard.reset(); showJobError(error); return; }
+                    addDocument(*output, {}, std::nullopt, std::move(guard));
                     recentFiles_.removeAll(path);
                     recentFiles_.prepend(path);
                     while (recentFiles_.size() > 12) recentFiles_.removeLast();
@@ -1570,5 +1612,9 @@ void MainWindow::dropEvent(QDropEvent *event)
 {
     QStringList paths;
     for (const auto &url : event->mimeData()->urls()) if (url.isLocalFile()) paths.append(url.toLocalFile());
-    if (!paths.isEmpty()) { openPaths(paths); event->acceptProposedAction(); }
+    if (!paths.isEmpty()) {
+        if (isVisible()) activateApplicationWindow(this);
+        openPaths(paths);
+        event->acceptProposedAction();
+    }
 }

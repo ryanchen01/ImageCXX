@@ -41,6 +41,12 @@ target_link_directories(imagecxx_io INTERFACE ${ITK_LIBRARY_DIRS})
 add_library(imagecxx_app STATIC app/command_registry.cpp app/processing_commands.cpp app/job_scheduler.cpp
     app/batch.cpp app/update_release.cpp)
 target_link_libraries(imagecxx_app PUBLIC imagecxx_core imagecxx_processing imagecxx_io)
+if(APPLE)
+    enable_language(OBJCXX)
+    target_sources(imagecxx_app PRIVATE app/platform_activation_mac.mm)
+    set_source_files_properties(app/platform_activation_mac.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(imagecxx_app PRIVATE "-framework AppKit")
+endif()
 
 add_library(imagecxx_viewer STATIC viewer/image_viewer.cpp viewer/slice_canvas.cpp)
 target_link_libraries(imagecxx_viewer PUBLIC imagecxx_core Qt6::Widgets PRIVATE Qt6::GuiPrivate)
@@ -55,7 +61,7 @@ qt_add_qml_module(imagecxx_plots URI ImageCXX.Plots VERSION 1.0 NO_PLUGIN
 
 add_library(imagecxx_ui STATIC mainwindow.cpp ui/mainwindow_panels.cpp ui/mainwindow_analysis.cpp
     ui/dialogs.cpp ui/clipboard.cpp ui/image_window.cpp ui/document_widget.cpp ui/overlay_window.cpp)
-target_link_libraries(imagecxx_ui PUBLIC imagecxx_app imagecxx_viewer imagecxx_plots Qt6::Widgets Qt6::Svg Qt6::PrintSupport)
+target_link_libraries(imagecxx_ui PUBLIC imagecxx_app imagecxx_viewer imagecxx_plots Qt6::Widgets Qt6::Svg Qt6::PrintSupport PRIVATE Qt6::GuiPrivate)
 qt_add_resources(imagecxx_ui imagecxx_icons PREFIX "/" BASE "resources" FILES
     resources/icons/open.svg resources/icons/pointer.svg resources/icons/rectangle.svg resources/icons/ellipse.svg
     resources/icons/polygon.svg resources/icons/line.svg resources/icons/measure.svg
@@ -130,6 +136,10 @@ if(BUILD_TESTING)
     add_executable(imagecxx_file_open_tests tests/file_open_tests.cpp app/file_open_service.cpp)
     target_include_directories(imagecxx_file_open_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(imagecxx_file_open_tests PRIVATE Qt6::Widgets Qt6::Network GTest::gtest)
+    if(APPLE)
+        target_sources(imagecxx_file_open_tests PRIVATE app/platform_activation_mac.mm)
+        target_link_libraries(imagecxx_file_open_tests PRIVATE "-framework AppKit")
+    endif()
     add_test(NAME file_open_integration COMMAND imagecxx_file_open_tests)
     set_tests_properties(file_open_integration PROPERTIES TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     include(GoogleTest)

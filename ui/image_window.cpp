@@ -1,5 +1,6 @@
 #include "image_window.h"
 #include <QCoreApplication>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QScreen>
@@ -10,8 +11,15 @@
 #include <QVBoxLayout>
 #include <algorithm>
 #include <limits>
+#ifdef Q_OS_LINUX
+#include <qpa/qplatformnativeinterface.h>
+#endif
 
 namespace imagecxx {
+#ifdef Q_OS_MACOS
+void activateMacApplication();
+#endif
+
 void keepWindowOnScreen(QWidget *window)
 {
     if (!window->screen() || window->isMaximized() || window->isFullScreen()) return;
@@ -23,6 +31,63 @@ void keepWindowOnScreen(QWidget *window)
         std::clamp(frame.x(), available.left(), std::max(available.left(), available.right() - frame.width() + 1)),
         std::clamp(frame.y(), available.top(), std::max(available.top(), available.bottom() - frame.height() + 1)));
     window->move(window->pos() + topLeft - frame.topLeft());
+}
+
+void activateApplicationWindow(QWidget *window, const QString &activationToken, const QString &startupId)
+{
+    if (!window) return;
+#ifdef Q_OS_LINUX
+    const QString platform = QGuiApplication::platformName();
+    bool appliedWaylandToken = false;
+    if (platform.startsWith(QStringLiteral("wayland"))) {
+        const QString token = !activationToken.isEmpty() ? activationToken : startupId;
+        if (!token.isEmpty()) {
+            qputenv("XDG_ACTIVATION_TOKEN", token.toUtf8());
+            appliedWaylandToken = true;
+        }
+    } else if (platform == QStringLiteral("xcb")) {
+        if (auto *native = QGuiApplication::platformNativeInterface()) {
+            if (!startupId.isEmpty()) {
+                if (auto setStartupId = native->nativeResourceFunctionForIntegration(QByteArrayLiteral("setstartupid"))) {
+                    const QByteArray bytes = startupId.toUtf8();
+                    reinterpret_cast<void (*)(const char *)>(reinterpret_cast<QFunctionPointer>(setStartupId))(bytes.constData());
+                }
+            }
+            if (auto *screen = window->screen() ? window->screen() : QGuiApplication::primaryScreen()) {
+                quint32 timestamp = 0;
+                const qsizetype marker = startupId.lastIndexOf(QStringLiteral("_TIME"));
+                if (marker >= 0) {
+                    bool ok = false;
+                    const quint32 parsed = startupId.mid(marker + 5).toUInt(&ok);
+                    if (ok && parsed != 0) timestamp = parsed;
+                }
+                if (timestamp == 0)
+                    timestamp = static_cast<quint32>(reinterpret_cast<quintptr>(
+                        native->nativeResourceForScreen(QByteArrayLiteral("gettimestamp"), screen)));
+                if (timestamp != 0) {
+                    if (auto setAppTime = native->nativeResourceFunctionForScreen(QByteArrayLiteral("setapptime")))
+                        reinterpret_cast<void (*)(QScreen *, quint32)>(reinterpret_cast<QFunctionPointer>(setAppTime))(screen, timestamp);
+                    if (auto setAppUserTime = native->nativeResourceFunctionForScreen(QByteArrayLiteral("setappusertime")))
+                        reinterpret_cast<void (*)(QScreen *, quint32)>(reinterpret_cast<QFunctionPointer>(setAppUserTime))(screen, timestamp);
+                }
+            }
+        }
+    }
+#elif defined(Q_OS_MACOS)
+    Q_UNUSED(activationToken);
+    Q_UNUSED(startupId);
+    activateMacApplication();
+#else
+    Q_UNUSED(activationToken);
+    Q_UNUSED(startupId);
+#endif
+    if (window->isMinimized()) window->showNormal();
+    else if (!window->isVisible()) window->show();
+    window->raise();
+    window->activateWindow();
+#ifdef Q_OS_LINUX
+    if (appliedWaylandToken) qunsetenv("XDG_ACTIVATION_TOKEN");
+#endif
 }
 
 std::array<std::size_t, 3> orthogonalAxes(bool orthogonal, int index)
