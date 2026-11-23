@@ -307,6 +307,41 @@ TEST(Desktop, InvalidDicomSeriesDoesNotBlockOtherImports)
     EXPECT_TRUE(errors.front().contains(paths.front()));
 }
 
+TEST(Desktop, HoverShowsRescaledDicomIntensity)
+{
+    QTemporaryDir directory;
+    ASSERT_TRUE(directory.isValid());
+    const auto path = directory.filePath("ct.dcm");
+    ImageMetadata metadata;
+    metadata.axes = {{"X", 1, 0, "mm"}, {"Y", 1, 0, "mm"}};
+    metadata.intensityScale = 1.5;
+    metadata.intensityOffset = -1024;
+    metadata.intensityUnit = "HU";
+    auto image = Image::allocate(PixelType::UInt16, {4, 4}, metadata);
+    image.setValue(std::array<std::size_t, 2>{1, 2}, 201);
+    image.setValue(std::array<std::size_t, 2>{2, 2}, 2048);
+    writeDicom(image, path);
+
+    MainWindow window;
+    window.openPaths({path});
+    ASSERT_TRUE(finishJobs(window));
+    auto *document = window.activeDocument();
+    ASSERT_NE(document, nullptr);
+    ASSERT_TRUE(waitFor([&] { return document->isVisible(); }));
+    EXPECT_DOUBLE_EQ(document->image.sample(1, 2), 201);
+
+    auto *viewer = document->viewer;
+    for (const auto &[x, expected] : {std::pair{1, "X 1   Y 2   Z 0   V -722.5 HU (201)"},
+                                      std::pair{2, "X 2   Y 2   Z 0   V 2048 HU"}}) {
+        const auto position = viewer->imageToWidget({x + 0.5, 2.5});
+        QMouseEvent move(QEvent::MouseMove, position, position, Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(viewer, &move);
+        QStringList statusLabels;
+        for (auto *label : window.statusBar()->findChildren<QLabel *>()) statusLabels.append(label->text());
+        EXPECT_TRUE(statusLabels.contains(expected)) << statusLabels.join(" | ").toStdString();
+    }
+}
+
 TEST(Desktop, RevertReloadsContentDetectedDicom)
 {
     QTemporaryDir directory;
