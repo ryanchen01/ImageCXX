@@ -27,6 +27,15 @@
 #include <optional>
 #include <limits>
 #include <stdexcept>
+#ifdef Q_OS_WIN
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 using namespace imagecxx;
 
@@ -1834,4 +1843,59 @@ TEST(Viewer, ResizeUpdatesCanvasTransformBeforePainting)
         EXPECT_LT(displayColor(viewer, {180, 50}).red(), 5);
         EXPECT_GT(viewer.gpuCacheBytes(), 0u);
     }
+    const auto children = viewer.findChildren<QWidget *>(QString{}, Qt::FindDirectChildrenOnly);
+    ASSERT_GE(children.size(), 2);
+    EXPECT_EQ(children.last()->geometry(), viewer.rect());
+    EXPECT_NE(children.last(), canvas);
+    auto *slider = document.findChild<QSlider *>("sliceSlider");
+    ASSERT_NE(slider, nullptr);
+    EXPECT_TRUE(document.rect().contains(slider->geometry()));
+    EXPECT_GT(slider->geometry().top(), viewer.geometry().bottom());
 }
+
+#ifdef Q_OS_WIN
+TEST(Viewer, WindowsShrinkSizeInvalidatesClientArea)
+{
+    struct NativeImageWindow final : ImageWindow {
+        using ImageWindow::nativeEvent;
+    } window;
+    window.resize(400, 300);
+    window.show();
+    QApplication::processEvents();
+
+    HWND hwnd = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, L"STATIC", L"",
+                                WS_POPUP | WS_VISIBLE, 0, 0, 400, 300,
+                                nullptr, nullptr, nullptr, nullptr);
+    ASSERT_NE(hwnd, nullptr);
+    auto sendSize = [&](WPARAM kind, int width, int height) {
+        MSG msg{};
+        msg.hwnd = hwnd;
+        msg.message = WM_SIZE;
+        msg.wParam = kind;
+        msg.lParam = MAKELPARAM(width, height);
+        qintptr result = 0;
+        EXPECT_FALSE(window.nativeEvent("windows_generic_MSG", &msg, &result));
+    };
+
+    ValidateRect(hwnd, nullptr);
+    sendSize(SIZE_RESTORED, 400, 300);
+    EXPECT_FALSE(GetUpdateRect(hwnd, nullptr, FALSE));
+
+    sendSize(SIZE_RESTORED, 500, 360);
+    EXPECT_FALSE(GetUpdateRect(hwnd, nullptr, FALSE));
+
+    sendSize(SIZE_RESTORED, 450, 360);
+    EXPECT_TRUE(GetUpdateRect(hwnd, nullptr, FALSE));
+
+    ValidateRect(hwnd, nullptr);
+    sendSize(SIZE_RESTORED, 420, 320);
+    EXPECT_TRUE(GetUpdateRect(hwnd, nullptr, FALSE));
+
+    ValidateRect(hwnd, nullptr);
+    sendSize(SIZE_MINIMIZED, 0, 0);
+    sendSize(SIZE_RESTORED, 300, 250);
+    EXPECT_FALSE(GetUpdateRect(hwnd, nullptr, FALSE));
+
+    DestroyWindow(hwnd);
+}
+#endif

@@ -1,6 +1,7 @@
 #pragma once
 #include "viewer/image_viewer.h"
 #include <QList>
+#include <QSize>
 #include <QWidget>
 #include <array>
 
@@ -32,5 +33,10 @@ public:
     ImageViewer *viewer;
 protected:
     void showEvent(QShowEvent *event) override;
+#ifdef Q_OS_WIN
+    bool nativeEvent(const QByteArray &eventType, void *message, qintptr *result) override;
+private:
+    QSize lastNativeClientSize_;
+#endif
 };
 } // namespace imagecxx

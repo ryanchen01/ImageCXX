@@ -63,7 +63,6 @@ void SliceCanvas::initialize(QRhiCommandBuffer *)
     }
     if (gpu->pipeline
         && (gpu->pipeline->sampleCount() != sampleCount()
-            || !gpu->renderPassDesc
             || !gpu->renderPassDesc->isCompatible(renderTarget()->renderPassDescriptor()))) {
         gpu->pipeline.reset();
         gpu->renderPassDesc.reset();
