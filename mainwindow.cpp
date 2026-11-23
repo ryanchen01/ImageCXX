@@ -58,6 +58,7 @@
 #include <QUuid>
 #include <QVBoxLayout>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -1161,7 +1162,11 @@ DocumentWidget *MainWindow::addDocument(Image image, const QString &lut, std::op
     });
     connect(document, &DocumentWidget::pixelHovered, this, [this, document](std::size_t x, std::size_t y, std::size_t z, double value) {
         if (activeDocument() != document) return;
-        pixelStatusText_ = tr("X %1   Y %2   Z %3   V %4").arg(x).arg(y).arg(z).arg(value, 0, 'g', 12);
+        const auto &metadata = document->image.metadata();
+        const double intensity = value * metadata.intensityScale + metadata.intensityOffset;
+        pixelStatusText_ = tr("X %1   Y %2   Z %3   V %4").arg(x).arg(y).arg(z).arg(intensity, 0, 'g', 12);
+        if (!metadata.intensityUnit.isEmpty()) pixelStatusText_ += " " + metadata.intensityUnit;
+        if (intensity != value && !std::isnan(value)) pixelStatusText_ += tr(" (%1)").arg(value, 0, 'g', 12);
         updatePixelStatus();
     });
     connect(document, &DocumentWidget::viewError, this, [this](const QString &error) { statusBar()->showMessage(error, 15000); });
