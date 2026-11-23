@@ -619,13 +619,18 @@ void ImageViewer::setOverlayLayers(const QList<OverlayLayer> &layers)
     updateCanvas();
 }
 
-void ImageViewer::fitToWindow()
+void ImageViewer::applyFitTransform()
 {
-    d->fitted = true;
     d->pan = {};
     if (!d->image.empty())
         d->zoom = std::max(minimumZoom, std::min(double(width()) / double(d->image.width()),
                                         double(height()) / (double(d->image.height()) * d->pixelAspect)));
+}
+
+void ImageViewer::fitToWindow()
+{
+    d->fitted = true;
+    applyFitTransform();
     updateCanvas();
     Q_EMIT zoomChanged(d->zoom);
     Q_EMIT viewTransformChanged();
@@ -865,20 +870,14 @@ void ImageViewer::updateCanvas()
 void ImageViewer::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
-    if (d->fitted) {
-        d->pan = {};
-        if (!d->image.empty())
-            d->zoom = std::max(minimumZoom, std::min(double(width()) / double(d->image.width()),
-                                            double(height()) / (double(d->image.height()) * d->pixelAspect)));
-    }
+    if (d->fitted) applyFitTransform();
     syncCanvas();
     const QRect bounds = rect();
-    const bool canvasResized = d->canvas->size() != bounds.size();
-    const bool overlayResized = d->overlay->size() != bounds.size();
     d->canvas->setGeometry(bounds);
     d->overlay->setGeometry(bounds);
-    if (!canvasResized) d->canvas->update();
-    if (!overlayResized) d->overlay->update();
+    d->overlay->raise();
+    d->canvas->update();
+    d->overlay->update();
     if (d->fitted) {
         Q_EMIT zoomChanged(d->zoom);
         Q_EMIT viewTransformChanged();
