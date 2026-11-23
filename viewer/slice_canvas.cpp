@@ -35,6 +35,8 @@ struct SliceCanvas::GpuState {
         QByteArray uploadedMask;
         bool boundLinear = false;
     };
+    QRhi *rhi = nullptr;
+    std::unique_ptr<QRhiRenderPassDescriptor> renderPassDesc;
     std::vector<std::unique_ptr<Resources>> resources;
     std::unique_ptr<QRhiSampler> nearest, smooth;
     std::unique_ptr<QRhiGraphicsPipeline> pipeline;
@@ -55,14 +57,26 @@ SliceCanvas::~SliceCanvas()
 
 void SliceCanvas::initialize(QRhiCommandBuffer *)
 {
-    releaseResources();
-    gpu->nearest.reset(rhi()->newSampler(QRhiSampler::Nearest, QRhiSampler::Nearest,
-                                         QRhiSampler::None, QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge));
-    gpu->smooth.reset(rhi()->newSampler(QRhiSampler::Linear, QRhiSampler::Linear,
-                                        QRhiSampler::None, QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge));
-    if (!gpu->nearest->create() || !gpu->smooth->create()) {
-        reportError(QCoreApplication::translate("ImageViewer", "Could not create GPU display resources."));
+    if (gpu->rhi != rhi()) {
         releaseResources();
+        gpu->rhi = rhi();
+    }
+    if (gpu->pipeline
+        && (gpu->pipeline->sampleCount() != sampleCount()
+            || !gpu->renderPassDesc
+            || !gpu->renderPassDesc->isCompatible(renderTarget()->renderPassDescriptor()))) {
+        gpu->pipeline.reset();
+        gpu->renderPassDesc.reset();
+    }
+    if (!gpu->nearest || !gpu->smooth) {
+        gpu->nearest.reset(rhi()->newSampler(QRhiSampler::Nearest, QRhiSampler::Nearest,
+                                             QRhiSampler::None, QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge));
+        gpu->smooth.reset(rhi()->newSampler(QRhiSampler::Linear, QRhiSampler::Linear,
+                                            QRhiSampler::None, QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge));
+        if (!gpu->nearest->create() || !gpu->smooth->create()) {
+            reportError(QCoreApplication::translate("ImageViewer", "Could not create GPU display resources."));
+            releaseResources();
+        }
     }
 }
 
@@ -206,6 +220,7 @@ void SliceCanvas::render(QRhiCommandBuffer *cb)
         updates->updateDynamicBuffer(slot.uniforms.get(), 0, sizeof(parameters), parameters.data());
     }
     if (!gpu->pipeline) {
+        gpu->renderPassDesc.reset(renderTarget()->renderPassDescriptor()->newCompatibleRenderPassDescriptor());
         gpu->pipeline.reset(rhi()->newGraphicsPipeline());
         gpu->pipeline->setTopology(QRhiGraphicsPipeline::TriangleStrip);
         gpu->pipeline->setShaderStages({
@@ -219,10 +234,11 @@ void SliceCanvas::render(QRhiCommandBuffer *cb)
         blend.dstAlpha = QRhiGraphicsPipeline::OneMinusSrcAlpha;
         gpu->pipeline->setTargetBlends({blend});
         gpu->pipeline->setShaderResourceBindings(gpu->resources.front()->bindings.get());
-        gpu->pipeline->setRenderPassDescriptor(renderTarget()->renderPassDescriptor());
+        gpu->pipeline->setRenderPassDescriptor(gpu->renderPassDesc.get());
         gpu->pipeline->setSampleCount(sampleCount());
-        if (!gpu->pipeline->create()) {
+        if (!gpu->renderPassDesc || !gpu->pipeline->create()) {
             gpu->pipeline.reset();
+            gpu->renderPassDesc.reset();
             updates->release();
             reportError(QCoreApplication::translate("ImageViewer", "Could not create the image shader pipeline."));
             return;
@@ -242,9 +258,11 @@ void SliceCanvas::render(QRhiCommandBuffer *cb)
 void SliceCanvas::releaseResources()
 {
     gpu->pipeline.reset();
+    gpu->renderPassDesc.reset();
     gpu->resources.clear();
     gpu->nearest.reset();
     gpu->smooth.reset();
+    gpu->rhi = nullptr;
     gpuBytes = 0;
 }
 

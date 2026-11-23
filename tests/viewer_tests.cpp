@@ -1759,3 +1759,79 @@ TEST(Viewer, CenteredAspectResizeClampsAtImageEdgesInsteadOfResetting)
     roiDrag(viewer, {80, 55}, {95, 80}, Qt::AltModifier);
     EXPECT_EQ(document.selection->bounds(), QRectF(0, 15, 100, 50));
 }
+
+TEST(Viewer, ResizeUpdatesCanvasTransformBeforePainting)
+{
+    auto image = Image::allocate(PixelType::UInt8, {200, 100});
+    for (std::size_t y = 0; y < 100; ++y)
+        for (std::size_t x = 0; x < 200; ++x)
+            image.setValue(std::array<std::size_t, 2>{x, y}, x < 100 ? 255.0 : 0.0);
+    DocumentWidget document(image);
+    auto &viewer = *document.viewer;
+    auto *canvas = static_cast<detail::SliceCanvas *>(viewer.findChild<QRhiWidget *>());
+    ASSERT_NE(canvas, nullptr);
+
+    int paints = 0;
+    int stalePaints = 0;
+    struct PaintObserver final : QObject {
+        ImageViewer *viewer;
+        detail::SliceCanvas *canvas;
+        int *paints;
+        int *stalePaints;
+        bool eventFilter(QObject *, QEvent *event) override
+        {
+            if (event->type() != QEvent::Paint) return false;
+            ++(*paints);
+            const double expectedZoom = viewer->fitsWindow()
+                ? std::min(double(viewer->width()) / double(viewer->image().width()),
+                           double(viewer->height()) / double(viewer->image().height()))
+                : viewer->zoom();
+            const QSizeF expectedSize(double(viewer->image().width()) * expectedZoom,
+                                      double(viewer->image().height()) * expectedZoom);
+            const QPointF expectedOrigin = viewer->fitsWindow()
+                ? QPointF(viewer->width(), viewer->height()) / 2.0 - QPointF(expectedSize.width(), expectedSize.height()) / 2.0
+                : viewer->imageToWidget({0, 0});
+            const QRectF expected(expectedOrigin, expectedSize);
+            if (canvas->size() != viewer->size()
+                || std::abs(viewer->zoom() - expectedZoom) > 1e-9
+                || std::abs(canvas->imageRect.x() - expected.x()) > 1e-6
+                || std::abs(canvas->imageRect.y() - expected.y()) > 1e-6
+                || std::abs(canvas->imageRect.width() - expected.width()) > 1e-6
+                || std::abs(canvas->imageRect.height() - expected.height()) > 1e-6) {
+                ++(*stalePaints);
+            }
+            return false;
+        }
+    } observer;
+    observer.viewer = &viewer;
+    observer.canvas = canvas;
+    observer.paints = &paints;
+    observer.stalePaints = &stalePaints;
+    canvas->installEventFilter(&observer);
+
+    document.resize(500, 400);
+    document.show();
+    ASSERT_TRUE(waitFor([&viewer, &paints] { return !viewer.image().empty() && paints > 0; }));
+    EXPECT_EQ(stalePaints, 0);
+
+    for (const QSize size : {QSize(600, 460), QSize(540, 420), QSize(420, 340), QSize(320, 260)}) {
+        const int before = paints;
+        document.resize(size);
+        ASSERT_TRUE(waitFor([&paints, before] { return paints > before; }));
+        EXPECT_EQ(stalePaints, 0);
+    }
+
+    viewer.setZoom(1.5);
+    for (const QSize size : {QSize(480, 360), QSize(360, 280)}) {
+        const int before = paints;
+        document.resize(size);
+        ASSERT_TRUE(waitFor([&paints, before] { return paints > before; }));
+        EXPECT_EQ(stalePaints, 0);
+    }
+
+    if (QApplication::platformName() != "offscreen" && QApplication::platformName() != "minimal") {
+        ASSERT_TRUE(waitFor([&viewer] { return displayColor(viewer, {20, 50}).red() > 250; }));
+        EXPECT_LT(displayColor(viewer, {180, 50}).red(), 5);
+        EXPECT_GT(viewer.gpuCacheBytes(), 0u);
+    }
+}

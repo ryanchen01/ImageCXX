@@ -825,7 +825,7 @@ QString ImageViewer::toolDimensions() const
             axes.size() < 2 ? QString{} : axes[1].unit));
 }
 
-void ImageViewer::updateCanvas()
+void ImageViewer::syncCanvas()
 {
     Q_EMIT toolDimensionsChanged(toolDimensions());
     if (!d->image.empty())
@@ -855,17 +855,34 @@ void ImageViewer::updateCanvas()
             d->canvas->layers.append(std::move(rendered));
         }
     }
+}
+void ImageViewer::updateCanvas()
+{
+    syncCanvas();
     d->canvas->update();
     d->overlay->update();
 }
 void ImageViewer::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
-    d->canvas->setGeometry(rect());
-    d->overlay->setGeometry(rect());
-    d->overlay->raise();
-    if (d->fitted) fitToWindow();
-    else updateCanvas();
+    if (d->fitted) {
+        d->pan = {};
+        if (!d->image.empty())
+            d->zoom = std::max(minimumZoom, std::min(double(width()) / double(d->image.width()),
+                                            double(height()) / (double(d->image.height()) * d->pixelAspect)));
+    }
+    syncCanvas();
+    const QRect bounds = rect();
+    const bool canvasResized = d->canvas->size() != bounds.size();
+    const bool overlayResized = d->overlay->size() != bounds.size();
+    d->canvas->setGeometry(bounds);
+    d->overlay->setGeometry(bounds);
+    if (!canvasResized) d->canvas->update();
+    if (!overlayResized) d->overlay->update();
+    if (d->fitted) {
+        Q_EMIT zoomChanged(d->zoom);
+        Q_EMIT viewTransformChanged();
+    }
 }
 void ImageViewer::zoomAt(double scale, QPointF position)
 {
