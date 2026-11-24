@@ -125,8 +125,6 @@ private:
     std::unique_ptr<Private> d;
     void paintOverlays(QPainter &painter, bool printing = false);
     void requestSlice();
-    void applyFitTransform();
-    void syncCanvas();
     void updateCanvas();
     void zoomAt(double scale, QPointF position);
     void completeRoi();

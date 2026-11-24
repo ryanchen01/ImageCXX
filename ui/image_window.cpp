@@ -13,14 +13,6 @@
 #include <limits>
 #ifdef Q_OS_LINUX
 #include <qpa/qplatformnativeinterface.h>
-#elif defined(Q_OS_WIN)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
 #endif
 
 namespace imagecxx {
@@ -227,36 +219,6 @@ void ImageWindow::showEvent(QShowEvent *event)
     // Native frame margins can arrive after the initial show event.
     QTimer::singleShot(0, this, [this] { keepWindowOnScreen(this); });
 }
-
-#ifdef Q_OS_WIN
-bool ImageWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr *result)
-{
-    if (eventType == "windows_generic_MSG" && message) {
-        const auto *msg = static_cast<const MSG *>(message);
-        if (msg->message == WM_SIZE) {
-            if (msg->wParam == SIZE_MINIMIZED) {
-                lastNativeClientSize_ = {};
-            } else if (msg->wParam == SIZE_RESTORED || msg->wParam == SIZE_MAXIMIZED) {
-                const QSize clientSize(int(LOWORD(msg->lParam)), int(HIWORD(msg->lParam)));
-                if (clientSize.isEmpty()) {
-                    lastNativeClientSize_ = {};
-                } else {
-                    // Without CS_HREDRAW|CS_VREDRAW, Win32 skips WM_PAINT when shrinking, so Qt defers
-                    // the resize flush behind a modal-loop timer instead of painting in lockstep like growth.
-                    if (isVisible() && msg->hwnd && !lastNativeClientSize_.isEmpty()
-                        && clientSize != lastNativeClientSize_
-                        && clientSize.width() <= lastNativeClientSize_.width()
-                        && clientSize.height() <= lastNativeClientSize_.height()) {
-                        InvalidateRect(msg->hwnd, nullptr, FALSE);
-                    }
-                    lastNativeClientSize_ = clientSize;
-                }
-            }
-        }
-    }
-    return QWidget::nativeEvent(eventType, message, result);
-}
-#endif
 
 void ImageWindow::resizeToImage(double pixelAspectRatio)
 {
