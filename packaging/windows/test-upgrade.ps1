@@ -114,7 +114,9 @@ try {
 if (@(Get-ImageCXXUninstallEntries $target).Count -ne 0) { throw 'Purging updated install left Uninstall entries behind' }
 
 $handoffTarget = "$fixture/handoff-图像-installed"
-$handoffTemp = "$fixture/handoff-temp"
+$handoffTemp = [IO.Path]::GetFullPath("$fixture/handoff-temp")
+$stubSource = [IO.Path]::GetFullPath("$fixture/handoff-stub.cs")
+$stubExe = [IO.Path]::GetFullPath("$fixture/handoff-stub.exe")
 New-Item -ItemType Directory -Force $handoffTarget, $handoffTemp | Out-Null
 @'
 <Packages><Package><Name>com.ryanchen01.ImageCXX</Name></Package></Packages>
@@ -139,10 +141,10 @@ class Program {
         return 0;
     }
 }
-'@ | Set-Content "$fixture/handoff-stub.cs" -Encoding utf8
-$csc = "$env:SystemRoot/Microsoft.NET/Framework64/v4.0.30319/csc.exe"
-& $csc /nologo "/out:$fixture/handoff-stub.exe" "$fixture/handoff-stub.cs" | Out-Host
-Copy-Item "$fixture/handoff-stub.exe" "$handoffTarget/ImageCXXMaintenanceTool.exe"
+'@ | Set-Content -LiteralPath $stubSource -Encoding utf8
+$csc = "$env:SystemRoot\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+& $csc /nologo "/out:$stubExe" "$stubSource" | Out-Host
+Copy-Item -LiteralPath $stubExe "$handoffTarget/ImageCXXMaintenanceTool.exe"
 
 $normalizedHandoff = [IO.Path]::GetFullPath($handoffTarget).Replace('/', '\').TrimEnd('\')
 New-Item -Path 'HKCU:/Software/ImageCXX' -Force | Out-Null
@@ -154,7 +156,7 @@ try {
     Remove-Item Env:QT_QPA_PLATFORM -ErrorAction SilentlyContinue
     $env:TEMP = $handoffTemp
     $env:TMP = $handoffTemp
-    $psi = [Diagnostics.ProcessStartInfo]::new("$root/dist/ImageCXX-$Version-windows-x86_64.exe")
+    $psi = [Diagnostics.ProcessStartInfo]::new([IO.Path]::GetFullPath("$root/dist/ImageCXX-$Version-windows-x86_64.exe"))
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
     $process = [Diagnostics.Process]::Start($psi)
