@@ -1,19 +1,59 @@
+function psString(value) {
+    return "'" + value.replace(/'/g, "''") + "'";
+}
+
 function Component() {
     installer.installationFinished.connect(function() {
+        if (installer.status !== QInstaller.Success) return;
+        var command = "Add-Type -Namespace ImageCXX -Name Shell -MemberDefinition '[System.Runtime.InteropServices.DllImport(\"shell32.dll\")] public static extern void SHChangeNotify(int eventId, uint flags, System.IntPtr item1, System.IntPtr item2);'; [ImageCXX.Shell]::SHChangeNotify(0x08000000, 0, [System.IntPtr]::Zero, [System.IntPtr]::Zero)";
+        var active = installer.value("ProductUUID", "");
+        var targetDir = installer.value("TargetDir", "");
+        if (active && targetDir) {
+            var root = (installer.value("AllUsers", "") === "true" ? "HKLM:" : "HKCU:") + "\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
+            var nativeTarget = installer.toNativeSeparators(targetDir).replace(/\\+$/, "");
+            // QtIFW creates a new Uninstall key if an older installer ran standalone; prune duplicates for this directory.
+            command += "; $root = " + psString(root)
+                + "; $active = " + psString(active)
+                + "; $target = " + psString(nativeTarget)
+                + "; $tool = $target + '\\ImageCXXMaintenanceTool.exe'"
+                + "; Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue | ForEach-Object {"
+                + " if ($_.PSChildName -ieq $active) { return }"
+                + " $p = Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue;"
+                + " if (-not $p -or $p.DisplayName -ne 'ImageCXX' -or $p.Publisher -ne 'ImageCXX') { return }"
+                + " $loc = if ($p.InstallLocation) { ([string]$p.InstallLocation).Trim().Trim('\"').Replace('/', '\\').TrimEnd('\\') } else { '' };"
+                + " $cmd = if ($p.UninstallString) { ([string]$p.UninstallString).Trim().Trim('\"').Replace('/', '\\') } else { '' };"
+                + " if ($loc -ieq $target -or $cmd -ieq $tool) { Remove-Item -LiteralPath $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue }"
+                + " }";
+        }
         // Registry writes alone do not invalidate the Shell's association cache.
         installer.execute(installer.environmentVariable("SystemRoot") + "/System32/WindowsPowerShell/v1.0/powershell.exe", [
-            "-NoProfile", "-NonInteractive", "-Command",
-            "Add-Type -Namespace ImageCXX -Name Shell -MemberDefinition '[System.Runtime.InteropServices.DllImport(\"shell32.dll\")] public static extern void SHChangeNotify(int eventId, uint flags, System.IntPtr item1, System.IntPtr item2);'; [ImageCXX.Shell]::SHChangeNotify(0x08000000, 0, [System.IntPtr]::Zero, [System.IntPtr]::Zero)"
+            "-NoProfile", "-NonInteractive", "-Command", command
         ]);
     });
 }
 
 Component.prototype.createOperations = function() {
-    installer.setValue("ProductVersion", component.value("Version"));
+    var version = component.value("Version");
+    var productUuid = installer.value("ProductUUID", "");
+    installer.setValue("ProductVersion", version);
     component.createOperations();
     component.addOperation("FakeStopProcessForUpdate", "ImageCXX.exe");
     component.addOperation("GlobalConfig", "HKEY_CURRENT_USER\\Software\\ImageCXX", "InstallDir", "@TargetDir@");
-    component.addOperation("GlobalConfig", "HKEY_CURRENT_USER\\Software\\ImageCXX", "InstalledVersion", component.value("Version"));
+    component.addOperation("GlobalConfig", "HKEY_CURRENT_USER\\Software\\ImageCXX", "InstalledVersion", version);
+    if (!installer.isInstaller() && productUuid) {
+        // QtIFW only calls registerMaintenanceTool() during fresh installs, so refresh Uninstall metadata on updates.
+        var uninstallRoot = installer.value("AllUsers", "") === "true"
+            ? "HKEY_LOCAL_MACHINE" : "HKEY_CURRENT_USER";
+        var uninstallKey = uninstallRoot + "\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\" + productUuid;
+        var now = new Date();
+        var month = now.getMonth() + 1;
+        var day = now.getDate();
+        var installDate = String(now.getFullYear())
+            + (month < 10 ? "0" + month : String(month))
+            + (day < 10 ? "0" + day : String(day));
+        component.addOperation("GlobalConfig", uninstallKey, "DisplayVersion", version);
+        component.addOperation("GlobalConfig", uninstallKey, "InstallDate", installDate);
+    }
     // Offer ImageCXX in Open with and Default apps without replacing the user's choice.
     var classes = "HKEY_CURRENT_USER\\Software\\Classes\\";
     var progId = "ImageCXX.Image";
